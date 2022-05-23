@@ -13,7 +13,7 @@ endif()
 option(USE_CUDA "Use CUDA" ON)
 option(USE_ROCM "Use ROCm" OFF)
 
-if((EXISTS "/bin/hipcc") AND NOT(EXISTS "/bin/nvcc"))
+if(((EXISTS "/bin/hipcc") AND NOT(EXISTS "/bin/nvcc")) OR DEFINED ENV{USE_ROCM})
   message("AMD GPU detected.")
   SET(USE_CUDA OFF)
   SET(USE_ROCM ON)
