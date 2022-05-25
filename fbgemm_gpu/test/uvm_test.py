@@ -25,7 +25,7 @@ else:
 
 if gpu_available:
     # pyre-ignore[21]
-    from fbgemm_gpu.uvm import cudaMemAdvise, cudaMemoryAdvise, cudaMemPrefetchAsync
+    from fbgemm_gpu.uvm import cudaMemAdvise, hipMemoryAdvise, cudaMemPrefetchAsync
 
 from hypothesis import given, settings, Verbosity
 
@@ -78,7 +78,7 @@ class UvmTest(unittest.TestCase):
     @unittest.skipIf(*gpu_unavailable)
     def test_enum(self) -> None:
         # pyre-ignore[16]
-        assert cudaMemoryAdvise.cudaMemAdviseSetAccessedBy.value == 5
+        assert hipMemoryAdvise.hipMemAdviseSetAccessedBy.value == 5
 
     @unittest.skipIf(*gpu_unavailable)
     @given(
@@ -99,7 +99,7 @@ class UvmTest(unittest.TestCase):
         assert torch.ops.fbgemm.uvm_storage(uvm_t)
 
         # pyre-ignore[16]
-        cudaMemAdvise(uvm_t, cudaMemoryAdvise.cudaMemAdviseSetAccessedBy)
+        cudaMemAdvise(uvm_t, hipMemoryAdvise.hipMemAdviseSetAccessedBy)
 
     @unittest.skipIf(*gpu_unavailable)
     @given(
