@@ -162,6 +162,12 @@ transpose_embedding_input(
         using info_t = index_t;
         AT_DISPATCH_INDEX_TYPES(
             indices.scalar_type(), "transpose_embedding_input2", [&] {
+              cudaEvent_t start;
+              cudaEvent_t stop;
+              cudaEventCreate(&start);
+              cudaEventCreate(&stop);
+              float time = 0.0f;
+              cudaEventRecord(start, at::cuda::getCurrentCUDAStream());
               if (!nobag) {
                 linearize_index_kernel<<<
                     div_round_up(B * T, kMaxThreads),
@@ -189,7 +195,12 @@ transpose_embedding_input(
                     linear_indices
                         .packed_accessor32<index_t, 1, RestrictPtrTraits>());
               }
+              cudaEventRecord(stop, at::cuda::getCurrentCUDAStream());
+              cudaEventSynchronize(stop);
+              cudaEventElapsedTime(&time, start, stop);
+              printf("===INFO=== Execution time of linearize_index_kernel: %15.4f\n",time);
               C10_CUDA_KERNEL_LAUNCH_CHECK();
+              cudaEventRecord(start, at::cuda::getCurrentCUDAStream());
               {
                 size_t temp_storage_bytes = 0;
                 AT_CUDA_CHECK(
@@ -222,12 +233,17 @@ transpose_embedding_input(
                         at::cuda::getCurrentCUDAStream(),
                         false));
               }
+              cudaEventRecord(stop, at::cuda::getCurrentCUDAStream());
+              cudaEventSynchronize(stop);
+              cudaEventElapsedTime(&time, start, stop);
+              printf("===INFO=== Execution time of cub::DeviceRadixSort::SortPairs: %15.4f\n",time);
 
               sorted_linear_indices_run = at::empty_like(indices);
               sorted_linear_indices_run_lengths =
                   at::zeros_like(indices, indices.options().dtype(at::kInt));
               sorted_linear_indices_num_runs =
                   at::zeros({1}, indices.options().dtype(at::kInt));
+              cudaEventRecord(start, at::cuda::getCurrentCUDAStream());
 
               {
                 size_t temp_storage_bytes = 0;
@@ -256,7 +272,11 @@ transpose_embedding_input(
                         sorted_linear_indices_num_runs.data_ptr<int32_t>(),
                         linear_indices_sorted.numel(),
                         at::cuda::getCurrentCUDAStream()));
-              }
+              } 
+              cudaEventRecord(stop, at::cuda::getCurrentCUDAStream());
+              cudaEventSynchronize(stop);
+              cudaEventElapsedTime(&time, start, stop);
+              printf("===INFO=== Execution time of cub::DeviceRunLengthEncode::Encode: %15.4f\n",time);
             });
       });
 
