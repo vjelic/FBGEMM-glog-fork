@@ -570,6 +570,8 @@ Tensor {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else ""
                 const int64_t  *indices;
                 const int64_t  *offsets;
                 int64_t    pooling_mode;
+		const int32_t* D_offsets;
+		const int64_t* weights_offsets;
                 {% if weighted %}
                 float   *indice_weights;
                 {% endif %}
@@ -586,6 +588,8 @@ Tensor {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else ""
                 args.emb_table = dev_weights.packed_accessor64<float, 1, at::RestrictPtrTraits>().data();
             args.indices = indices.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>().data();
             args.offsets = offsets.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>().data();
+	    args.D_offsets = D_offsets.packed_accessor32<int32_t, 1, at::RestrictPtrTraits>().data();
+	    args.weights_offsets = weights_offsets.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>().data();
             args.pooling_mode = pooling_mode;
             {% if weighted %}
             args.indice_weights = indice_weights.packed_accessor32<float, 1, at::RestrictPtrTraits>().data();
@@ -595,24 +599,24 @@ Tensor {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else ""
             args.num_rows = E;
             args.num_tables = (uint32_t) T;
 
-            {% for kDimSize in [64, 128, 192, 256, 384, 512, 640, 768, 896, 1024] %}
+            {% for kDimSize in [64, 128, 192, 256, 384, 512] %}
             if (max_D <= {{ kDimSize }}) {
                 if (prec == "fp16") {
-                    hipLaunchKernelGGL(split_tbe_fwd_{{ wdesc }}_hip_kernel_fp16_e{{ kDimSize }},
+                    hipLaunchKernelGGL(split_tbe_fwd_{{ wdesc }}_hip_kernel_fp16,
                         dim3(grids[0], grids[1], grids[2]),
                         dim3(blocks[0], blocks[1], blocks[2]),
                         0, 0,
-                        (float *)args.output, (const half *)args.emb_table, args.indices, args.offsets, args.pooling_mode,
+                        (float *)args.output, (const half *)args.emb_table, args.indices, args.offsets, args.pooling_mode, args.D_offsets, args.weights_offsets,
                         {% if weighted %}
                         args.indice_weights,
                         {% endif %}
                         args.emb_dim, args.batch, args.num_rows, args.num_tables);
                 } else {    // only 2 emb_t: fp16, fp32 for now
-                    hipLaunchKernelGGL(split_tbe_fwd_{{ wdesc }}_hip_kernel_fp32_e{{ kDimSize }},
+                    hipLaunchKernelGGL(split_tbe_fwd_{{ wdesc }}_hip_kernel_fp32,
                         dim3(grids[0], grids[1], grids[2]),
                         dim3(blocks[0], blocks[1], blocks[2]),
                         0, 0,
-                        (float *)args.output, (const float *)args.emb_table, args.indices, args.offsets, args.pooling_mode,
+                        (float *)args.output, (const float *)args.emb_table, args.indices, args.offsets, args.pooling_mode, args.D_offsets, args.weights_offsets,
                         {% if weighted %}
                         args.indice_weights,
                         {% endif %}

@@ -25,48 +25,34 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 
-#define SPLIT_TBE_FWD_KERNEL(emb_prec, emb_type, embedding_dim, bag_prefetch, bag_unroll) \
-    extern "C" __global__ void split_tbe_fwd_unweighted_hip_kernel_ ## emb_prec ## _e ## embedding_dim ( \
+#define SPLIT_TBE_FWD_KERNEL(emb_prec, emb_type, bag_prefetch, bag_unroll) \
+    extern "C" __global__ void split_tbe_fwd_unweighted_hip_kernel_ ## emb_prec ( \
             float * p_output,              \
             const emb_type * p_emb_table,  \
             const int64_t * p_indices,     \
             const int64_t * p_offsets,     \
             const int64_t pooling_mode,    \
+            const int32_t * D_offsets,    \
+            const int64_t* weight_offsets, \
             uint32_t emb_dim,              \
             uint32_t batch,                \
             uint32_t num_rows,             \
             uint32_t num_tables);          \
     \
-    extern "C" __global__ void split_tbe_fwd_weighted_hip_kernel_ ## emb_prec ## _e ## embedding_dim ( \
+    extern "C" __global__ void split_tbe_fwd_weighted_hip_kernel_ ## emb_prec ( \
             float * p_output,              \
             const emb_type * p_emb_table,  \
             const int64_t * p_indices,     \
             const int64_t * p_offsets,     \
             const int64_t pooling_mode,    \
+            const int32_t * D_offsets,    \
+            const int64_t* weight_offsets, \
             const float * p_indice_weights,\
             uint32_t emb_dim,              \
             uint32_t batch,                \
             uint32_t num_rows,             \
             uint32_t num_tables)
 
-SPLIT_TBE_FWD_KERNEL(fp16,  half,  64, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 128, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 192, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 256, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 384, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 512, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 640, 2, 8);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 768, 2, 8);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 896, 2, 4);
-SPLIT_TBE_FWD_KERNEL(fp16,  half, 1024, 2, 4);
+SPLIT_TBE_FWD_KERNEL(fp16,  half, 2, 16);
 
-SPLIT_TBE_FWD_KERNEL(fp32, float,  64, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 128, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 192, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 256, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 384, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 512, 2, 16);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 640, 2, 8);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 768, 2, 8);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 896, 2, 4);
-SPLIT_TBE_FWD_KERNEL(fp32, float, 1024, 2, 4);
+SPLIT_TBE_FWD_KERNEL(fp32, float, 2, 16);
