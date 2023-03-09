@@ -91,14 +91,6 @@ inline bool torch_tensor_empty_or_on_cpu_check(
       #x " must be empty or a CPU tensor; it is currently on device ", \
       torch_tensor_device_name(x))
 
-#define TENSORS_HAVE_SAME_TYPE(x, y)                       \
-  TORCH_CHECK(                                             \
-      (x).dtype() == (y).dtype(),                          \
-      #x " must have the same type as " #y " types were ", \
-      (x).dtype().name(),                                  \
-      " and ",                                             \
-      (y).dtype().name())
-
 #define TENSOR_ON_CUDA_GPU(x)                                  \
   TORCH_CHECK(                                                 \
       torch_tensor_on_cuda_gpu_check(x),                       \
@@ -108,6 +100,12 @@ inline bool torch_tensor_empty_or_on_cpu_check(
 #define TENSOR_EMPTY_OR_ON_CUDA_GPU(x)                                  \
   TORCH_CHECK(                                                          \
       torch_tensor_empty_or_on_cuda_gpu_check(x),                       \
+      #x " must be empty or a CUDA tensor; it is currently on device ", \
+      torch_tensor_device_name(x))
+
+#define TENSORS_EMPTY_OR_ON_SAME_DEVICE(x, y)                           \
+  TORCH_CHECK(                                                          \
+      torch_tensor_on_same_device_check(x, y) || (x.numel() == 0),      \
       #x " must be empty or a CUDA tensor; it is currently on device ", \
       torch_tensor_device_name(x))
 
@@ -138,6 +136,10 @@ inline bool torch_tensor_empty_or_on_cpu_check(
 #define TENSOR_CONTIGUOUS(x) \
   TORCH_CHECK((x).is_contiguous(), #x " must be contiguous")
 
+#define TENSOR_CONTIGUOUS_AND_ON_CPU(x) \
+  TENSOR_ON_CPU(x);                     \
+  TENSOR_CONTIGUOUS(x)
+
 #define TENSOR_CONTIGUOUS_AND_ON_CUDA_GPU(x) \
   TENSOR_ON_CUDA_GPU(x);                     \
   TENSOR_CONTIGUOUS(x)
@@ -149,6 +151,28 @@ inline bool torch_tensor_empty_or_on_cpu_check(
       " dimension(s). "                      \
       "Found ",                              \
       (ten).ndimension())
+
+#define TENSOR_TYPE_MUST_BE(ten, typ)                                      \
+  TORCH_CHECK(                                                             \
+      (ten).scalar_type() == typ,                                          \
+      "Tensor '" #ten "' must have scalar type " #typ " but it had type ", \
+      (ten).dtype().name())
+
+#define TENSOR_NDIM_EXCEEDS(ten, dims)               \
+  TORCH_CHECK(                                       \
+      (ten).dim() > (dims),                          \
+      "Tensor '" #ten "' must have more than " #dims \
+      " dimension(s). "                              \
+      "Found ",                                      \
+      (ten).ndimension())
+
+#define TENSORS_HAVE_SAME_NUMEL(x, y)                                  \
+  TORCH_CHECK(                                                         \
+      (x).numel() == (y).numel(),                                      \
+      #x " must have the same number of elements as " #y " They had ", \
+      (x).numel(),                                                     \
+      " and ",                                                         \
+      (y).numel())
 
 /// Determine an appropriate CUDA block count along the x axis
 ///
@@ -330,3 +354,69 @@ struct StackArray {
             false, "unsupported number of jagged dim ", num_jagged_dim);      \
     }                                                                         \
   });
+
+// TODO: Merge this with the device code
+template <typename scalar_t>
+void binary_search_range_cpu(
+    int* found,
+    const scalar_t* arr,
+    const scalar_t target,
+    const int num_entries) {
+  const int last_entry = num_entries - 1;
+  int start = 0, end = last_entry;
+  int found_ = -1;
+  while (start <= end) {
+    int mid = start + (end - start) / 2;
+    scalar_t mid_offset = arr[mid];
+    if (target == mid_offset) {
+      if (mid != last_entry && target != arr[last_entry]) {
+        // Do linear scan in case of duplicate data (We assume that the
+        // number of duplicates is small.  This can we very bad if the
+        // number of duplicates is large)
+        for (int i = mid + 1; i < num_entries; i++) {
+          if (target != arr[i]) {
+            found_ = i;
+            break;
+          }
+        }
+      }
+      break;
+    } else if (target < mid_offset) {
+      if (mid == 0) {
+        found_ = 0;
+        break;
+      } else if (mid - 1 >= 0 && target > arr[mid - 1]) {
+        found_ = mid;
+        break;
+      }
+      end = mid - 1;
+    } else {
+      if (mid + 1 <= last_entry && target < arr[mid + 1]) {
+        found_ = mid + 1;
+        break;
+      }
+      start = mid + 1;
+    }
+  }
+  *found = found_;
+}
+
+template <int x>
+struct log2_calc_ {
+  enum { value = log2_calc_<(x >> 1)>::value + 1 };
+};
+template <>
+struct log2_calc_<0> {
+  enum { value = 0 };
+};
+
+template <int x>
+struct log2_calc {
+  enum { value = log2_calc_<(x - 1)>::value };
+};
+#if 0
+template <>
+struct log2_calc<0> { enum { value = 0 }; };
+template <>
+struct log2_calc<1> { enum { value = 0 }; };
+#endif

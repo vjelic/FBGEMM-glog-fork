@@ -1799,6 +1799,10 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         dims: List[int] = [e[2] for e in embedding_specs]
         weights_tys: List[SparseType] = [e[3] for e in embedding_specs]
         locations: List[EmbeddingLocation] = [e[4] for e in embedding_specs]
+        # if target device is meta then we set use_cpu based on the embedding location
+        # information in embedding_specs.
+        if self.current_device.type == "meta":
+            self.use_cpu = all(loc == EmbeddingLocation.HOST for loc in locations)
 
         if row_alignment is None:
             self.row_alignment: int = 1 if self.use_cpu else 16
@@ -1904,8 +1908,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             0, device=self.current_device, dtype=torch.uint8
         )
 
-        self.weights_uvm: torch.Tensor = torch.empty(
-            0, device=self.current_device, dtype=torch.uint8
+        self.weights_uvm: torch.Tensor = torch.empty(0, dtype=torch.uint8).to(
+            self.current_device
         )
 
         cached_dims = [
@@ -2447,7 +2451,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         if uvm_size > 0:
             assert not self.use_cpu
             if enforce_hbm:
-                logging.info("Enforce hbm for the cache location")
+                if not torch.jit.is_scripting():
+                    logging.info("Enforce hbm for the cache location")
                 self.weights_uvm = torch.zeros(
                     uvm_size,
                     device=self.current_device,
@@ -2763,6 +2768,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
 
         return splits
 
+    @torch.jit.export
     def initialize_weights(self) -> None:
         if not self.weight_initialized:
             self._apply_split(
@@ -2773,7 +2779,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 self.weights_physical_offsets,
                 self.enforce_hbm,
             )
-            self.weight_initialized: bool = True
+            self.weight_initialized = True
 
     def fill_random_weights(self) -> None:
         """
