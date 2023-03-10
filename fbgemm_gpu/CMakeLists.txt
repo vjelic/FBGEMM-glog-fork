@@ -157,6 +157,7 @@ set(codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/lookup_args.py
     ${CMAKE_CODEGEN_DIR}/split_embedding_codegen_lookup_invoker.template
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cpu_utils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cub_namespace_prefix.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cub_namespace_postfix.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/dispatch_macros.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_backward_template_helpers.cuh
@@ -319,12 +320,16 @@ if(NOT FBGEMM_CPU_ONLY)
     src/embedding_inplace_update_gpu.cpp)
 
   if(NVML_LIB_PATH)
+    message(STATUS "Found NVML_LIB_PATH: ${NVML_LIB_PATH}")
     list(
       APPEND
       fbgemm_gpu_sources_cpu
       src/merge_pooled_embeddings_cpu.cpp
       src/merge_pooled_embeddings_gpu.cpp
       src/topology_utils.cpp)
+  else()
+    message(STATUS
+    "Could not find NVML_LIB_PATH; skipping certain sources into the build")
   endif()
 endif()
 
@@ -409,9 +414,10 @@ else()
   set_property(TARGET fbgemm_gpu_py PROPERTY CUDA_ARCHITECTURES
                                              "${cuda_architectures}")
 
-  if(NOT FBGEMM_CPU_ONLY)
-    target_compile_definitions(fbgemm_gpu_py PRIVATE FBGEMM_CUB_USE_NAMESPACE)
-  endif()
+  # FBGEMM_CUB_USE_NAMESPACE will cause compilation errors on CUB for CUDA 12+
+  # if(NOT FBGEMM_CPU_ONLY)
+  #   target_compile_definitions(fbgemm_gpu_py PRIVATE FBGEMM_CUB_USE_NAMESPACE)
+  # endif()
 endif()
 
 set_target_properties(fbgemm_gpu_py PROPERTIES PREFIX "")
