@@ -13,8 +13,13 @@
 print_exec () {
   echo "+ $*"
   echo ""
-  "$@"
+  if "$@"; then
+    local retcode=0
+  else
+    local retcode=$?
+  fi
   echo ""
+  return $retcode
 }
 
 exec_with_retries () {
@@ -205,10 +210,12 @@ run_python_test () {
     echo "################################################################################"
   fi
 
-  if conda run -n "${env_name}" python -m pytest -v -rsx -s -W ignore::pytest.PytestCollectionWarning "${python_test_file}"; then
+  if print_exec conda run -n "${env_name}" python -m pytest -v -rsx -s -W ignore::pytest.PytestCollectionWarning "${python_test_file}"; then
     echo "[TEST] Python test suite PASSED: ${python_test_file}"
+    echo ""
   else
     echo "[TEST] Python test suite FAILED: ${python_test_file}"
+    echo ""
     return 1
   fi
 }
@@ -254,27 +261,32 @@ print_gpu_info () {
       echo "[CHECK] NVIDIA driver is required, but does not appear to have been installed.  This will cause FBGEMM_GPU installation to fail!"
       return 1
     fi
-
   else
     if which nvidia-smi; then
       # If nvidia-smi is installed on a machine without GPUs, this will return error
       (print_exec nvidia-smi) || true
+    else
+      echo "[CHECK] nvidia-smi not found"
+    fi
+  fi
+
+  if [[ "${ENFORCE_AMD_GPU}" ]]; then
+    # Ensure that rocm-smi is available and returns GPU entries
+    if ! rocm-smi; then
+      echo "[CHECK] AMD driver is required, but does not appear to have been installed.  This will cause FBGEMM_GPU installation to fail!"
+      return 1
+    fi
+  else
+    if which rocm-smi; then
+      # If rocm-smi is installed on a machine without GPUs, this will return error
+      (print_exec rocm-smi) || true
+    else
+      echo "[CHECK] rocm-smi not found"
     fi
   fi
 }
 
-print_system_info () {
-  echo "################################################################################"
-  echo "# Print System Info"
-  echo "#"
-  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-  echo "################################################################################"
-  echo ""
-
-  echo "################################################################################"
-  echo "[INFO] Printing environment variables ..."
-  print_exec printenv
-
+__print_system_info_linux () {
   echo "################################################################################"
   echo "[INFO] Check ldd version ..."
   print_exec ldd --version
@@ -289,6 +301,36 @@ print_system_info () {
   print_exec uname -a
   print_exec cat /proc/version
   print_exec cat /etc/os-release
+}
+
+__print_system_info_macos () {
+  echo "################################################################################"
+  echo "[INFO] Check CPU info ..."
+  sysctl -a | grep machdep.cpu
+
+  echo "################################################################################"
+  echo "[INFO] Check MacOS version info ..."
+  print_exec uname -a
+  print_exec sw_vers
+}
+
+print_system_info () {
+  echo "################################################################################"
+  echo "# Print System Info"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
+
+  echo "################################################################################"
+  echo "[INFO] Printing environment variables ..."
+  print_exec printenv
+
+  if [[ $OSTYPE == 'darwin'* ]]; then
+    __print_system_info_macos
+  else
+    __print_system_info_linux
+  fi
 }
 
 print_ec2_info () {
@@ -311,10 +353,72 @@ print_ec2_info () {
   echo "instance-type: $(get_ec2_metadata instance-type)"
 }
 
+print_glibc_info () {
+  local library_path="$1"
+  if [ "$library_path" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} LIBRARY_PATH"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} /usr/lib/x86_64-linux-gnu/libstdc++.so.6"
+    return 1
+  fi
+
+  if [ -f "${library_path}" ]; then
+    echo "[CHECK] Listing out the GLIBC versions referenced by: ${library_path}"
+    objdump -TC "${library_path}" | grep GLIBC_ | sed 's/.*GLIBC_\([.0-9]*\).*/GLIBC_\1/g' | sort -Vu | cat
+    echo ""
+
+    echo "[CHECK] Listing out the GLIBCXX versions referenced by: ${library_path}"
+    objdump -TC "${library_path}" | grep GLIBCXX_ | sed 's/.*GLIBCXX_\([.0-9]*\).*/GLIBCXX_\1/g' | sort -Vu | cat
+    echo ""
+
+  else
+    echo "[CHECK] No file at path: ${library_path}"
+    return 1
+  fi
+}
+
 
 ################################################################################
-# Environment Setup and Install Functions
+# Bazel Setup Functions
 ################################################################################
+
+setup_bazel () {
+  local bazel_version="${1:-6.1.1}"
+  echo "################################################################################"
+  echo "# Setup Bazel"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
+
+  if [[ $OSTYPE == 'darwin'* ]]; then
+    # shellcheck disable=SC2155
+    local bazel_variant="darwin-$(uname -m)"
+  else
+    local bazel_variant="linux-x86_64"
+  fi
+
+  echo "[SETUP] Downloading installer Bazel ${bazel_version} (${bazel_variant}) ..."
+  print_exec wget -q "https://github.com/bazelbuild/bazel/releases/download/${bazel_version}/bazel-${bazel_version}-installer-${bazel_variant}.sh" -O install-bazel.sh
+
+  echo "[SETUP] Installing Bazel ..."
+  print_exec bash install-bazel.sh
+  print_exec rm -f install-bazel.sh
+
+  print_exec bazel --version
+  echo "[SETUP] Successfully set up Bazel"
+}
+
+
+################################################################################
+# Miniconda Setup Functions
+################################################################################
+
+__conda_cleanup () {
+  echo "[SETUP] Cleaning up Conda packages ..."
+  (print_exec conda clean --packages --tarball -y) || return 1
+  (print_exec conda clean --all -y) || return 1
+}
 
 setup_miniconda () {
   local miniconda_prefix="$1"
@@ -337,7 +441,7 @@ setup_miniconda () {
     print_exec mkdir -p "$miniconda_prefix"
 
     echo "[SETUP] Downloading the Miniconda installer ..."
-    print_exec wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+    (exec_with_retries wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh) || return 1
 
     echo "[SETUP] Installing Miniconda ..."
     print_exec bash miniconda.sh -b -p "$miniconda_prefix" -u
@@ -349,14 +453,24 @@ setup_miniconda () {
   print_exec . ~/.bashrc
 
   echo "[SETUP] Updating Miniconda base packages ..."
-  (exec_with_retries conda update -n base -c defaults -y conda) || return 1
+  (exec_with_retries conda update -n base -c defaults --update-deps -y conda) || return 1
+
+  # Clean up packages
+  __conda_cleanup
 
   # Print Conda info
   print_exec conda info
 
   # These variables will be exported outside
+  echo "[SETUP] Exporting Miniconda variables ..."
   export PATH="${miniconda_prefix}/bin:${PATH}"
   export CONDA="${miniconda_prefix}"
+
+  if [ -f "${GITHUB_PATH}" ]; then
+    echo "[SETUP] Saving Miniconda variables to ${GITHUB_PATH} ..."
+    echo "${miniconda_prefix}/bin" >> "${GITHUB_PATH}"
+    echo "CONDA=${miniconda_prefix}" >> "${GITHUB_PATH}"
+  fi
 
   echo "[SETUP] Successfully set up Miniconda at ${miniconda_prefix}"
 }
@@ -398,17 +512,22 @@ create_conda_environment () {
   echo "[SETUP] Successfully created Conda environment: ${env_name}"
 }
 
+
+################################################################################
+# PyTorch Setup Functions
+################################################################################
+
 install_pytorch_conda () {
   local env_name="$1"
   local pytorch_version="$2"
-  local pytorch_cpu="$3"
+  local pytorch_variant_type="$3"
   if [ "$pytorch_version" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} ENV_NAME PYTORCH_VERSION [CPU]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env 1.11.0      # Install a specific version"
-    echo "    ${FUNCNAME[0]} build_env latest      # Install the latest stable release"
-    echo "    ${FUNCNAME[0]} build_env test        # Install the pre-release"
-    echo "    ${FUNCNAME[0]} build_env nightly 1   # Install the CPU variant of the nightly"
+    echo "    ${FUNCNAME[0]} build_env 1.11.0       # Install a specific version"
+    echo "    ${FUNCNAME[0]} build_env latest       # Install the latest stable release"
+    echo "    ${FUNCNAME[0]} build_env test         # Install the pre-release"
+    echo "    ${FUNCNAME[0]} build_env nightly cpu  # Install the CPU variant of the nightly"
     return 1
   else
     echo "################################################################################"
@@ -419,11 +538,11 @@ install_pytorch_conda () {
     echo ""
   fi
 
-  # Install cpuonly if needed
-  if [ "$pytorch_cpu" != "" ]; then
-    pytorch_cpu=1
+  # Install the cpuonly package if needed
+  if [ "$pytorch_variant_type" == "cpu" ]; then
     local pytorch_package="cpuonly pytorch"
   else
+    pytorch_variant_type="cuda"
     local pytorch_package="pytorch"
   fi
 
@@ -437,13 +556,25 @@ install_pytorch_conda () {
     local pytorch_channel="pytorch"
   fi
 
+  # Clean up packages before installation
+  __conda_cleanup
+
   # Install PyTorch packages
-  echo "[INSTALL] Attempting to install '${pytorch_package}' (${pytorch_version}, CPU=${pytorch_cpu:-0}) through Conda using channel '${pytorch_channel}' ..."
+  # NOTE: Installation of large package might fail due to corrupt package download
+  # Use --force-reinstall to address this on retries - https://datascience.stackexchange.com/questions/41732/conda-verification-failed
+  echo "[INSTALL] Attempting to install '${pytorch_package}' (${pytorch_version}, variant = ${pytorch_variant_type}) through Conda using channel '${pytorch_channel}' ..."
   # shellcheck disable=SC2086
-  (exec_with_retries conda install -n "${env_name}" -y ${pytorch_package} -c "${pytorch_channel}") || return 1
+  (exec_with_retries conda install --force-reinstall -n "${env_name}" -y ${pytorch_package} -c "${pytorch_channel}") || return 1
+
+  # Check that PyTorch is importable
+  (test_python_import "${env_name}" torch.distributed) || return 1
+
+  # Print out the actual installed PyTorch version
+  installed_pytorch_version=$(conda run -n "${env_name}" python -c "import torch; print(torch.__version__)")
+  echo "[CHECK] NOTE: The installed version is: ${installed_pytorch_version}"
 
   # Run check for GPU variant
-  if [ "$pytorch_cpu" == "" ]; then
+  if [ "$pytorch_variant_type" == "cuda" ]; then
     # Ensure that the PyTorch build is the GPU variant (i.e. contains cuDNN reference)
     # This test usually applies to the PyTorch nightly builds
     if conda list -n "${env_name}" pytorch | grep cudnn; then
@@ -462,13 +593,7 @@ install_pytorch_conda () {
     (test_filepath "${env_name}" cuda_cmake_macros.h) || return 1
   fi
 
-  # Check that PyTorch is importable
-  (test_python_import "${env_name}" torch.distributed) || return 1
-
-  # Print out the actual installed PyTorch version
-  installed_pytorch_version=$(conda run -n "${env_name}" python -c "import torch; print(torch.__version__)")
-  echo "[INSTALL] Installed PyTorch through Conda"
-  echo "[INSTALL] NOTE: The installed version is: ${installed_pytorch_version}"
+  echo "[INSTALL] Successfully installed PyTorch through Conda"
 }
 
 install_pytorch_pip () {
@@ -527,30 +652,53 @@ install_pytorch_pip () {
   # shellcheck disable=SC2086
   (exec_with_retries conda run -n "${env_name}" pip install ${pytorch_package} --extra-index-url ${pytorch_channel}) || return 1
 
-  if [ "$pytorch_variant_type" != "cpu" ]; then
-    if [ "$pytorch_variant_type" == "cuda" ]; then
-      # Ensure that the PyTorch-CUDA headers are properly installed
-      (test_filepath "${env_name}" cuda_cmake_macros.h) || return 1
-    fi
-
-    # Ensure that the PyTorch build is of the correct variant
-    # This test usually applies to the PyTorch nightly builds
-    if conda run -n build_binary pip list torch | grep torch | grep "${pytorch_variant}"; then
-      echo "[CHECK] The installed PyTorch ${pytorch_version} is the correct variant (${pytorch_variant})"
-    else
-      echo "[CHECK] The installed PyTorch ${pytorch_version} appears to be an incorrect variant as it is missing references to ${pytorch_variant}!"
-      echo "[CHECK] This can happen if the variant of PyTorch (e.g. GPU, nightly) for the MAJOR.MINOR version of CUDA presently installed on the system has not been published yet."
-      return 1
-    fi
-  fi
-
   # Check that PyTorch is importable
   (test_python_import "${env_name}" torch.distributed) || return 1
 
   # Print out the actual installed PyTorch version
   installed_pytorch_version=$(conda run -n "${env_name}" python -c "import torch; print(torch.__version__)")
-  echo "[INSTALL] Installed PyTorch through PIP"
-  echo "[INSTALL] NOTE: The installed version is: ${installed_pytorch_version}"
+  echo "[CHECK] NOTE: The installed version is: ${installed_pytorch_version}"
+
+  if [ "$pytorch_variant_type" != "cpu" ]; then
+    # Ensure that the PyTorch build is of the correct variant
+    # This test usually applies to the PyTorch nightly builds
+    if conda run -n "${env_name}" pip list torch | grep torch | grep "${pytorch_variant}"; then
+      echo "[CHECK] The installed PyTorch ${pytorch_version} is the correct variant (${pytorch_variant})"
+    else
+      echo "[CHECK] The installed PyTorch ${pytorch_version} appears to be an incorrect variant as it is missing references to ${pytorch_variant}!"
+      echo "[CHECK] This can happen if the variant of PyTorch (e.g. GPU, nightly) for the MAJOR.MINOR version of CUDA or ROCm presently installed on the system is not available."
+      return 1
+    fi
+  fi
+
+  if [ "$pytorch_variant_type" == "cuda" ]; then
+    # Ensure that the PyTorch-CUDA headers are properly installed
+    (test_filepath "${env_name}" cuda_cmake_macros.h) || return 1
+  fi
+
+  echo "[INSTALL] Successfully installed PyTorch through PIP"
+}
+
+
+################################################################################
+# CUDA Setup Functions
+################################################################################
+
+install_nvidia_drivers_centos () {
+  echo "################################################################################"
+  echo "# Install NVIDIA Drivers"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
+
+  echo "[SETUP] Adding NVIDIA repos to yum ..."
+  print_exec sudo yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+  print_exec sudo yum-config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+  print_exec sudo yum clean expire-cache
+
+  echo "[SETUP] Installing NVIDIA drivers ..."
+  install_system_packages nvidia-driver-latest-dkms
 }
 
 install_cuda () {
@@ -578,9 +726,12 @@ install_cuda () {
     return 1
   fi
 
+  # Clean up packages before installation
+  __conda_cleanup
+
   # Install CUDA packages
   echo "[INSTALL] Installing CUDA ${cuda_version} ..."
-  (exec_with_retries conda install -n "${env_name}" -y cuda -c "nvidia/label/cuda-${cuda_version}") || return 1
+  (exec_with_retries conda install --force-reinstall -n "${env_name}" -y cuda -c "nvidia/label/cuda-${cuda_version}") || return 1
 
   # Ensure that nvcc is properly installed
   (test_binpath "${env_name}" nvcc) || return 1
@@ -602,161 +753,6 @@ install_cuda () {
   # Print nvcc version
   print_exec conda run -n "${env_name}" nvcc --version
   echo "[INSTALL] Successfully installed CUDA ${cuda_version}"
-}
-
-install_rocm_ubuntu () {
-  local env_name="$1"
-  local rocm_version="$2"
-  if [ "$rocm_version" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME ROC_VERSION"
-    echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env 5.4.3"
-    return 1
-  else
-    echo "################################################################################"
-    echo "# Install ROCm (Ubuntu)"
-    echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-    echo "################################################################################"
-    echo ""
-  fi
-
-  # Based on instructions found in https://docs.amd.com/bundle/ROCm-Installation-Guide-v5.4.3/page/How_to_Install_ROCm.html
-
-  # Disable CLI prompts during package installation
-  export DEBIAN_FRONTEND=noninteractive
-
-  echo "[INSTALL] Loading OS release info to fetch VERSION_CODENAME ..."
-  # shellcheck disable=SC1091
-  . /etc/os-release
-
-  # Split version string by dot into array, i.e. 5.4.3 => [5, 4, 3]
-  # shellcheck disable=SC2206,SC2155
-  local rocm_version_arr=(${rocm_version//./ })
-  # Materialize the long version string, i.e. 5.3 => 50500, 5.4.3 => 50403
-  # shellcheck disable=SC2155
-  local long_version="${rocm_version_arr[0]}$(printf %02d "${rocm_version_arr[1]}")$(printf %02d "${rocm_version_arr[2]}")"
-  # Materialize the full deb package name
-  local package_name="amdgpu-install_${rocm_version_arr[0]}.${rocm_version_arr[1]}.${long_version}-1_all.deb"
-  # Materialize the download URL
-  local rocm_download_url="https://repo.radeon.com/amdgpu-install/${rocm_version}/ubuntu/${VERSION_CODENAME}/${package_name}"
-
-  echo "[INSTALL] Downloading the ROCm installer script ..."
-  print_exec wget -q "${rocm_download_url}" -O "${package_name}"
-
-  echo "[INSTALL] Installing the ROCm installer script ..."
-  install_system_packages "./${package_name}"
-
-  # Skip installation of kernel driver when run in Docker mode with --no-dkms
-  echo "[INSTALL] Installing ROCm ..."
-  (exec_with_retries amdgpu-install -y --usecase=hiplibsdk,rocm --no-dkms) || return 1
-
-  echo "[INSTALL] Installing HIP-relevant packages ..."
-  install_system_packages mesa-common-dev clang comgr libopenblas-dev jp intel-mkl-full locales libnuma-dev
-  install_system_packages hipify-clang miopen-hip miopen-hip-dev
-
-  echo "[INSTALL] Cleaning up ..."
-  print_exec rm -f "${package_name}"
-
-  echo "[INSTALL] Successfully installed ROCm ${rocm_version}"
-}
-
-install_cxx_compiler () {
-  local env_name="$1"
-  local use_system_package_manager="$2"
-  if [ "$env_name" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME [USE_YUM]"
-    echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env     # Install C/C++ compilers through Conda"
-    echo "    ${FUNCNAME[0]} build_env 1   # Install C/C++ compilers through the system package manager"
-    return 1
-  else
-    echo "################################################################################"
-    echo "# Install C/C++ Compilers"
-    echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-    echo "################################################################################"
-    echo ""
-  fi
-
-  if [ "$use_system_package_manager" != "" ]; then
-    echo "[INSTALL] Installing C/C++ compilers through the system package manager ..."
-    install_system_packages gcc gcc-c++
-
-  else
-    # Install gxx_linux-64 from main instead of cxx-compiler from conda-forge, as
-    # the latter breaks builds:
-    #   https://root-forum.cern.ch/t/error-timespec-get-has-not-been-declared-with-conda-root-package/45712/6
-    #
-    # NOTE: Install g++ 9.x instead of 11.x becaue 11.x builds libraries with
-    # references to GLIBCXX_3.4.29, which is not available on systems with older
-    # versions of libstdc++.so.6 such as CentOS Stream 8 and Ubuntu 20.04
-    echo "[INSTALL] Installing C/C++ compilers through Conda ..."
-    (exec_with_retries conda install -n "${env_name}" -y gxx_linux-64=9.3.0) || return 1
-
-    # The compilers are visible in the PATH as `x86_64-conda-linux-gnu-cc` and
-    # `x86_64-conda-linux-gnu-c++`, so symlinks will need to be created
-    echo "[INSTALL] Setting the C/C++ compiler symlinks ..."
-    # shellcheck disable=SC2155
-    local cc_path=$(conda run -n "${env_name}" printenv CC)
-    # shellcheck disable=SC2155
-    local cxx_path=$(conda run -n "${env_name}" printenv CXX)
-
-    print_exec ln -s "${cc_path}" "$(dirname "$cc_path")/cc"
-    print_exec ln -s "${cc_path}" "$(dirname "$cc_path")/gcc"
-    print_exec ln -s "${cxx_path}" "$(dirname "$cxx_path")/c++"
-    print_exec ln -s "${cxx_path}" "$(dirname "$cxx_path")/g++"
-  fi
-
-  # Check C/C++ compilers are visible
-  (test_binpath "${env_name}" cc) || return 1
-  (test_binpath "${env_name}" gcc) || return 1
-  (test_binpath "${env_name}" c++) || return 1
-  (test_binpath "${env_name}" g++) || return 1
-
-  # Print out the C++ version
-  print_exec conda run -n "${env_name}" c++ --version
-  echo "[INSTALL] Successfully installed C/C++ compilers"
-}
-
-install_build_tools () {
-  local env_name="$1"
-  if [ "$env_name" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME"
-    echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env"
-    return 1
-  else
-    echo "################################################################################"
-    echo "# Install Build Tools"
-    echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-    echo "################################################################################"
-    echo ""
-  fi
-
-  echo "[INSTALL] Installing build tools ..."
-  (exec_with_retries conda install -n "${env_name}" -y \
-    click \
-    cmake \
-    hypothesis \
-    jinja2 \
-    ninja \
-    numpy \
-    scikit-build \
-    wheel) || return 1
-
-  # Check binaries are visible in the PAATH
-  (test_binpath "${env_name}" cmake) || return 1
-  (test_binpath "${env_name}" ninja) || return 1
-
-  # Check Python packages are importable
-  local import_tests=( click hypothesis jinja2 numpy skbuild wheel )
-  for p in "${import_tests[@]}"; do
-    (test_python_import "${env_name}" "${p}") || return 1
-  done
-
-  echo "[INSTALL] Successfully installed all the build tools"
 }
 
 install_cudnn () {
@@ -835,6 +831,213 @@ install_cudnn () {
   echo "[INSTALL] Successfully installed cuDNN (for CUDA ${cuda_version})"
 }
 
+################################################################################
+# ROCm Setup Functions
+################################################################################
+
+install_rocm_ubuntu () {
+  local env_name="$1"
+  local rocm_version="$2"
+  if [ "$rocm_version" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME ROC_VERSION"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env 5.4.3"
+    return 1
+  else
+    echo "################################################################################"
+    echo "# Install ROCm (Ubuntu)"
+    echo "#"
+    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "################################################################################"
+    echo ""
+  fi
+
+  # Based on instructions found in https://docs.amd.com/bundle/ROCm-Installation-Guide-v5.4.3/page/How_to_Install_ROCm.html
+
+  # Disable CLI prompts during package installation
+  export DEBIAN_FRONTEND=noninteractive
+
+  echo "[INSTALL] Loading OS release info to fetch VERSION_CODENAME ..."
+  # shellcheck disable=SC1091
+  . /etc/os-release
+
+  # Split version string by dot into array, i.e. 5.4.3 => [5, 4, 3]
+  # shellcheck disable=SC2206,SC2155
+  local rocm_version_arr=(${rocm_version//./ })
+  # Materialize the long version string, i.e. 5.3 => 50500, 5.4.3 => 50403
+  # shellcheck disable=SC2155
+  local long_version="${rocm_version_arr[0]}$(printf %02d "${rocm_version_arr[1]}")$(printf %02d "${rocm_version_arr[2]}")"
+  # Materialize the full deb package name
+  local package_name="amdgpu-install_${rocm_version_arr[0]}.${rocm_version_arr[1]}.${long_version}-1_all.deb"
+  # Materialize the download URL
+  local rocm_download_url="https://repo.radeon.com/amdgpu-install/${rocm_version}/ubuntu/${VERSION_CODENAME}/${package_name}"
+
+  echo "[INSTALL] Downloading the ROCm installer script ..."
+  print_exec wget -q "${rocm_download_url}" -O "${package_name}"
+
+  echo "[INSTALL] Installing the ROCm installer script ..."
+  install_system_packages "./${package_name}"
+
+  # Skip installation of kernel driver when run in Docker mode with --no-dkms
+  echo "[INSTALL] Installing ROCm ..."
+  (exec_with_retries amdgpu-install -y --usecase=hiplibsdk,rocm --no-dkms) || return 1
+
+  echo "[INSTALL] Installing HIP-relevant packages ..."
+  install_system_packages hipify-clang miopen-hip miopen-hip-dev
+
+  # There is no need to install these packages for ROCm
+  # install_system_packages mesa-common-dev clang comgr libopenblas-dev jp intel-mkl-full locales libnuma-dev
+
+  echo "[INSTALL] Cleaning up ..."
+  print_exec rm -f "${package_name}"
+
+  echo "[INFO] Check ROCM GPU info ..."
+  print_exec rocm-smi
+
+  echo "[INSTALL] Successfully installed ROCm ${rocm_version}"
+}
+
+
+################################################################################
+# Build Tools Setup Functions
+################################################################################
+
+install_cxx_compiler () {
+  local env_name="$1"
+  local use_system_package_manager="$2"
+  if [ "$env_name" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME [USE_YUM]"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env     # Install C/C++ compilers through Conda"
+    echo "    ${FUNCNAME[0]} build_env 1   # Install C/C++ compilers through the system package manager"
+    return 1
+  else
+    echo "################################################################################"
+    echo "# Install C/C++ Compilers"
+    echo "#"
+    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "################################################################################"
+    echo ""
+  fi
+
+  if [ "$use_system_package_manager" != "" ]; then
+    echo "[INSTALL] Installing C/C++ compilers through the system package manager ..."
+    install_system_packages gcc gcc-c++
+
+  else
+    # Install gxx_linux-64 from conda-forge instead of from anaconda channel.
+    # sysroot_linux-64 needs to be installed alongside this:
+    #
+    #   https://root-forum.cern.ch/t/error-timespec-get-has-not-been-declared-with-conda-root-package/45712/6
+    #   https://github.com/conda-forge/conda-forge.github.io/issues/1625
+    #   https://conda-forge.org/docs/maintainer/knowledge_base.html#using-centos-7
+    #   https://github.com/conda/conda-build/issues/4371
+    #
+    # NOTE: We install g++ 10.x instead of 11.x becaue 11.x builds binaries that
+    # reference GLIBCXX_3.4.29, which may not be available on systems with older
+    # versions of libstdc++.so.6 such as CentOS Stream 8 and Ubuntu 20.04
+    echo "[INSTALL] Installing C/C++ compilers through Conda ..."
+    (exec_with_retries conda install -n "${env_name}" -y gxx_linux-64=10.4.0 sysroot_linux-64=2.17 -c conda-forge) || return 1
+
+    # The compilers are visible in the PATH as `x86_64-conda-linux-gnu-cc` and
+    # `x86_64-conda-linux-gnu-c++`, so symlinks will need to be created
+    echo "[INSTALL] Setting the C/C++ compiler symlinks ..."
+    # shellcheck disable=SC2155
+    local cc_path=$(conda run -n "${env_name}" printenv CC)
+    # shellcheck disable=SC2155
+    local cxx_path=$(conda run -n "${env_name}" printenv CXX)
+
+    print_exec ln -s "${cc_path}" "$(dirname "$cc_path")/cc"
+    print_exec ln -s "${cc_path}" "$(dirname "$cc_path")/gcc"
+    print_exec ln -s "${cxx_path}" "$(dirname "$cxx_path")/c++"
+    print_exec ln -s "${cxx_path}" "$(dirname "$cxx_path")/g++"
+  fi
+
+  # Check C/C++ compilers are visible
+  (test_binpath "${env_name}" cc) || return 1
+  (test_binpath "${env_name}" gcc) || return 1
+  (test_binpath "${env_name}" c++) || return 1
+  (test_binpath "${env_name}" g++) || return 1
+
+  # Print out the C++ version
+  print_exec conda run -n "${env_name}" c++ --version
+
+  # https://stackoverflow.com/questions/2324658/how-to-determine-the-version-of-the-c-standard-used-by-the-compiler
+  echo "[INSTALL] Printing the default version of the C++ standard used by the compiler ..."
+  print_exec conda run -n "${env_name}" c++ -x c++ /dev/null -E -dM | grep __cplusplus
+
+  # https://stackoverflow.com/questions/4991707/how-to-find-my-current-compilers-standard-like-if-it-is-c90-etc
+  echo "[INSTALL] Printing the default version of the C standard used by the compiler ..."
+  print_exec conda run -n "${env_name}" cc -dM -E - < /dev/null | grep __STDC_VERSION__
+
+  echo "[INSTALL] Successfully installed C/C++ compilers"
+}
+
+install_build_tools () {
+  local env_name="$1"
+  if [ "$env_name" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env"
+    return 1
+  else
+    echo "################################################################################"
+    echo "# Install Build Tools"
+    echo "#"
+    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "################################################################################"
+    echo ""
+  fi
+
+  echo "[INSTALL] Installing build tools ..."
+  (exec_with_retries conda install -n "${env_name}" -y \
+    click \
+    cmake \
+    hypothesis \
+    jinja2 \
+    ninja \
+    numpy \
+    scikit-build \
+    wheel) || return 1
+
+  # Check binaries are visible in the PAATH
+  (test_binpath "${env_name}" cmake) || return 1
+  (test_binpath "${env_name}" ninja) || return 1
+
+  # Check Python packages are importable
+  local import_tests=( click hypothesis jinja2 numpy skbuild wheel )
+  for p in "${import_tests[@]}"; do
+    (test_python_import "${env_name}" "${p}") || return 1
+  done
+
+  echo "[INSTALL] Successfully installed all the build tools"
+}
+
+install_docs_tools () {
+  local env_name="$1"
+  if [ "$env_name" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env"
+    return 1
+  else
+    echo "################################################################################"
+    echo "# Install Documentation Tools"
+    echo "#"
+    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "################################################################################"
+    echo ""
+  fi
+
+  echo "[INSTALL] Installing docs tools ..."
+  (exec_with_retries conda install -n "${env_name}" -c conda-forge -y \
+    doxygen) || return 1
+
+  # Check binaries are visible in the PAATH
+  (test_binpath "${env_name}" doxygen) || return 1
+
+  echo "[INSTALL] Successfully installed all the build tools"
+}
 
 ################################################################################
 # Combination Functions
@@ -866,7 +1069,7 @@ create_conda_pytorch_environment () {
 
   if [ "${cuda_version}" == "" ]; then
     # Install the CPU variant of PyTorch
-    install_pytorch_conda "${env_name}" "${pytorch_version}" 1
+    install_pytorch_conda "${env_name}" "${pytorch_version}" cpu
   else
     # Install CUDA and the GPU variant of PyTorch
     install_cuda "${env_name}" "${cuda_version}"
@@ -876,7 +1079,7 @@ create_conda_pytorch_environment () {
 
 
 ################################################################################
-# Build Functions
+# FBGEMM_GPU Build Functions
 ################################################################################
 
 prepare_fbgemm_gpu_build () {
@@ -895,6 +1098,11 @@ prepare_fbgemm_gpu_build () {
     echo ""
   fi
 
+  if [[ "${GITHUB_WORKSPACE}" ]]; then
+    # https://github.com/actions/checkout/issues/841
+    git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+  fi
+
   echo "[BUILD] Running git submodules update ..."
   git submodule sync
   git submodule update --init --recursive
@@ -908,6 +1116,103 @@ prepare_fbgemm_gpu_build () {
   echo "[BUILD] Successfully ran git submodules update"
 }
 
+__configure_fbgemm_gpu_build_cpu () {
+  # Update the package name and build args depending on if CUDA is specified
+  echo "[BUILD] Setting CPU-only build args ..."
+  build_args=(--cpu_only)
+}
+
+__configure_fbgemm_gpu_build_rocm () {
+  local fbgemm_variant_targets="$1"
+
+  # Fetch available ROCm architectures on the machine
+  if [ "$fbgemm_variant_targets" != "" ]; then
+    echo "[BUILD] ROCm targets have been manually provided: ${fbgemm_variant_targets}"
+    local arch_list="${fbgemm_variant_targets}"
+  else
+    if which rocminfo; then
+      # shellcheck disable=SC2155
+      local arch_list=$(rocminfo | grep -o -m 1 'gfx.*')
+      echo "[BUILD] Architectures list from rocminfo: ${arch_list}"
+
+      if [ "$arch_list" == "" ]; then
+        # By default, build for MI250 only to save time
+        local arch_list=gfx90a
+      fi
+    else
+      echo "[BUILD] rocminfo not found in PATH!"
+    fi
+  fi
+
+  echo "[BUILD] Setting the following ROCm targets: ${arch_list}"
+  print_exec conda env config vars set -n "${env_name}" PYTORCH_ROCM_ARCH="${arch_list}"
+
+  echo "[BUILD] Setting ROCm build args ..."
+  build_args=()
+}
+
+__configure_fbgemm_gpu_build_cuda () {
+  local fbgemm_variant_targets="$1"
+
+  # Check nvcc is visible
+  (test_binpath "${env_name}" nvcc) || return 1
+
+  # Check that cuDNN environment variables are available
+  (test_env_var "${env_name}" CUDNN_INCLUDE_DIR) || return 1
+  (test_env_var "${env_name}" CUDNN_LIBRARY) || return 1
+  (test_env_var "${env_name}" NVML_LIB_PATH) || return 1
+
+  local arch_list="${fbgemm_variant_targets:-7.0;8.0}"
+  echo "[BUILD] Setting the following CUDA targets: ${arch_list}"
+
+  # Build only CUDA 7.0 and 8.0 (i.e. V100 and A100) because of 100 MB binary size limits from PyPI.
+  echo "[BUILD] Setting CUDA build args ..."
+  # shellcheck disable=SC2155
+  local nvml_lib_path=$(conda run -n "${env_name}" printenv NVML_LIB_PATH)
+  build_args=(
+    --nvml_lib_path="${nvml_lib_path}"
+    -DTORCH_CUDA_ARCH_LIST="'${arch_list}'"
+  )
+}
+
+__configure_fbgemm_gpu_build () {
+  local fbgemm_variant="$1"
+  local fbgemm_variant_targets="$2"
+  if [ "$fbgemm_variant" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} FBGEMM_VARIANT"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} cpu                          # CPU-only variant"
+    echo "    ${FUNCNAME[0]} cuda                         # CUDA variant for default target(s)"
+    echo "    ${FUNCNAME[0]} cuda '7.0;8.0'               # CUDA variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} rocm                         # ROCm variant for default target(s)"
+    echo "    ${FUNCNAME[0]} rocm 'gfx906;gfx908;gfx90a'  # ROCm variant for custom target(s)"
+    return 1
+  else
+    echo "################################################################################"
+    echo "# Configure FBGEMM-GPU Build"
+    echo "#"
+    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "################################################################################"
+    echo ""
+  fi
+
+  if [ "$fbgemm_variant" == "cpu" ]; then
+    echo "[BUILD] Configuring build as CPU variant ..."
+    __configure_fbgemm_gpu_build_cpu
+
+  elif [ "$fbgemm_variant" == "rocm" ]; then
+    echo "[BUILD] Configuring build as ROCm variant ..."
+    __configure_fbgemm_gpu_build_rocm "${fbgemm_variant_targets}"
+
+  else
+    echo "[BUILD] Configuring build as CUDA variant (this is the default behavior) ..."
+    __configure_fbgemm_gpu_build_cuda "${fbgemm_variant_targets}"
+  fi
+
+  # shellcheck disable=SC2145
+  echo "[BUILD] FBGEMM_GPU build arguments have been set:  ${build_args[@]}"
+}
+
 __build_fbgemm_gpu_common_pre_steps () {
   # Private function that uses variables instantiated by its caller
 
@@ -918,38 +1223,12 @@ __build_fbgemm_gpu_common_pre_steps () {
   (test_binpath "${env_name}" g++) || return 1
 
   if [ "$fbgemm_variant" == "cpu" ]; then
-    # Update the package name and build args depending on if CUDA is specified
-    echo "[BUILD] Applying CPU-only build args ..."
-    build_args=(--cpu_only)
     package_name="${package_name}-cpu"
-
   elif [ "$fbgemm_variant" == "rocm" ]; then
-    (test_env_var "${env_name}" PYTORCH_ROCM_ARCH) || return 1
-
-    echo "[BUILD] Applying ROCm build args ..."
-    build_args=()
     package_name="${package_name}-rocm"
-
   else
     # Set to the default variant
-    fbgemm_variant="gpu"
-
-    # Check nvcc is visible
-    (test_binpath "${env_name}" nvcc) || return 1
-
-    # Check that cuDNN environment variables are available
-    (test_env_var "${env_name}" CUDNN_INCLUDE_DIR) || return 1
-    (test_env_var "${env_name}" CUDNN_LIBRARY) || return 1
-    (test_env_var "${env_name}" NVML_LIB_PATH) || return 1
-
-    # Build only CUDA 7.0 and 8.0 (i.e. V100 and A100) because of 100 MB binary size limits from PyPI.
-    echo "[BUILD] Applying GPU build args ..."
-    # shellcheck disable=SC2155
-    local nvml_lib_path=$(conda run -n "${env_name}" printenv NVML_LIB_PATH)
-    build_args=(
-      --nvml_lib_path="${nvml_lib_path}"
-      -DTORCH_CUDA_ARCH_LIST='7.0;8.0'
-    )
+    fbgemm_variant="cuda"
   fi
 
   # Extract the Python tag
@@ -969,12 +1248,14 @@ __build_fbgemm_gpu_common_pre_steps () {
   print_exec git diff
 }
 
-check_fbgemm_gpu_build () {
+run_fbgemm_gpu_postbuild_checks () {
   local fbgemm_variant="$1"
   if [ "$fbgemm_variant" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} FBGEMM_VARIANT"
     echo "Example(s):"
     echo "    ${FUNCNAME[0]} cpu"
+    echo "    ${FUNCNAME[0]} cuda"
+    echo "    ${FUNCNAME[0]} rocm"
     return 1
   fi
 
@@ -995,7 +1276,13 @@ check_fbgemm_gpu_build () {
   )
 
   # Add more symbols to check for if it's a non-CPU variant
-  if [ "${fbgemm_variant}" != "cpu" ]; then
+  if [ "${fbgemm_variant}" == "cuda" ]; then
+    lib_symbols_to_check+=(
+      fbgemm_gpu::asynchronous_inclusive_cumsum_gpu
+      fbgemm_gpu::merge_pooled_embeddings
+    )
+  elif [ "${fbgemm_variant}" == "rocm" ]; then
+    # merge_pooled_embeddings is missing in ROCm builds bc it requires NVML
     lib_symbols_to_check+=(
       fbgemm_gpu::asynchronous_inclusive_cumsum_gpu
       fbgemm_gpu::merge_pooled_embeddings
@@ -1004,7 +1291,7 @@ check_fbgemm_gpu_build () {
 
   for library in "${fbgemm_gpu_so_files[@]}"; do
     echo "[CHECK] Listing out the GLIBCXX versions referenced by the library: ${library}"
-    objdump -TC "${library}" | grep GLIBCXX | sed 's/.*GLIBCXX_\([.0-9]*\).*/GLIBCXX_\1/g' | sort -Vu | cat
+    print_glibc_info "${library}"
 
     echo "[CHECK] Verifying sample subset of symbols in the library ..."
     for symbol in "${lib_symbols_to_check[@]}"; do
@@ -1019,27 +1306,32 @@ build_fbgemm_gpu_package () {
   env_name="$1"
   package_name="$2"
   fbgemm_variant="$3"
-  if [ "$package_name" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME PACKAGE_NAME [CPU_ONLY]"
+  fbgemm_variant_targets="$4"
+  if [ "$fbgemm_variant" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME PACKAGE_NAME VARIANT [TARGETS]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly       # Build the full wheel package"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cpu   # Build the CPU-only variant of the wheel package"
+    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cpu                           # CPU-only variant"
+    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cuda                          # CUDA variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cuda '7.0;8.0'                # CUDA variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly rocm                          # ROCm variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly rocm 'gfx906;gfx908;gfx90a'   # ROCm variant for custom target(s)"
     return 1
-  else
-    echo "################################################################################"
-    echo "# Build FBGEMM-GPU Package (Wheel)"
-    echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-    echo "################################################################################"
-    echo ""
   fi
 
-  # Run all the common FBGEMM-GPU build pre-steps (set up variables)
+  # Set up and configure the build
   __build_fbgemm_gpu_common_pre_steps || return 1
+  __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
+
+  echo "################################################################################"
+  echo "# Build FBGEMM-GPU Package (Wheel)"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
 
   # manylinux1_x86_64 is specified for PyPI upload
   # Distribute Python extensions as wheels on Linux
-  echo "[BUILD] Building FBGEMM-GPU (VARIANT=${fbgemm_variant}) wheel ..."
+  echo "[BUILD] Building FBGEMM-GPU wheel (VARIANT=${fbgemm_variant}) ..."
   print_exec conda run -n "${env_name}" \
     python setup.py bdist_wheel \
       --package_name="${package_name}" \
@@ -1048,7 +1340,7 @@ build_fbgemm_gpu_package () {
       "${build_args[@]}"
 
   # Run checks on the built libraries
-  (check_fbgemm_gpu_build "${fbgemm_variant}") || return 1
+  (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
 
   echo "[BUILD] Enumerating the built wheels ..."
   print_exec ls -lth dist/*.whl
@@ -1062,34 +1354,111 @@ build_fbgemm_gpu_package () {
 build_fbgemm_gpu_install () {
   env_name="$1"
   fbgemm_variant="$2"
-  if [ "$env_name" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME [CPU_ONLY]"
+  fbgemm_variant_targets="$3"
+  if [ "$fbgemm_variant" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME VARIANT [TARGETS]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env      # Build + install the package"
-    echo "    ${FUNCNAME[0]} build_env cpu  # Build + Install the CPU-only variant of the package"
+    echo "    ${FUNCNAME[0]} build_env cpu                          # CPU-only variant"
+    echo "    ${FUNCNAME[0]} build_env cuda                         # CUDA variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env cuda '7.0;8.0'               # CUDA variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} build_env rocm                         # ROCm variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env rocm 'gfx906;gfx908;gfx90a'  # ROCm variant for custom target(s)"
+    return 1
+  fi
+
+  # Set up and configure the build
+  __build_fbgemm_gpu_common_pre_steps || return 1
+  __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
+
+  echo "################################################################################"
+  echo "# Build + Install FBGEMM-GPU Package"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
+
+  # Parallelism may need to be limited to prevent the build from being
+  # canceled for going over ulimits
+  echo "[BUILD] Building + installing FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
+  print_exec conda run -n "${env_name}" \
+    python setup.py install "${build_args[@]}"
+
+  # Run checks on the built libraries
+  (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
+
+  echo "[INSTALL] Checking imports ..."
+  # Exit this directory to prevent import clashing, since there is an
+  # fbgemm_gpu/ subdirectory present
+  cd - || return 1
+  (test_python_import "${env_name}" fbgemm_gpu) || return 1
+
+  echo "[BUILD] FBGEMM-GPU build + install completed"
+}
+
+build_fbgemm_gpu_develop () {
+  env_name="$1"
+  fbgemm_variant="$2"
+  fbgemm_variant_targets="$3"
+  if [ "$fbgemm_variant" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME VARIANT [TARGETS]"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env cpu                          # CPU-only variant"
+    echo "    ${FUNCNAME[0]} build_env cuda                         # CUDA variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env cuda '7.0;8.0'               # CUDA variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} build_env rocm                         # ROCm variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env rocm 'gfx906;gfx908;gfx90a'  # ROCm variant for custom target(s)"
+    return 1
+  fi
+
+  # Set up and configure the build
+  __build_fbgemm_gpu_common_pre_steps || return 1
+  __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
+
+  echo "################################################################################"
+  echo "# Build + Install FBGEMM-GPU Package"
+  echo "#"
+  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "################################################################################"
+  echo ""
+
+  # Parallelism may need to be limited to prevent the build from being
+  # canceled for going over ulimits
+  echo "[BUILD] Building (develop) FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
+  print_exec conda run -n "${env_name}" \
+    python setup.py build develop "${build_args[@]}"
+
+  # Run checks on the built libraries
+  (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
+
+  echo "[BUILD] FBGEMM-GPU build + develop completed"
+}
+
+build_fbgemm_gpu_docs () {
+  env_name="$1"
+  if [ "$env_name" == "" ]; then
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME"
+    echo "Example(s):"
+    echo "    ${FUNCNAME[0]} build_env      # Build the docs"
     return 1
   else
     echo "################################################################################"
-    echo "# Build + Install FBGEMM-GPU Package"
+    echo "# Build FBGEMM-GPU Documentation"
     echo "#"
     echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
     echo "################################################################################"
     echo ""
   fi
 
-  # Run all the common FBGEMM-GPU build pre-steps (set up variables)
-  __build_fbgemm_gpu_common_pre_steps
+  echo "[BUILD] Installing docs-build dependencies ..."
+  (exec_with_retries conda run -n "${env_name}" python -m pip install -r requirements.txt) || return 1
 
-  # Parallelism may need to be limited to prevent the build from being
-  # canceled for going over ulimits
-  echo "[BUILD] Building and installing FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
-  print_exec conda run -n "${env_name}" \
-    python setup.py install "${build_args[@]}"
+  echo "[BUILD] Running Doxygen build ..."
+  (exec_with_retries conda run -n "${env_name}" doxygen Doxyfile.in) || return 1
 
-  # Run checks on the built libraries
-  (check_fbgemm_gpu_build "${fbgemm_variant}") || return 1
+  echo "[BUILD] Building HTML pages ..."
+  (exec_with_retries conda run -n "${env_name}" make html) || return 1
 
-  echo "[BUILD] FBGEMM-GPU build + install completed"
+  echo "[INSTALL] FBGEMM-GPU documentation build completed"
 }
 
 install_fbgemm_gpu_package () {
@@ -1124,7 +1493,7 @@ install_fbgemm_gpu_package () {
 
 
 ################################################################################
-# Test Functions
+# FBGEMM_GPU Test Functions
 ################################################################################
 
 run_fbgemm_gpu_tests () {
@@ -1133,7 +1502,7 @@ run_fbgemm_gpu_tests () {
   if [ "$env_name" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} ENV_NAME [FBGEMM_VARIANT]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env        # Run all tests applicable to GPU (Nvidia)"
+    echo "    ${FUNCNAME[0]} build_env        # Run all tests applicable to CUDA"
     echo "    ${FUNCNAME[0]} build_env cpu    # Run all tests applicable to CPU"
     echo "    ${FUNCNAME[0]} build_env rocm   # Run all tests applicable to ROCm"
     return 1
@@ -1165,7 +1534,10 @@ run_fbgemm_gpu_tests () {
       uvm_test.py
     )
   elif [ "$fbgemm_variant" == "rocm" ]; then
-    local ignored_tests=()
+    # https://github.com/pytorch/FBGEMM/issues/1559
+    local ignored_tests=(
+      batched_unary_embeddings_test.py
+    )
   else
     local ignored_tests=()
   fi
@@ -1197,7 +1569,7 @@ run_fbgemm_gpu_tests () {
 
 
 ################################################################################
-# Publish Functions
+# FBGEMM_GPU Publish Functions
 ################################################################################
 
 publish_to_pypi () {

@@ -3,7 +3,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-name: FBGEMM_GPU Release Build
+name: FBGEMM_GPU-CPU Release Build
 
 on:
   # PR Trigger (enabled only for debugging)
@@ -22,25 +22,35 @@ on:
   #
   workflow_dispatch:
 
+concurrency:
+  # Cancel previous runs in the PR if a new commit is pushed
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # Build on CPU hosts and upload to GHA
+  # Build on CPU hosts, run tests, and upload to GHA
   build_artifact:
-    runs-on: ${{ matrix.os }}
+    runs-on: linux.4xlarge
+    container:
+      image: amazonlinux:2023
+      options: --user root
     defaults:
       run:
         shell: bash
     env:
       PRELUDE: .github/scripts/setup_env.bash
       BUILD_ENV: build_binary
+    continue-on-error: true
     strategy:
       # Don't fast-fail all the other builds if one of the them fails
       fail-fast: false
       matrix:
-        os: [ linux.12xlarge ]
-        python-version: [ "3.8", "3.9", "3.10" ]
-        cuda-version: [ "11.7.1", "11.8.0" ]
+        python-version: [ "3.8", "3.9", "3.10", "3.11" ]
 
     steps:
+    - name: Setup Build Container
+      run: yum update -y; yum install -y binutils findutils git sudo wget which
+
     - name: Checkout the Repository
       uses: actions/checkout@v3
       with:
@@ -53,10 +63,7 @@ jobs:
       run: . $PRELUDE; print_gpu_info
 
     - name: Setup Miniconda
-      run: |
-        . $PRELUDE; setup_miniconda $HOME/miniconda
-        echo "${HOME}/miniconda/bin" >> $GITHUB_PATH
-        echo "CONDA=${HOME}/miniconda" >> $GITHUB_PATH
+      run: . $PRELUDE; setup_miniconda $HOME/miniconda
 
     - name: Create Conda Environment
       run: . $PRELUDE; create_conda_environment $BUILD_ENV ${{ matrix.python-version }}
@@ -67,52 +74,53 @@ jobs:
     - name: Install Build Tools
       run: . $PRELUDE; install_build_tools $BUILD_ENV
 
-    - name: Install CUDA
-      run: . $PRELUDE; install_cuda $BUILD_ENV ${{ matrix.cuda-version }}
+    - name: Install PyTorch-CPU Test
+      run: . $PRELUDE; install_pytorch_conda $BUILD_ENV test cpu
 
-    - name: Install PyTorch Test
-      run: . $PRELUDE; install_pytorch_conda $BUILD_ENV test
-
-    - name: Install cuDNN
-      run: . $PRELUDE; install_cudnn $BUILD_ENV "$(pwd)/build_only/cudnn" ${{ matrix.cuda-version }}
-
-    - name: Prepare FBGEMM Build
+    - name: Prepare FBGEMM_GPU Build
       run: . $PRELUDE; cd fbgemm_gpu; prepare_fbgemm_gpu_build $BUILD_ENV
 
-    - name: Build FBGEMM_GPU
-      run: . $PRELUDE; cd fbgemm_gpu; build_fbgemm_gpu_package $BUILD_ENV fbgemm_gpu
+    - name: Build FBGEMM_GPU (CPU version)
+      run: . $PRELUDE; cd fbgemm_gpu; build_fbgemm_gpu_package $BUILD_ENV fbgemm_gpu cpu
 
     - name: Upload Built Wheel as GHA Artifact
       uses: actions/upload-artifact@v3
       with:
-        name: fbgemm_gpu_${{ matrix.python-version }}_cuda${{ matrix.cuda-version }}.whl
-        path: fbgemm_gpu/dist/fbgemm_gpu-*.whl
+        name: fbgemm_gpu_cpu_${{ matrix.python-version }}.whl
+        path: fbgemm_gpu/dist/fbgemm_gpu_cpu-*.whl
 
 
   # Download the built artifact from GHA, test on GPU, and push to PyPI
   test_and_publish_artifact:
-    runs-on: ${{ matrix.os }}
+    runs-on: linux.4xlarge
+    container:
+      image: amazonlinux:2023
+      options: --user root
     defaults:
       run:
         shell: bash
     env:
       PRELUDE: .github/scripts/setup_env.bash
       BUILD_ENV: build_binary
-      ENFORCE_NVIDIA_GPU: 1
     strategy:
       fail-fast: false
       matrix:
-        os: [ linux.g5.4xlarge.nvidia.gpu ]
-        python-version: [ "3.8", "3.9", "3.10" ]
-        cuda-version: [ "11.7.1", "11.8.0" ]
-        # Specify exactly ONE CUDA version for artifact publish
-        cuda-version-publish: [ "11.7.1" ]
+        python-version: [ "3.8", "3.9", "3.10", "3.11" ]
     needs: build_artifact
+
     steps:
+    - name: Setup Build Container
+      run: yum update -y; yum install -y binutils findutils git sudo wget which
+
     - name: Checkout the Repository
       uses: actions/checkout@v3
       with:
         submodules: true
+
+    - name: Download Wheel Artifact from GHA
+      uses: actions/download-artifact@v3
+      with:
+        name: fbgemm_gpu_cpu_${{ matrix.python-version }}.whl
 
     - name: Display System Info
       run: . $PRELUDE; print_system_info; print_ec2_info
@@ -121,40 +129,29 @@ jobs:
       run: . $PRELUDE; print_gpu_info
 
     - name: Setup Miniconda
-      run: |
-        . $PRELUDE; setup_miniconda $HOME/miniconda
-        echo "${HOME}/miniconda/bin" >> $GITHUB_PATH
-        echo "CONDA=${HOME}/miniconda" >> $GITHUB_PATH
+      run: . $PRELUDE; setup_miniconda $HOME/miniconda
 
     - name: Create Conda Environment
       run: . $PRELUDE; create_conda_environment $BUILD_ENV ${{ matrix.python-version }}
 
-    - name: Install CUDA
-      run: . $PRELUDE; install_cuda $BUILD_ENV ${{ matrix.cuda-version }}
-
     - name: Install PyTorch Test
-      run: . $PRELUDE; install_pytorch_conda $BUILD_ENV test
+      run: . $PRELUDE; install_pytorch_conda $BUILD_ENV test cpu
 
-    - name: Prepare FBGEMM Build
+    - name: Prepare FBGEMM_GPU Build
       run: . $PRELUDE; cd fbgemm_gpu; prepare_fbgemm_gpu_build $BUILD_ENV
 
-    - name: Download Wheel Artifact from GHA
-      uses: actions/download-artifact@v3
-      with:
-        name: fbgemm_gpu_${{ matrix.python-version }}_cuda${{ matrix.cuda-version }}.whl
-
-    - name: Install FBGEMM_GPU
+    - name: Install FBGEMM_GPU (CPU version)
       run: |
         . $PRELUDE
-        ls .
+        pwd; ls -la .
         install_fbgemm_gpu_package $BUILD_ENV *.whl
 
     - name: Test with PyTest
       timeout-minutes: 10
-      run: . $PRELUDE; cd fbgemm_gpu/test; run_fbgemm_gpu_tests $BUILD_ENV
+      run: . $PRELUDE; cd fbgemm_gpu/test; run_fbgemm_gpu_tests $BUILD_ENV cpu
 
-    - name: Push FBGEMM_GPU Binary to PYPI
-      if: ${{ github.event_name != 'pull_request' && github.event_name != 'push' && matrix.cuda-version == matrix.cuda-version-publish }}
+    - name: Push FBGEMM_GPU (CPU version) Binary to PYPI
+      if: ${{ github.event_name != 'pull_request' && github.event_name != 'push' }}
       env:
         PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
-      run: . $PRELUDE; publish_to_pypi $BUILD_ENV fbgemm_gpu-*.whl "$PYPI_TOKEN"
+      run: . $PRELUDE; publish_to_pypi $BUILD_ENV fbgemm_gpu_cpu-*.whl "$PYPI_TOKEN"

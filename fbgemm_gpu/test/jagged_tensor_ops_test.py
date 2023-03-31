@@ -20,7 +20,12 @@ try:
     from fbgemm_gpu import open_source  # noqa: F401
 
     # pyre-ignore[21]
-    from test_utils import gpu_available, gpu_unavailable, running_on_github, TEST_WITH_ROCM
+    from test_utils import (
+        gpu_available,
+        gpu_unavailable,
+        running_on_github,
+        TEST_WITH_ROCM,
+    )
 except Exception:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_cpu")
