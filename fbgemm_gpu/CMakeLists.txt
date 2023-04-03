@@ -1,15 +1,34 @@
-cmake_minimum_required(VERSION 3.11.0 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.21.0 FATAL_ERROR)
 
-option(FBGEMM_CPU_ONLY "Build fbgemm_gpu without GPU support" OFF)
+# Set the default C++ standard to C++17
+# Individual targets can have this value overridden; see
+# https://cmake.org/cmake/help/latest/prop_tgt/CXX_STANDARD.html
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(message_line
-    "-------------------------------------------------------------")
-message("${message_line}")
+# Set the default C standard to C17
+# Individual targets can have this value overridden; see
+# https://cmake.org/cmake/help/latest/prop_tgt/C_STANDARD.html
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+function(BLOCK_PRINT)
+  message("================================================================================")
+  foreach(ARG IN LISTS ARGN)
+     message("${ARG}")
+  endforeach()
+  message("================================================================================")
+  message("")
+endfunction()
 
 if(SKBUILD)
-  message("The project is built using scikit-build")
+  BLOCK_PRINT("The project is built using scikit-build")
 endif()
 
+# Build options
+option(FBGEMM_CPU_ONLY "Build FBGEMM_GPU without GPU support" OFF)
 option(USE_CUDA "Use CUDA" ON)
 option(USE_ROCM "Use ROCm" OFF)
 
@@ -21,11 +40,10 @@ if(((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH}))
 endif()
 
 if(FBGEMM_CPU_ONLY)
-  message("Building for CPU-only")
+  BLOCK_PRINT("Building the CPU-only variant of FBGEMM-GPU")
 endif()
 
-message("${message_line}")
-message(STATUS "USE_ROCM ${USE_ROCM}")
+BLOCK_PRINT("USE_ROCM: ${USE_ROCM}")
 
 if(FBGEMM_CPU_ONLY OR USE_ROCM)
   project(
@@ -46,12 +64,16 @@ set(THIRDPARTY ${FBGEMM}/third_party)
 
 if(DEFINED GLIBCXX_USE_CXX11_ABI)
   if(${GLIBCXX_USE_CXX11_ABI} EQUAL 1)
-    set(CXX_STANDARD_REQUIRED ON)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
   else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=0")
   endif()
-  message("${CMAKE_CXX_FLAGS}")
+  BLOCK_PRINT(
+    "Default C++ compiler flags"
+    "(values may be overridden by CMAKE_CXX_STANDARD and CXX_STANDARD):"
+    ""
+    "${CMAKE_CXX_FLAGS}"
+  )
 endif()
 
 #
@@ -72,8 +94,7 @@ if(USE_ROCM)
   include(Hip)
   include(Hipify)
 
-  message("${message_line}")
-  message(STATUS "hip found ${HIP_FOUND}")
+  BLOCK_PRINT("HIP found: ${HIP_FOUND}")
 endif()
 
 #
@@ -167,7 +188,8 @@ set(codegen_dependencies
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/quantize_ops_utils.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_utils.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/sparse_ops_utils.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_cache_cuda.cuh)
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_cache_cuda.cuh
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/fbgemm_tensor_accessor.h)
 
 if(USE_ROCM)
 message(STATUS "${PYTHON_EXECUTABLE}" "${CMAKE_CODEGEN_DIR}/embedding_backward_code_generator.py" "--opensource --is_rocm")
@@ -317,10 +339,15 @@ if(NOT FBGEMM_CPU_ONLY)
     src/split_embeddings_utils.cpp
     src/split_table_batched_embeddings.cpp
     src/metric_ops_host.cpp
-    src/embedding_inplace_update_gpu.cpp)
+    src/embedding_inplace_update_gpu.cpp
+    src/input_combine_gpu.cpp)
 
   if(NVML_LIB_PATH)
     message(STATUS "Found NVML_LIB_PATH: ${NVML_LIB_PATH}")
+  endif()
+
+  if(NVML_LIB_PATH OR USE_ROCM)
+    message(STATUS "Adding merge_pooled_embeddings sources")
     list(
       APPEND
       fbgemm_gpu_sources_cpu
@@ -328,8 +355,7 @@ if(NOT FBGEMM_CPU_ONLY)
       src/merge_pooled_embeddings_gpu.cpp
       src/topology_utils.cpp)
   else()
-    message(STATUS
-    "Could not find NVML_LIB_PATH; skipping certain sources into the build")
+    message(STATUS "Skipping merge_pooled_embeddings sources")
   endif()
 endif()
 
@@ -351,7 +377,8 @@ if(NOT FBGEMM_CPU_ONLY)
       src/split_embeddings_cache_cuda.cu
       src/split_embeddings_utils.cu
       src/metric_ops.cu
-      src/embedding_inplace_update.cu)
+      src/embedding_inplace_update.cu
+      src/input_combine.cu)
 
   set_source_files_properties(
     ${fbgemm_gpu_sources_gpu} PROPERTIES COMPILE_OPTIONS
@@ -411,13 +438,6 @@ if(USE_ROCM)
 else()
   add_library(fbgemm_gpu_py MODULE ${fbgemm_gpu_sources} ${gen_source_files}
                                    ${cpp_asmjit_files} ${cpp_fbgemm_files})
-  set_property(TARGET fbgemm_gpu_py PROPERTY CUDA_ARCHITECTURES
-                                             "${cuda_architectures}")
-
-  # FBGEMM_CUB_USE_NAMESPACE will cause compilation errors on CUB for CUDA 12+
-  # if(NOT FBGEMM_CPU_ONLY)
-  #   target_compile_definitions(fbgemm_gpu_py PRIVATE FBGEMM_CUB_USE_NAMESPACE)
-  # endif()
 endif()
 
 set_target_properties(fbgemm_gpu_py PROPERTIES PREFIX "")
@@ -427,7 +447,6 @@ if(NVML_LIB_PATH)
   target_link_libraries(fbgemm_gpu_py ${NVML_LIB_PATH})
 endif()
 target_include_directories(fbgemm_gpu_py PRIVATE ${TORCH_INCLUDE_DIRS})
-set_property(TARGET fbgemm_gpu_py PROPERTY CXX_STANDARD 17)
 
 install(TARGETS fbgemm_gpu_py DESTINATION fbgemm_gpu)
 

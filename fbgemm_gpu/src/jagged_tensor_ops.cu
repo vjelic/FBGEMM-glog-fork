@@ -12,6 +12,7 @@
 #include <torch/csrc/autograd/custom_function.h>
 #include <torch/library.h>
 #include <ATen/cuda/Atomic.cuh>
+#include <cub/cub.cuh>
 
 // clang-format off
 #include "fbgemm_gpu/cub_namespace_prefix.cuh"
@@ -1824,39 +1825,101 @@ std::tuple<Tensor, Tensor> batched_dense_vec_jagged_2d_mul_backward(
   return {v_grad, a_values_grad};
 }
 
-template <typename index_t, typename scalar_t>
+template <const int THREADS_PER_BLOCK, typename index_t, typename scalar_t>
 __global__ __launch_bounds__(kMaxThreads) void jagged_softmax_kernel(
     const at::PackedTensorAccessor32<scalar_t, 2> values,
     const at::PackedTensorAccessor32<index_t, 1> offsets,
     at::PackedTensorAccessor32<scalar_t, 2> output,
     const int max_L) {
-  const int B = offsets.size(0) - 1;
-  const int D = output.size(1);
+  const auto B = offsets.size(0) - 1;
+  const auto D = output.size(1);
 
-  const int b_begin = blockIdx.x * blockDim.y + threadIdx.y;
-  const int b_step = gridDim.x * blockDim.y;
-  for (int b = b_begin; b < B; b += b_step) {
-    const int row_start = offsets[b];
-    const int row_end = offsets[b + 1];
-    const int length = min(row_end - row_start, max_L);
-    if (length != 0) {
-      // TODO: use shared memory and better reduction
-      for (int d = threadIdx.x; d < D; d += blockDim.x) {
-        scalar_t max_value = values[row_start][d];
-        for (int l = 1; l < length; ++l) {
-          max_value = max(max_value, values[row_start + l][d]);
+  // Specialize BlockReduce type for our thread block
+  typedef cub::BlockReduce<scalar_t, THREADS_PER_BLOCK> BlockReduceT;
+
+  // Allocate shared memory for BlockReduce
+  __shared__ typename BlockReduceT::TempStorage temp_storage;
+
+  __shared__ scalar_t max_value;
+  __shared__ scalar_t exp_sum;
+
+  const auto tid = threadIdx.x;
+  for (uint32_t b = blockIdx.y; b < B; b += gridDim.y) {
+    const index_t row_start = offsets[b];
+    const index_t row_end = offsets[b + 1];
+    const auto length = min(row_end - row_start, (index_t)max_L);
+
+    if (length > 0) {
+      const auto num_l_blocks =
+          (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+      for (uint32_t d = blockIdx.x; d < D; d += gridDim.x) {
+        if (tid == 0) {
+          max_value = values[row_start][d];
+          exp_sum = 0;
         }
 
-        at::acc_type<scalar_t, true> acc =
-            exp(values[row_start][d] - max_value);
-        for (int l = 1; l < length; ++l) {
-          acc += exp(values[row_start + l][d] - max_value);
+        // Loop through all blocks to calculate the max value
+        // Each block has its own max value block_max_value, and
+        // max_value is the max value across all blocks
+        for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+          const auto l = bk_l * blockDim.x + tid;
+          scalar_t thread_val = values[row_start][d];
+          if (l < length) {
+            thread_val = values[row_start + l][d];
+          }
+
+          // Collectively compute the block-wide max reduction
+          scalar_t block_max_value =
+              BlockReduceT(temp_storage).Reduce(thread_val, cub::Max());
+          __syncthreads();
+
+          if (tid == 0) {
+            max_value = max(max_value, block_max_value);
+          }
         }
 
-        for (int l = 0; l < length; ++l) {
-          output[row_start + l][d] =
-              exp(values[row_start + l][d] - max_value) / acc;
+        // The max_value was updated by thread 0 in the last loop, sync here to
+        // make sure the next loop uses the updated max_value
+        __syncthreads();
+
+        // Loop through all blocks to calculate the sum of exp
+        // Each block has its own sum block_exp_acc, and
+        // exp_sum is the sum across all blocks
+        for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+          auto l = bk_l * blockDim.x + tid;
+
+          scalar_t thread_exp = 0;
+          if (l < length) {
+            thread_exp = std::exp(values[row_start + l][d] - max_value);
+          }
+
+          // Collectively compute the block-wide sum reduction
+          scalar_t block_exp_sum = BlockReduceT(temp_storage).Sum(thread_exp);
+          __syncthreads();
+
+          if (tid == 0) {
+            exp_sum += block_exp_sum;
+          }
         }
+
+        // The exp_sum was updated by thread 0 in the last loop, sync here to
+        // make sure the next loop uses the updated exp_sum
+        __syncthreads();
+
+        for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+          auto l = bk_l * blockDim.x + tid;
+          scalar_t thread_exp = 0;
+          if (l < length) {
+            thread_exp = std::exp(values[row_start + l][d] - max_value);
+            output[row_start + l][d] = thread_exp / exp_sum;
+          }
+        }
+
+        // The max_value and exp_sum will be reinitialized by thread 0 in the
+        // next d iteration, sync here to make sure the last loop still uses the
+        // reduced values before reinitialization
+        __syncthreads();
       }
     }
   }
@@ -1872,14 +1935,13 @@ Tensor jagged_softmax_forward(
   at::cuda::OptionalCUDAGuard device_guard;
   device_guard.set_index(values.get_device());
 
-  const int B = offsets.numel() - 1;
-  const int D = values.size(1);
+  const auto B = offsets.numel() - 1;
+  const auto D = values.size(1);
   auto output = at::empty_like(values);
 
   if (B > 0 && D > 0) {
-    const int block_dim_x =
-        std::min(div_round_up(D, kWarpSize) * kWarpSize, kMaxThreads);
-    const int block_dim_y = kMaxThreads / block_dim_x;
+    constexpr int THREADS_PER_BLOCK = 128;
+    const dim3 grid(D, std::min((int32_t)B, (int32_t)kMaxBlockYDim), 1);
 
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_softmax_kernel_1", [&] {
@@ -1889,9 +1951,9 @@ Tensor jagged_softmax_forward(
               values.scalar_type(),
               "jagged_softmax_kernel_2",
               [&] {
-                jagged_softmax_kernel<index_t, scalar_t>
-                    <<<div_round_up(B, block_dim_y),
-                       dim3(block_dim_x, block_dim_y),
+                jagged_softmax_kernel<THREADS_PER_BLOCK, index_t, scalar_t>
+                    <<<grid,
+                       THREADS_PER_BLOCK,
                        0,
                        at::cuda::getCurrentCUDAStream()>>>(
                         values.packed_accessor32<scalar_t, 2>(),
@@ -1906,35 +1968,76 @@ Tensor jagged_softmax_forward(
   return output;
 }
 
-template <typename index_t, typename scalar_t>
+template <const int THREADS_PER_BLOCK, typename index_t, typename scalar_t>
 __global__ __launch_bounds__(kMaxThreads) void jagged_softmax_backward_kernel(
     const at::PackedTensorAccessor32<scalar_t, 2> grad_output,
     const at::PackedTensorAccessor32<scalar_t, 2> output,
     const at::PackedTensorAccessor32<index_t, 1> offsets,
     at::PackedTensorAccessor32<scalar_t, 2> grad_input,
     const int max_L) {
-  const int B = offsets.size(0) - 1;
-  const int D = grad_output.size(1);
+  const auto B = offsets.size(0) - 1;
+  const auto D = grad_output.size(1);
 
-  const int b_begin = blockIdx.x * blockDim.y + threadIdx.y;
-  const int b_step = gridDim.x * blockDim.y;
-  for (int b = b_begin; b < B; b += b_step) {
-    const int row_start = offsets[b];
-    const int row_end = offsets[b + 1];
-    const int length = min(row_end - row_start, max_L);
-    if (length != 0) {
-      // TODO: use shared memory and better reduction
-      for (int d = threadIdx.x; d < D; d += blockDim.x) {
-        scalar_t sum_value = grad_output[row_start][d] * output[row_start][d];
-        for (int l = 1; l < length; ++l) {
-          sum_value += grad_output[row_start + l][d] * output[row_start + l][d];
+  // Specialize BlockReduce type for our thread block
+  typedef cub::BlockReduce<scalar_t, THREADS_PER_BLOCK> BlockReduceT;
+
+  // Allocate shared memory for BlockReduce
+  __shared__ typename BlockReduceT::TempStorage temp_storage;
+
+  __shared__ scalar_t sum_value;
+
+  const auto tid = threadIdx.x;
+  for (uint32_t b = blockIdx.y; b < B; b += gridDim.y) {
+    const index_t row_start = offsets[b];
+    const index_t row_end = offsets[b + 1];
+    const auto length = min(row_end - row_start, (index_t)max_L);
+
+    if (length > 0) {
+      const auto num_l_blocks =
+          (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
+      for (uint32_t d = blockIdx.x; d < D; d += gridDim.x) {
+        if (tid == 0) {
+          sum_value = 0;
         }
 
-        for (int l = 0; l < length; ++l) {
-          grad_input[row_start + l][d] =
-              (grad_output[row_start + l][d] - sum_value) *
-              output[row_start + l][d];
+        // Loop through all blocks to calculate the sum value
+        // Each block has its own sum, and sum_value is the sum value across all
+        // blocks
+        for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+          const auto l = bk_l * blockDim.x + tid;
+          scalar_t thread_val = 0;
+          if (l < length) {
+            thread_val =
+                grad_output[row_start + l][d] * output[row_start + l][d];
+          }
+
+          // Collectively compute the block-wide sum reduction
+          scalar_t block_sum_value = BlockReduceT(temp_storage).Sum(thread_val);
+          __syncthreads();
+
+          if (tid == 0) {
+            sum_value += block_sum_value;
+          }
         }
+
+        // The sum_value was updated by thread 0 in the last loop, sync here to
+        // make sure the next loop uses the updated sum_value
+        __syncthreads();
+
+        for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+          const auto l = bk_l * blockDim.x + tid;
+          if (l < length) {
+            grad_input[row_start + l][d] =
+                (grad_output[row_start + l][d] - sum_value) *
+                output[row_start + l][d];
+          }
+        }
+
+        // The sum_value will be reinitialized by thread 0 in the
+        // next d iteration, sync here to make sure the last loop still uses the
+        // reduced value before reinitialization
+        __syncthreads();
       }
     }
   }
@@ -1952,14 +2055,13 @@ Tensor jagged_softmax_backward(
   at::cuda::OptionalCUDAGuard device_guard;
   device_guard.set_index(grad_output.get_device());
 
-  const int B = offsets.numel() - 1;
-  const int D = grad_output.size(1);
+  const auto B = offsets.numel() - 1;
+  const auto D = grad_output.size(1);
   auto grad_input = at::empty_like(grad_output);
 
   if (B > 0 && D > 0) {
-    const int block_dim_x =
-        std::min(div_round_up(D, kWarpSize) * kWarpSize, kMaxThreads);
-    const int block_dim_y = kMaxThreads / block_dim_x;
+    constexpr int THREADS_PER_BLOCK = 128;
+    const dim3 grid(D, std::min((int32_t)B, (int32_t)kMaxBlockYDim), 1);
 
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_softmax_backward_kernel_1", [&] {
@@ -1969,9 +2071,12 @@ Tensor jagged_softmax_backward(
               grad_output.scalar_type(),
               "jagged_softmax_backward_kernel_2",
               [&] {
-                jagged_softmax_backward_kernel<index_t, scalar_t>
-                    <<<div_round_up(B, block_dim_y),
-                       dim3(block_dim_x, block_dim_y),
+                jagged_softmax_backward_kernel<
+                    THREADS_PER_BLOCK,
+                    index_t,
+                    scalar_t>
+                    <<<grid,
+                       THREADS_PER_BLOCK,
                        0,
                        at::cuda::getCurrentCUDAStream()>>>(
                         grad_output.packed_accessor32<scalar_t, 2>(),
@@ -1986,7 +2091,7 @@ Tensor jagged_softmax_backward(
   return grad_input;
 }
 
-template <typename index_t, typename scalar_t>
+template <const int BLOCK_SIZE, typename index_t, typename scalar_t>
 __global__ __launch_bounds__(kMaxThreads) void jagged_jagged_bmm_kernel(
     const at::PackedTensorAccessor32<scalar_t, 2> x_values,
     const at::PackedTensorAccessor32<scalar_t, 2> y_values,
@@ -1997,30 +2102,53 @@ __global__ __launch_bounds__(kMaxThreads) void jagged_jagged_bmm_kernel(
   const int M = x_values.size(1);
   const int N = y_values.size(1);
 
-  const int b_m_begin = blockIdx.x * blockDim.y + threadIdx.y;
-  const int b_m_step = gridDim.x * blockDim.y;
-  for (int b_m = b_m_begin; b_m < B * M; b_m += b_m_step) {
-    const int b = b_m / M;
-    const int m = b_m % M;
+  const auto block_row = blockIdx.y;
+  const auto block_col = blockIdx.x;
+  const auto row = threadIdx.y;
+  const auto col = threadIdx.x;
+  __shared__ scalar_t Xs[BLOCK_SIZE][BLOCK_SIZE];
+  __shared__ scalar_t Ys[BLOCK_SIZE][BLOCK_SIZE];
 
-    const int row_start = offsets[b];
-    const int row_end = offsets[b + 1];
-    const int length = min(row_end - row_start, max_L);
-    if (length == 0) {
-      for (int n = threadIdx.x; n < N; n += blockDim.x) {
-        output[b][m][n] = 0;
+  for (uint32_t b = blockIdx.z; b < B; b += gridDim.z) {
+    const index_t row_start = offsets[b];
+    const index_t row_end = offsets[b + 1];
+    const auto length = min(row_end - row_start, (index_t)max_L);
+    auto num_l_blocks = (length + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    at::acc_type<scalar_t, true> acc = 0;
+
+    const auto row_offset = block_row * BLOCK_SIZE + row;
+    const auto col_offset = block_col * BLOCK_SIZE + col;
+
+    // for loop block tile in length dimension
+    for (auto bk_l = 0; bk_l < num_l_blocks; bk_l++) {
+      Xs[row][col] = 0;
+      Ys[row][col] = 0;
+      const auto bk_offset = bk_l * BLOCK_SIZE;
+
+      // load data from global memory to shared memory
+      const auto l_x = bk_offset + col;
+      if (row_offset < M && l_x < length) {
+        Xs[row][col] = x_values[row_start + l_x][row_offset];
       }
-    } else {
-      // TODO: use shared memory and better reduction
-      for (int n = threadIdx.x; n < N; n += blockDim.x) {
-        at::acc_type<scalar_t, true> acc =
-            x_values[row_start][m] * y_values[row_start][n];
-        for (int l = 1; l < length; ++l) {
-          acc += x_values[row_start + l][m] * y_values[row_start + l][n];
-        }
-        output[b][m][n] = acc;
+
+      const auto l_y = bk_offset + row;
+      if (l_y < length && col_offset < N) {
+        Ys[row][col] = y_values[row_start + l_y][col_offset];
       }
+
+      __syncthreads();
+
+#pragma unroll
+      for (auto e = 0; e < BLOCK_SIZE; e++) {
+        acc += Xs[row][e] * Ys[e][col];
+      }
+      __syncthreads();
     }
+
+    // write the result to the output
+    if ((row_offset < M) && (col_offset < N))
+      output[b][row_offset][col_offset] = acc;
   }
 }
 
@@ -2042,9 +2170,16 @@ Tensor jagged_jagged_bmm_forward(
   auto output = at::zeros({B, M, N}, x_values.options());
 
   if (B > 0 && M > 0 && N > 0) {
-    const int block_dim_x =
-        std::min(div_round_up(N, kWarpSize) * kWarpSize, kMaxThreads);
-    const int block_dim_y = kMaxThreads / block_dim_x;
+    constexpr int BLOCK_SIZE = 16;
+    const dim3 block(BLOCK_SIZE, BLOCK_SIZE);
+    const auto grid_dim_x = div_round_up(N, BLOCK_SIZE);
+    const auto grid_dim_y = div_round_up(M, BLOCK_SIZE);
+    TORCH_CHECK(
+        grid_dim_y <= kMaxBlockYDim,
+        "M cannot be larger than",
+        grid_dim_y * BLOCK_SIZE + 1 - BLOCK_SIZE);
+    const auto grid_dim_z = std::min(B, kMaxBlockZDim);
+    const dim3 grid(grid_dim_x, grid_dim_y, grid_dim_z);
 
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_jagged_bmm_kernel_1", [&] {
@@ -2054,11 +2189,8 @@ Tensor jagged_jagged_bmm_forward(
               x_values.scalar_type(),
               "jagged_jagged_bmm_kernel_2",
               [&] {
-                jagged_jagged_bmm_kernel<index_t, scalar_t>
-                    <<<div_round_up(B * M, block_dim_y),
-                       dim3(block_dim_x, block_dim_y),
-                       0,
-                       at::cuda::getCurrentCUDAStream()>>>(
+                jagged_jagged_bmm_kernel<BLOCK_SIZE, index_t, scalar_t>
+                    <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
                         x_values.packed_accessor32<scalar_t, 2>(),
                         y_values.packed_accessor32<scalar_t, 2>(),
                         offsets.packed_accessor32<index_t, 1>(),
@@ -2071,7 +2203,17 @@ Tensor jagged_jagged_bmm_forward(
   return output;
 }
 
-template <typename index_t, typename scalar_t>
+template <
+    const int BLOCK_TILE_M, // tile height of C that each thread block
+                            // calculates
+    const int BLOCK_TILE_N, // tile width of C that each thread block
+                            // calculates
+    const int BLOCK_TILE_K, // tile width of A that each thread block calculates
+    const int THREAD_TILE_M, // tile height of C that each thread
+                             // calculates
+    const int THREAD_TILE_N, // tile width of C that each thread calcualtes
+    typename index_t,
+    typename scalar_t>
 __global__ __launch_bounds__(kMaxThreads) void jagged_dense_bmm_kernel(
     const at::PackedTensorAccessor32<scalar_t, 2> x_values,
     const at::PackedTensorAccessor32<index_t, 1> x_offsets,
@@ -2082,25 +2224,116 @@ __global__ __launch_bounds__(kMaxThreads) void jagged_dense_bmm_kernel(
   const int K = x_values.size(1);
   const int N = y.size(2);
 
-  const int b_l_begin = blockIdx.x * blockDim.y + threadIdx.y;
-  const int b_l_step = gridDim.x * blockDim.y;
-  for (int b_l = b_l_begin; b_l < B * max_L; b_l += b_l_step) {
-    const int b = b_l / max_L;
-    const int l = b_l % max_L;
+  const auto block_row = blockIdx.y;
+  const auto block_col = blockIdx.x;
 
-    const int row_start = x_offsets[b];
-    const int row_end = x_offsets[b + 1];
-    const int length = min(row_end - row_start, max_L);
-    if (length == 0 || l >= length) {
-      return;
-    } else {
-      // TODO: use shared memory and better reduction
-      for (int n = threadIdx.x; n < N; n += blockDim.x) {
-        at::acc_type<scalar_t, true> acc = 0;
-        for (int k = 0; k < K; ++k) {
-          acc += x_values[row_start + l][k] * y[b][k][n];
+  const int THREADS_X_PER_BLOCK = BLOCK_TILE_N / THREAD_TILE_N;
+  const int THREADS_Y_PER_BLOCK = BLOCK_TILE_M / THREAD_TILE_M;
+  const int THREADS_PER_BLOCK = THREADS_X_PER_BLOCK * THREADS_Y_PER_BLOCK;
+  const auto thread_row = threadIdx.x / THREADS_X_PER_BLOCK;
+  const auto thread_col = threadIdx.x % THREADS_X_PER_BLOCK;
+  const auto NUM_K_BLOCKS = (K + BLOCK_TILE_K - 1) / BLOCK_TILE_K;
+
+  __shared__ scalar_t As[BLOCK_TILE_M][BLOCK_TILE_K];
+  __shared__ scalar_t Bs[BLOCK_TILE_K][BLOCK_TILE_N];
+
+  // Once we remove ROCm<=5.3 support, we should replace uint32_t with auto.
+  // See #1655
+  for (uint32_t b = blockIdx.z; b < B; b += gridDim.z) {
+    const index_t row_start = x_offsets[b];
+    const index_t row_end = x_offsets[b + 1];
+    const auto length = min(row_end - row_start, (index_t)max_L);
+
+    // the indices that this current will load into shared mem
+    const auto inner_row_a = threadIdx.x / BLOCK_TILE_K;
+    const auto inner_col_a = threadIdx.x % BLOCK_TILE_K;
+    // the number of rows of As that will be loaded per step by a thread block
+    const auto A_TILE_ROW_STRIDE = THREADS_PER_BLOCK / BLOCK_TILE_K;
+
+    const auto inner_row_b = threadIdx.x / BLOCK_TILE_N;
+    const auto inner_col_b = threadIdx.x % BLOCK_TILE_N;
+    const auto B_TILE_ROW_STRIDE = THREADS_PER_BLOCK / BLOCK_TILE_N;
+
+    // registers for C
+    scalar_t accum[THREAD_TILE_M][THREAD_TILE_N] = {0};
+
+    // registers for As and Bs
+    scalar_t fragment_a[THREAD_TILE_M] = {0};
+    scalar_t fragment_b[THREAD_TILE_N] = {0};
+
+    // loop for block tiles in K dimension
+    for (auto block = 0; block < NUM_K_BLOCKS; block++) {
+// load a block of x_values from global memory to shared memory
+// apply tiling for threads in a block
+#pragma unroll
+      for (auto offset = 0; offset < BLOCK_TILE_M;
+           offset += A_TILE_ROW_STRIDE) {
+        auto x_row_offset = block_row * BLOCK_TILE_M + inner_row_a + offset;
+        auto x_col_offset = block * BLOCK_TILE_K + inner_col_a;
+        if ((x_row_offset < length) && (x_col_offset < K)) {
+          As[inner_row_a + offset][inner_col_a] =
+              x_values[row_start + x_row_offset][x_col_offset];
+        } else {
+          As[inner_row_a + offset][inner_col_a] = 0;
         }
-        output[row_start + l][n] = acc;
+      }
+
+// load a block of y from global memory to shared memory
+// apply tiling for threads in a block
+#pragma unroll
+      for (auto offset = 0; offset < BLOCK_TILE_K;
+           offset += B_TILE_ROW_STRIDE) {
+        auto y_row_offset = block * BLOCK_TILE_K + inner_row_b + offset;
+        auto y_col_offset = block_col * BLOCK_TILE_N + inner_col_b;
+        if ((y_row_offset < K) && (y_col_offset < N)) {
+          Bs[inner_row_b + offset][inner_col_b] =
+              y[b][y_row_offset][y_col_offset];
+        } else {
+          Bs[inner_row_b + offset][inner_col_b] = 0;
+        }
+      }
+
+      __syncthreads();
+
+// calculate the results per thread
+#pragma unroll
+      for (auto k = 0; k < BLOCK_TILE_K; k++) {
+        // load values from shared memory to registers for x_values
+        for (auto row = 0; row < THREAD_TILE_M; row++) {
+          fragment_a[row] = As[thread_row * THREAD_TILE_M + row][k];
+        }
+
+// load values from shared memory to registers for y
+#pragma unroll
+        for (auto col = 0; col < THREAD_TILE_N; col++) {
+          fragment_b[col] = Bs[k][thread_col * THREAD_TILE_N + col];
+        }
+
+// each thread calcualtes THREAD_TILE_M * THREAD_TILE_N elements
+#pragma unroll
+        for (auto row = 0; row < THREAD_TILE_M; row++) {
+#pragma unroll
+          for (auto col = 0; col < THREAD_TILE_N; col++) {
+            accum[row][col] += fragment_a[row] * fragment_b[col];
+          }
+        }
+      }
+
+      __syncthreads();
+    }
+
+// write the result to the output
+#pragma unroll
+    for (auto row = 0; row < THREAD_TILE_M; row++) {
+#pragma unroll
+      for (auto col = 0; col < THREAD_TILE_N; col++) {
+        auto out_row_offset =
+            block_row * BLOCK_TILE_M + thread_row * THREAD_TILE_M + row;
+        auto out_col_offset =
+            block_col * BLOCK_TILE_N + thread_col * THREAD_TILE_N + col;
+        if ((out_row_offset < length) && (out_col_offset < N)) {
+          output[row_start + out_row_offset][out_col_offset] = accum[row][col];
+        }
       }
     }
   }
@@ -2124,9 +2357,29 @@ Tensor jagged_dense_bmm_forward(
   const int total_L = x_values.size(0);
   auto output = at::zeros({total_L, N}, x_values.options());
   if (B > 0 && M > 0 && N > 0) {
-    const int block_dim_x =
-        std::min(div_round_up(N, kWarpSize) * kWarpSize, kMaxThreads);
-    const int block_dim_y = kMaxThreads / block_dim_x;
+    // The shared memory size is (BLOCK_TILE_M + BLOCK_TILE_N) * BLOCK_TILE_K
+    // BLOCK_TILE_M needs to be multiple of THREAD_TILE_M, and
+    // BLOCK_TILE_N needs to be multiple of THREAD_TILE_N
+    // The setting of these parameters needs to balance the hardware's shared
+    // memory size limit and occupancy
+    // TODO: autotune these parameters based on max_L and input and output
+    // tensor sizes
+    constexpr int BLOCK_TILE_M = 64;
+    constexpr int BLOCK_TILE_N = 8;
+    constexpr int BLOCK_TILE_K = 8;
+    constexpr int THREAD_TILE_M = 4;
+    constexpr int THREAD_TILE_N = 4;
+
+    const dim3 block(
+        (BLOCK_TILE_M * BLOCK_TILE_N) / (THREAD_TILE_M * THREAD_TILE_N));
+    const auto grid_dim_x = div_round_up(N, BLOCK_TILE_N);
+    const auto grid_dim_y = div_round_up(max_L, BLOCK_TILE_M);
+    TORCH_CHECK(
+        grid_dim_y <= kMaxBlockYDim,
+        "max_L cannot be larger than",
+        grid_dim_y * BLOCK_TILE_M + 1 - BLOCK_TILE_M);
+    const auto grid_dim_z = std::min(B, kMaxBlockZDim);
+    const dim3 grid(grid_dim_x, grid_dim_y, grid_dim_z);
 
     AT_DISPATCH_INDEX_TYPES(
         x_offsets.scalar_type(), "jagged_dense_bmm_kernel_1", [&] {
@@ -2136,11 +2389,15 @@ Tensor jagged_dense_bmm_forward(
               x_values.scalar_type(),
               "jagged_dense_bmm_kernel_2",
               [&] {
-                jagged_dense_bmm_kernel<index_t, scalar_t>
-                    <<<div_round_up(B * max_L, block_dim_y),
-                       dim3(block_dim_x, block_dim_y),
-                       0,
-                       at::cuda::getCurrentCUDAStream()>>>(
+                jagged_dense_bmm_kernel<
+                    BLOCK_TILE_M,
+                    BLOCK_TILE_N,
+                    BLOCK_TILE_K,
+                    THREAD_TILE_M,
+                    THREAD_TILE_N,
+                    index_t,
+                    scalar_t>
+                    <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
                         x_values.packed_accessor32<scalar_t, 2>(),
                         x_offsets.packed_accessor32<index_t, 1>(),
                         y.packed_accessor32<scalar_t, 3>(),
