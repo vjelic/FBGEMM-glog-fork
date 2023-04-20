@@ -125,54 +125,63 @@ def int_arg(name: str, default: int = 0) -> str:
 
 
 def generate(**kwargs: Any) -> None:
+    optimizer = kwargs.get("optimizer")
+
     gen_args = kwargs["args"]
 
-    # Generates CUDA variants.
+    #
+    # Generate GPU variants of the operators
+    #
     kwargs["args"] = gen_args["cuda"]
 
+    # Generate the backward splits
     template = env.get_template("embedding_backward_split_template.cu")
-    src_cu = template.render(weighted=False, **kwargs)
-    write(
-        f"gen_embedding_backward_{kwargs.get('optimizer')}_split_unweighted_cuda.cu",
-        src_cu,
-    )
-    src_cu = template.render(weighted=True, **kwargs)
-    write(
-        f"gen_embedding_backward_{kwargs.get('optimizer')}_split_weighted_cuda.cu",
-        src_cu,
-    )
+    for weighted in [True, False]:
+        for nobag in [True, False]:
+            if not nobag or not weighted:
+                wdesc = f"{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
+                filename = f"gen_embedding_backward_{optimizer}_split_{wdesc}_cuda.cu"
+                write(
+                    filename, template.render(weighted=weighted, nobag=nobag, **kwargs)
+                )
+
+                print(f"[Backward Split] [{optimizer}]: {filename}")
+
+    # Generate the backward splits (non-dense)
     if not kwargs.get("dense"):
         template = env.get_template("embedding_backward_split_host_template.cpp")
-        src_cpp = template.render(**kwargs)
-        write(f"gen_embedding_backward_split_{kwargs.get('optimizer')}.cpp", src_cpp)
+        filename = f"gen_embedding_backward_split_{optimizer}.cpp"
+        write(filename, template.render(**kwargs))
+        print(f"[Backward Split] [{optimizer}]: {filename}")
 
         # Generates Python invoker for CUDA + CPU
         template = env.get_template("split_embedding_codegen_lookup_invoker.template")
-        src_py = template.render(is_fbcode=args.is_fbcode, **kwargs)
-        write(f"lookup_{kwargs.get('optimizer')}.py", src_py)
+        filename = f"lookup_{optimizer}.py"
+        write(filename, template.render(is_fbcode=args.is_fbcode, **kwargs))
+        print(f"[Backward Split] [{optimizer}]: {filename}")
 
-    # Generates CPU variants.
+    #
+    # Generate CPU variants of the operators
+    #
     kwargs["args"] = gen_args["cpu"]
 
-    is_approx = "approx" in kwargs.get("optimizer")
+    # Generate the backward splits
+    is_approx = "approx" in optimizer
     template = (
         env.get_template("embedding_backward_split_cpu_approx_template.cpp")
         if is_approx
         else env.get_template("embedding_backward_split_cpu_template.cpp")
     )
+    filename = f"gen_embedding_backward_{optimizer}_split_cpu.cpp"
+    write(filename, template.render(**kwargs))
+    print(f"[Backward Split] [{optimizer}]: {filename}")
 
-    src_cpp = template.render(**kwargs)
-    write(
-        f"gen_embedding_backward_{kwargs.get('optimizer')}_split_cpu.cpp",
-        src_cpp,
-    )
-
+    # Generate the backward splits (non-dense)
     if not kwargs.get("dense"):
         template = env.get_template("embedding_backward_split_host_cpu_template.cpp")
-        src_cpp = template.render(**kwargs)
-        write(
-            f"gen_embedding_backward_split_{kwargs.get('optimizer')}_cpu.cpp", src_cpp
-        )
+        filename = f"gen_embedding_backward_split_{optimizer}_cpu.cpp"
+        write(filename, template.render(**kwargs))
+        print(f"[Backward Split] [{optimizer}]: {filename}")
 
 
 @dataclass
@@ -1251,32 +1260,144 @@ def forward_split() -> None:
 
 def forward_quantized() -> None:
     @dataclass
+    class template_instance_params:
+        output_rows_per_thread: str
+        input_rows_in_flight: str
+        min_128b_rows: str
+        max_128b_rows: str
+
+    @dataclass
     class elem_type:
         enum_name: str
         cpp_type_name: str
         primitive_type: str
         bit_width: int
+        template_params: List[template_instance_params]
 
     type_map = {
-        "FP32": elem_type("FP32", "float", "FP", 32),
-        "FP16": elem_type("FP16", "__half2", "FP", 16),
-        "FP8": elem_type("FP8", "uint32_t", "FP", 8),
-        "INT8": elem_type("INT8", "uint32_t", "INT", 8),
-        "INT4": elem_type("INT4", "uint32_t", "INT", 4),
-        "INT2": elem_type("INT2", "uint32_t", "INT", 2),
+        "FP32": elem_type(
+            "FP32",
+            "float",
+            "FP",
+            32,
+            [
+                template_instance_params(*map(str, (2, 4, 0, 4))),
+                template_instance_params(*map(str, (2, 2, 4, 16))),
+                template_instance_params(*map(str, (1, 1, 16, 32))),
+                template_instance_params(*map(str, (1, 1, 32, 64))),
+            ],
+        ),
+        "FP16": elem_type(
+            "FP16",
+            "__half2",
+            "FP",
+            16,
+            [
+                template_instance_params(*map(str, (2, 8, 0, 2))),
+                template_instance_params(*map(str, (2, 8, 2, 4))),
+                template_instance_params(*map(str, (2, 4, 4, 8))),
+                template_instance_params(*map(str, (2, 2, 8, 16))),
+                template_instance_params(*map(str, (2, 1, 16, 32))),
+            ],
+        ),
+        "FP8": elem_type(
+            "FP8",
+            "uint32_t",
+            "FP",
+            8,
+            [
+                template_instance_params(*map(str, (2, 8, 0, 1))),
+                template_instance_params(*map(str, (2, 4, 1, 2))),
+                template_instance_params(*map(str, (2, 4, 2, 4))),
+                template_instance_params(*map(str, (2, 4, 4, 8))),
+                template_instance_params(*map(str, (2, 2, 4, 8))),
+            ],
+        ),
+        "INT8": elem_type(
+            "INT8",
+            "uint32_t",
+            "INT",
+            8,
+            [
+                template_instance_params(*map(str, (2, 8, 0, 1))),
+                template_instance_params(*map(str, (2, 4, 1, 2))),
+                template_instance_params(*map(str, (2, 4, 2, 4))),
+                template_instance_params(*map(str, (2, 4, 4, 8))),
+                template_instance_params(*map(str, (2, 2, 8, 16))),
+            ],
+        ),
+        "INT4": elem_type(
+            "INT4",
+            "uint32_t",
+            "INT",
+            4,
+            [
+                template_instance_params(*map(str, (4, 8, 0, 1))),
+                template_instance_params(*map(str, (2, 8, 1, 2))),
+                template_instance_params(*map(str, (1, 4, 2, 4))),
+                template_instance_params(*map(str, (1, 4, 4, 8))),
+            ],
+        ),
+        "INT2": elem_type(
+            "INT2",
+            "uint32_t",
+            "INT",
+            2,
+            [
+                template_instance_params(*map(str, (2, 16, 0, 1))),
+                template_instance_params(*map(str, (2, 8, 1, 2))),
+                template_instance_params(*map(str, (2, 8, 2, 4))),
+            ],
+        ),
     }
 
-    template = env.get_template("embedding_forward_quantized_split_template.cu")
-    src_cu = template.render(weighted=False, type_map=type_map)
-    write("gen_embedding_forward_quantized_split_unweighted_codegen_cuda.cu", src_cu)
-    src_cu = template.render(weighted=True, type_map=type_map)
-    write("gen_embedding_forward_quantized_split_weighted_codegen_cuda.cu", src_cu)
+    # Generate the CUDA nbit (kernel) templates
+    template = env.get_template(
+        "embedding_forward_quantized_split_nbit_kernel_template.cu"
+    )
+    for weighted in [True, False]:
+        for nobag in [True, False]:
+            if not nobag or not weighted:
+                for emb_weight_type in type_map.values():
+                    wdesc = f"{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
+                    filename = f"gen_embedding_forward_quantized_split_nbit_kernel_{ wdesc }_{ emb_weight_type.enum_name.lower() }_codegen_cuda.cu"
+                    write(
+                        filename,
+                        template.render(
+                            weighted=weighted,
+                            nobag=nobag,
+                            emb_weight_type=emb_weight_type,
+                        ),
+                    )
+                    print(f"[Forward Quantized]: {filename}")
 
+    # Generate the CUDA nbit (host) templates
+    template = env.get_template(
+        "embedding_forward_quantized_split_nbit_host_template.cu"
+    )
+    for weighted in [True, False]:
+        for nobag in [True, False]:
+            if not nobag or not weighted:
+                wdesc = f"{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
+                filename = f"gen_embedding_forward_quantized_split_nbit_host_{ wdesc }_codegen_cuda.cu"
+                write(
+                    filename,
+                    template.render(weighted=weighted, nobag=nobag, type_map=type_map),
+                )
+                print(f"[Forward Quantized]: {filename}")
+
+    # Generate the CPU templates
     template = env.get_template("embedding_forward_quantized_cpu_template.cpp")
-    src_cu = template.render(weighted=False, type_map=type_map)
-    write("gen_embedding_forward_quantized_unweighted_codegen_cpu.cpp", src_cu)
-    src_cu = template.render(weighted=True, type_map=type_map)
-    write("gen_embedding_forward_quantized_weighted_codegen_cpu.cpp", src_cu)
+    for weighted in [True, False]:
+        filename = f"gen_embedding_forward_quantized_{ 'weighted' if weighted else 'unweighted' }_codegen_cpu.cpp"
+        write(filename, template.render(weighted=weighted, type_map=type_map))
+        print(f"[Forward Quantized]: {filename}")
+
+
+def backward_grad() -> None:
+    # Generate the common grad functions
+    template = env.get_template("embedding_backward_split_grad_template.cu")
+    write("gen_embedding_backward_split_grad.cu", template.render())
 
 
 def backward_indices() -> None:
@@ -1314,6 +1435,7 @@ def emb_codegen(
         args.is_fbcode = is_fbcode
     adagrad()
     adam()
+    backward_grad()
     backward_indices()
     backward_dense()
     forward_quantized()
@@ -1327,7 +1449,6 @@ def emb_codegen(
     rowwise_adagrad_with_counter()
     rowwise_weighted_adagrad()
     sgd()
-
     gen__init__py()
 
 

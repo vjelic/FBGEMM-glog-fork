@@ -121,14 +121,24 @@ set(OPTIMIZERS
 set(gen_gpu_source_files
     "gen_embedding_forward_dense_weighted_codegen_cuda.cu"
     "gen_embedding_forward_dense_unweighted_codegen_cuda.cu"
-    "gen_embedding_forward_quantized_split_unweighted_codegen_cuda.cu"
-    "gen_embedding_forward_quantized_split_weighted_codegen_cuda.cu"
     "gen_embedding_forward_split_weighted_codegen_cuda.cu"
     "gen_embedding_forward_split_unweighted_codegen_cuda.cu"
-    "gen_embedding_backward_split_indice_weights_codegen_cuda.cu"
     "gen_embedding_backward_dense_indice_weights_codegen_cuda.cu"
-    "gen_embedding_backward_dense_split_unweighted_cuda.cu"
-    "gen_embedding_backward_dense_split_weighted_cuda.cu")
+    "gen_embedding_backward_split_indice_weights_codegen_cuda.cu"
+    "gen_embedding_backward_split_grad.cu")
+
+foreach(wdesc weighted unweighted_nobag unweighted)
+  list(APPEND gen_gpu_source_files
+      "gen_embedding_forward_quantized_split_nbit_host_${wdesc}_codegen_cuda.cu")
+
+  foreach(etype fp32 fp16 fp8 int8 int4 int2)
+    list(APPEND gen_gpu_source_files
+       "gen_embedding_forward_quantized_split_nbit_kernel_${wdesc}_${etype}_codegen_cuda.cu")
+  endforeach()
+
+  list(APPEND gen_gpu_source_files
+    "gen_embedding_backward_dense_split_${wdesc}_cuda.cu")
+endforeach()
 
 set(gen_cpu_source_files
     "gen_embedding_forward_quantized_unweighted_codegen_cpu.cpp"
@@ -139,18 +149,20 @@ set(gen_python_files ${CMAKE_BINARY_DIR}/__init__.py)
 
 foreach(optimizer ${OPTIMIZERS})
   list(APPEND gen_gpu_host_source_files
-       "gen_embedding_backward_split_${optimizer}.cpp")
+    "gen_embedding_backward_split_${optimizer}.cpp")
 
   list(APPEND gen_cpu_source_files
-       "gen_embedding_backward_split_${optimizer}_cpu.cpp")
+    "gen_embedding_backward_split_${optimizer}_cpu.cpp")
+
   list(APPEND gen_cpu_source_files
-       "gen_embedding_backward_${optimizer}_split_cpu.cpp")
+    "gen_embedding_backward_${optimizer}_split_cpu.cpp")
 
-  list(APPEND gen_python_files "${CMAKE_BINARY_DIR}/lookup_${optimizer}.py")
+  list(APPEND gen_python_files
+    "${CMAKE_BINARY_DIR}/lookup_${optimizer}.py")
 
-  foreach(weight weighted unweighted)
+  foreach(wdesc weighted unweighted_nobag unweighted)
     list(APPEND gen_gpu_source_files
-         "gen_embedding_backward_${optimizer}_split_${weight}_cuda.cu")
+      "gen_embedding_backward_${optimizer}_split_${wdesc}_cuda.cu")
   endforeach()
 endforeach()
 
@@ -165,11 +177,13 @@ set(codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/embedding_backward_split_host_cpu_template.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_backward_split_host_template.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_backward_split_indice_weights_template.cu
+    ${CMAKE_CODEGEN_DIR}/embedding_backward_split_grad_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_backward_split_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_cpu_template.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_host.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_host_cpu.cpp
-    ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_split_template.cu
+    ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_split_nbit_host_template.cu
+    ${CMAKE_CODEGEN_DIR}/embedding_forward_quantized_split_nbit_kernel_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_cpu.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_cpu.h
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_template.cu
@@ -313,7 +327,6 @@ set(fbgemm_gpu_sources_cpu
     codegen/embedding_backward_dense_host_cpu.cpp
     codegen/embedding_bounds_check_host_cpu.cpp
     src/permute_pooled_embedding_ops_split_cpu.cpp
-    src/cpu_utils.cpp
     src/jagged_tensor_ops_autograd.cpp
     src/jagged_tensor_ops_meta.cpp
     src/jagged_tensor_ops_cpu.cpp
@@ -366,6 +379,7 @@ set_source_files_properties(
 if(NOT FBGEMM_CPU_ONLY)
   set(fbgemm_gpu_sources_gpu
       codegen/embedding_bounds_check.cu
+      codegen/embedding_forward_quantized_split_lookup.cu
       src/cumem_utils.cu
       src/histogram_binning_calibration_ops.cu
       src/jagged_tensor_ops.cu
