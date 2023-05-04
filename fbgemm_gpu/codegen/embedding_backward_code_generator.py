@@ -116,17 +116,43 @@ def float_arg(name: str, default: float = 0.0) -> str:
     return f"float {name} = {default}"
 
 
+def float_arg_no_default(name: str) -> str:
+    return f"float {name}"
+
+
 def int64_arg(name: str, default: int = 0) -> str:
     return f"int64_t {name} = {default}"
+
+
+def int64_arg_no_default(name: str) -> str:
+    return f"int64_t {name}"
 
 
 def int_arg(name: str, default: int = 0) -> str:
     return f"int {name} = {default}"
 
 
+def generate_backward_embedding_cuda(
+    template_filepath: str,
+    optimizer: str,
+    filename_format: str,
+    kwargs: Dict[str, Any],
+) -> None:
+    template = env.get_template(template_filepath)
+    for weighted in [True, False]:
+        for nobag in [True, False]:
+            if not nobag or not weighted:
+                wdesc = f"{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
+                filename = filename_format.format(optimizer, wdesc)
+                write(
+                    filename,
+                    template.render(weighted=weighted, nobag=nobag, **kwargs),
+                )
+                print(f"[Backward Split] [{optimizer}]: {filename}")
+
+
 def generate(**kwargs: Any) -> None:
     optimizer = kwargs.get("optimizer")
-
     gen_args = kwargs["args"]
 
     #
@@ -135,17 +161,28 @@ def generate(**kwargs: Any) -> None:
     kwargs["args"] = gen_args["cuda"]
 
     # Generate the backward splits
-    template = env.get_template("embedding_backward_split_template.cu")
-    for weighted in [True, False]:
-        for nobag in [True, False]:
-            if not nobag or not weighted:
-                wdesc = f"{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
-                filename = f"gen_embedding_backward_{optimizer}_split_{wdesc}_cuda.cu"
-                write(
-                    filename, template.render(weighted=weighted, nobag=nobag, **kwargs)
-                )
+    generate_backward_embedding_cuda(
+        "embedding_backward_split_template.cu",
+        optimizer,
+        "gen_embedding_backward_{}_split_{}_cuda.cu",
+        kwargs,
+    )
 
-                print(f"[Backward Split] [{optimizer}]: {filename}")
+    # Generate the cta_per_row kernels for the backward splits
+    generate_backward_embedding_cuda(
+        "embedding_backward_split_kernel_cta_template.cu",
+        optimizer,
+        "gen_embedding_backward_{}_split_{}_kernel_cta.cu",
+        kwargs,
+    )
+
+    # Generate the warp_per_row kernels for the backward splits
+    generate_backward_embedding_cuda(
+        "embedding_backward_split_kernel_warp_template.cu",
+        optimizer,
+        "gen_embedding_backward_{}_split_{}_kernel_warp.cu",
+        kwargs,
+    )
 
     # Generate the backward splits (non-dense)
     if not kwargs.get("dense"):
@@ -187,6 +224,7 @@ def generate(**kwargs: Any) -> None:
 @dataclass
 class Args:
     split_kernel_args: List[str]
+    split_kernel_args_no_defaults: List[str]
     split_kernel_arg_constructors: List[str]
     split_cpu_kernel_args: List[str]
     split_cpu_kernel_arg_constructors: List[str]
@@ -205,13 +243,19 @@ TENSOR, INT_TENSOR, LONG_TENSOR, INT, FLOAT = range(5)
 def make_args(
     arg_spec: List[Union[Tuple[int, str], Tuple[int, str, Union[float, int]]]]
 ) -> Dict[str, Any]:
-    def make_kernel_arg(ty: int, name: str, default: Union[int, float]) -> str:
+    def make_kernel_arg(
+        ty: int, name: str, default: Optional[Union[int, float]]
+    ) -> str:
         return {
             TENSOR: acc_cache_tensor_arg,
             INT_TENSOR: int_tensor_arg,
             LONG_TENSOR: long_tensor_arg,
-            INT: lambda x: int64_arg(x, default=int(default)),
-            FLOAT: lambda x: float_arg(x, default=default),
+            INT: (lambda x: int64_arg(x, default=int(default)))
+            if default is not None
+            else int64_arg_no_default,
+            FLOAT: (lambda x: float_arg(x, default=default))
+            if default is not None
+            else float_arg_no_default,
         }[ty](name)
 
     def make_kernel_arg_constructor(ty: int, name: str) -> str:
@@ -269,6 +313,9 @@ def make_args(
             split_kernel_args=[
                 make_kernel_arg(ty, name, default)
                 for (ty, name, default) in split_arg_spec
+            ],
+            split_kernel_args_no_defaults=[
+                make_kernel_arg(ty, name, None) for (ty, name, _) in split_arg_spec
             ],
             split_kernel_arg_constructors=[
                 make_kernel_arg_constructor(ty, name)
@@ -1244,18 +1291,49 @@ def lars_sgd() -> None:
     )
 
 
+def generate_forward_embedding_cuda(
+    template_filepath: str,
+    filename_format: str,
+) -> None:
+    template = env.get_template(template_filepath)
+    for dense in [True, False]:
+        for weighted in [True, False]:
+            for nobag in [True, False]:
+                if not nobag or not weighted:
+                    wdesc = f"{ 'dense' if dense else 'split'}_{ 'weighted' if weighted else 'unweighted' }{ '_nobag' if nobag else '' }"
+                    filename = filename_format.format(wdesc)
+                    write(
+                        filename,
+                        template.render(dense=dense, weighted=weighted, nobag=nobag),
+                    )
+                    print(f"[Forward Split]: {filename}")
+
+
 def forward_split() -> None:
+    # Generate the forward splits
     template = env.get_template("embedding_forward_split_template.cu")
+    for dense in [True, False]:
+        for weighted in [True, False]:
+            wdesc = f"{ 'dense' if dense else 'split' }_{ 'weighted' if weighted else 'unweighted' }"
+            filename = f"gen_embedding_forward_{wdesc}_codegen_cuda.cu"
+            write(filename, template.render(weighted=weighted, dense=dense))
+            print(f"[Forward Split]: {filename}")
 
-    src_cu = template.render(weighted=False)
-    write("gen_embedding_forward_split_unweighted_codegen_cuda.cu", src_cu)
-    src_cu = template.render(weighted=True)
-    write("gen_embedding_forward_split_weighted_codegen_cuda.cu", src_cu)
+    # Generate the kernels for the forward splits
+    generate_forward_embedding_cuda(
+        "embedding_forward_split_kernel_template.cu",
+        "gen_embedding_forward_{}_kernel.cu",
+    )
 
-    src_cu = template.render(weighted=False, dense=True)
-    write("gen_embedding_forward_dense_unweighted_codegen_cuda.cu", src_cu)
-    src_cu = template.render(weighted=True, dense=True)
-    write("gen_embedding_forward_dense_weighted_codegen_cuda.cu", src_cu)
+    # Generate the small kernels (for nobag only) for the forward splits
+    template = env.get_template(
+        "embedding_forward_split_kernel_nobag_small_template.cu"
+    )
+    for dense in [True, False]:
+        wdesc = f"{ 'dense' if dense else 'split' }"
+        filename = f"gen_embedding_forward_{wdesc}_unweighted_nobag_kernel_small.cu"
+        write(filename, template.render(dense=dense))
+        print(f"[Forward Split]: {filename}")
 
 
 def forward_quantized() -> None:

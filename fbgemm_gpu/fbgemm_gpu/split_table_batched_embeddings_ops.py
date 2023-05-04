@@ -458,6 +458,13 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             raise AssertionError(
                 "weight_decay_mode is set to WeightDecayMode.COUNTER but counter_based_regularization is None"
             )
+        if (
+            weight_decay_mode != WeightDecayMode.COUNTER
+            and counter_based_regularization is not None
+        ):
+            raise AssertionError(
+                "Need to set weight_decay_mode to WeightDecayMode.COUNTER together with counter_based_regularization"
+            )
 
         self._used_rowwise_adagrad_with_counter: bool = (
             optimizer in (OptimType.EXACT_ROWWISE_ADAGRAD, OptimType.ROWWISE_ADAGRAD)
@@ -640,7 +647,8 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         )
 
         logging.info(
-            f"Using fused {optimizer} with optimizer_args={self.optimizer_args}"
+            f"Using fused {optimizer} with optimizer_args={self.optimizer_args}\n"
+            f"Using rowwise_adagrad_with_counter={self._used_rowwise_adagrad_with_counter}"
         )
 
         self.step = 0
@@ -916,8 +924,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         )
         if self._used_rowwise_adagrad_with_counter:
             if self.iter.item() % self._max_counter_update_freq == 0:
-                max_counter = torch.max(self.row_counter_dev.detach())
-                self.max_counter = max_counter.cpu() + 1
+                row_counter_dev = self.row_counter_dev.detach()
+                if row_counter_dev.numel() > 0:
+                    self.max_counter[0] = torch.max(row_counter_dev).cpu().item() + 1
+                else:
+                    self.max_counter[0] = 1
 
         if self.optimizer == OptimType.EXACT_ROWWISE_ADAGRAD:
             if self._used_rowwise_adagrad_with_counter:

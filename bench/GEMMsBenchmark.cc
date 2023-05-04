@@ -27,19 +27,24 @@
 using namespace std;
 using namespace fbgemm;
 
-void performance_test() {
+void performance_test(
+    const int M,
+    const int N,
+    const int K,
+    const bool timebreak) {
   // clang-format off
-  static const vector<vector<int>> shapes = {
+  const vector<vector<int>> shapes = {
     // NOTE: clang-format wants to use a different formatting but the current
     // formatting should be easier to read.
     // m, n, k
-    {64, 800, 320},
-    {64, 768, 512},
-    {16, 256, 512},
-    {128, 128, 128},
-    {256, 512, 256},
-    {1024, 1024, 1024},
+    {M?M:64, N?N:800, K?K:320},
+    {M?M:64, N?N:768, K?K:512},
+    {M?M:16, N?N:256, K?K:512},
+    {M?M:128, N?N:128, K?K:128},
+    {M?M:256, N?N:512, K?K:256},
+    {M?M:1024, N?N:1024, K?K:1024},
   };
+
   // clang-format on
   bool flush = true;
   std::vector<char> llc;
@@ -51,17 +56,19 @@ void performance_test() {
   constexpr int NWARMUP = 4;
   constexpr int NITER = 10;
 
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-  cout << "WARNING: the timer may be inaccurate when used by multiple threads."
-       << endl;
-  cout << setw(8) << "M, " << setw(8) << "N, " << setw(8) << "K, " << setw(18)
-       << "Type, " << setw(18) << "Packing (us), " << setw(18)
-       << "Kernel (us), " << setw(18) << "Postproc (us), " << setw(18)
-       << "Total (us), " << setw(5) << "GOPs" << endl;
-#else
-  cout << setw(8) << "M, " << setw(8) << "N, " << setw(8) << "K, " << setw(18)
-       << "Type, " << setw(5) << "GOPS" << endl;
-#endif
+  if (timebreak) {
+    cout
+        << "WARNING: the timer may be inaccurate when used by multiple threads."
+        << endl;
+    cout << setw(8) << "M, " << setw(8) << "N, " << setw(8) << "K, " << setw(18)
+         << "Type, " << setw(18) << "Packing (us), " << setw(18)
+         << "Kernel (us), " << setw(18) << "Postproc (us), " << setw(18)
+         << "Computation (us)," << setw(18) << "Total (us), " << setw(5)
+         << "GOPs" << endl;
+  } else {
+    cout << setw(8) << "M, " << setw(8) << "N, " << setw(8) << "K, " << setw(18)
+         << "Type, " << setw(5) << "GOPS" << endl;
+  }
 
   chrono::time_point<chrono::high_resolution_clock> start, end;
   for (const auto& shape : shapes) {
@@ -125,12 +132,14 @@ void performance_test() {
     ((volatile char*)(llc.data()));
 
     cout << setw(6) << m << ", " << setw(6) << n << ", " << setw(6) << k << ", "
-         << setw(16) << runType << ", "
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-         << setw(16) << 0 << ", " << setw(16) << 0 << ", " << setw(16) << 0
-         << ", " << setw(16) << ttot / 1e3 << ", "
-#endif
-         << setw(5) << fixed << setw(5) << setprecision(1) << nops / ttot
+         << setw(16) << runType << ", ";
+
+    if (timebreak) {
+      cout << setw(16) << 0 << ", " << setw(16) << 0 << ", " << setw(16) << 0
+           << ", " << setw(16) << ttot / 1e3 << ", ";
+    }
+
+    cout << setw(5) << fixed << setw(5) << setprecision(1) << nops / ttot
          << endl;
 
     for (size_t i = 0; i < Cfp32_mkl.size(); ++i) {
@@ -155,24 +164,25 @@ void performance_test() {
 
     ttot = 0.0;
     runType = "FBGEMM_i8_acc32";
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-    double total_packing_time = 0.0;
-    double total_computing_time = 0.0;
-    double total_kernel_time = 0.0;
+
+    double packing_time = 0.0, total_packing_time = 0.0;
+    double computing_time = 0.0, total_computing_time = 0.0;
+    double kernel_time = 0.0, total_kernel_time = 0.0;
+    double postprocessing_time = 0.0;
     double total_postprocessing_time = 0.0;
-    double total_run_time = 0.0;
-#endif
+    double run_time = 0.0, total_run_time = 0.0;
+
     cout << setw(6) << m << ", " << setw(6) << n << ", " << setw(6) << k << ", "
          << setw(16) << runType;
 
     for (auto i = 0; i < NWARMUP + NITER; ++i) {
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-      packing_time = 0.0;
-      computing_time = 0.0;
-      kernel_time = 0.0;
-      postprocessing_time = 0.0;
-      run_time = 0.0;
-#endif
+      if (timebreak) {
+        packing_time = 0.0;
+        computing_time = 0.0;
+        kernel_time = 0.0;
+        postprocessing_time = 0.0;
+        run_time = 0.0;
+      }
       llc_flush(llc);
       start = chrono::high_resolution_clock::now();
 
@@ -204,13 +214,14 @@ void performance_test() {
       if (i >= NWARMUP) {
         auto dur = chrono::duration_cast<chrono::nanoseconds>(end - start);
         ttot += dur.count();
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-        total_packing_time += packing_time;
-        total_computing_time += computing_time;
-        total_kernel_time += kernel_time;
-        total_postprocessing_time += postprocessing_time;
-        total_run_time += run_time;
-#endif
+        run_time = dur.count();
+        if (timebreak) {
+          total_packing_time += packing_time;
+          total_computing_time += computing_time;
+          total_kernel_time += kernel_time;
+          total_postprocessing_time += postprocessing_time;
+          total_run_time += run_time;
+        }
       }
     }
     if (flush) {
@@ -223,12 +234,15 @@ void performance_test() {
     // printMatrix(matrix_op_t::NoTranspose,
     // Cint8_fb.data(), m, n, n, "C fb");
 
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-    cout << ", " << setw(16) << total_packing_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_kernel_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_postprocessing_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_run_time / (double)NITER / 1e3;
-#endif
+    if (timebreak) {
+      cout << ", " << setw(16) << total_packing_time / (double)NITER / 1e3
+           << ", " << setw(16) << total_kernel_time / (double)NITER / 1e3
+           << ", " << setw(16)
+           << total_postprocessing_time / (double)NITER / 1e3 << ", "
+           << setw(16) << total_computing_time / (double)NITER / 1e3 << ", "
+           << setw(16) << total_run_time / (double)NITER / 1e3;
+    }
+
     cout << ", " << setw(5) << fixed << setw(5) << setprecision(1)
          << NITER * nops / ttot << endl;
 
@@ -239,24 +253,24 @@ void performance_test() {
 
     ttot = 0.0;
     runType = "FBGEMM_i8_acc16";
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-    total_packing_time = 0.0;
-    total_computing_time = 0.0;
-    total_kernel_time = 0.0;
-    total_postprocessing_time = 0.0;
-    total_run_time = 0.0;
-#endif
+    if (timebreak) {
+      total_packing_time = 0.0;
+      total_computing_time = 0.0;
+      total_kernel_time = 0.0;
+      total_postprocessing_time = 0.0;
+      total_run_time = 0.0;
+    }
     cout << setw(6) << m << ", " << setw(6) << n << ", " << setw(6) << k << ", "
          << setw(16) << runType;
 
     for (auto i = 0; i < NWARMUP + NITER; ++i) {
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-      packing_time = 0.0;
-      computing_time = 0.0;
-      kernel_time = 0.0;
-      postprocessing_time = 0.0;
-      run_time = 0.0;
-#endif
+      if (timebreak) {
+        packing_time = 0.0;
+        computing_time = 0.0;
+        kernel_time = 0.0;
+        postprocessing_time = 0.0;
+        run_time = 0.0;
+      }
       llc_flush(llc);
       start = chrono::high_resolution_clock::now();
 
@@ -288,13 +302,14 @@ void performance_test() {
       if (i >= NWARMUP) {
         auto dur = chrono::duration_cast<chrono::nanoseconds>(end - start);
         ttot += dur.count();
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-        total_packing_time += packing_time;
-        total_computing_time += computing_time;
-        total_kernel_time += kernel_time;
-        total_postprocessing_time += postprocessing_time;
-        total_run_time += run_time;
-#endif
+        run_time = dur.count();
+        if (timebreak) {
+          total_packing_time += packing_time;
+          total_computing_time += computing_time;
+          total_kernel_time += kernel_time;
+          total_postprocessing_time += postprocessing_time;
+          total_run_time += run_time;
+        }
       }
     }
     if (flush) {
@@ -309,12 +324,15 @@ void performance_test() {
     // compare_buffers(row_offsets.data(), row_offset_buf.data(),
     // row_offsets.size(), 5);
 
-#ifdef FBGEMM_MEASURE_TIME_BREAKDOWN
-    cout << ", " << setw(16) << total_packing_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_kernel_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_postprocessing_time / (double)NITER / 1e3 << ", "
-         << setw(16) << total_run_time / (double)NITER / 1e3;
-#endif
+    if (timebreak) {
+      cout << ", " << setw(16) << total_packing_time / (double)NITER / 1e3
+           << ", " << setw(16) << total_kernel_time / (double)NITER / 1e3
+           << ", " << setw(16)
+           << total_postprocessing_time / (double)NITER / 1e3 << ", "
+           << setw(16) << total_computing_time / (double)NITER / 1e3 << ", "
+           << setw(16) << total_run_time / (double)NITER / 1e3;
+    }
+
     cout << ", " << setw(5) << fixed << setw(5) << setprecision(1)
          << NITER * nops / ttot << endl;
     cout << endl;
@@ -323,7 +341,7 @@ void performance_test() {
   }
 }
 
-int main(int /* unused */, char** /* unused */) {
+int main(int argc, const char** argv) {
 #ifdef _OPENMP
   // Use 1 thread unless OMP_NUM_THREADS is explicit set.
   const char* val = getenv("OMP_NUM_THREADS");
@@ -331,6 +349,11 @@ int main(int /* unused */, char** /* unused */) {
     omp_set_num_threads(1);
   }
 #endif
-  performance_test();
+  const int M = parseArgumentInt(argc, argv, "--M=", 0, 0);
+  const int N = parseArgumentInt(argc, argv, "--N=", 0, 0);
+  const int K = parseArgumentInt(argc, argv, "--K=", 0, 0);
+  const bool timebreak = parseArgumentBool(argc, argv, "--timebreak", false);
+
+  performance_test(M, N, K, timebreak);
   return 0;
 }
