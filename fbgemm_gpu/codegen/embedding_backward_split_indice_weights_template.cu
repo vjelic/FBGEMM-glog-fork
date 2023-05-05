@@ -10,12 +10,6 @@
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
 
-{% if not dense %}
-constexpr int32_t kCacheLocationMissing = -1;
-{% endif %}
-
-constexpr size_t kForwardMaxThreads = 512;
-
 // TODO: optimization to use multiple warps per row.
 template <typename emb_t, typename grad_t, typename cache_t, size_t kMaxVecsPerThread>
 __global__
@@ -208,11 +202,11 @@ Tensor {{ "dense" if dense else "split" }}_embedding_codegen_grad_indice_weights
     at::cuda::OptionalCUDAGuard device_guard;
     device_guard.set_index(dev_weights.get_device());
     const auto T = D_offsets.size(0) - 1;
-    TORCH_CHECK(T > 0);
+    TORCH_CHECK_GT(T, 0);
     // offsets = [B x T  + 1]
     const auto B = (offsets.size(0) - 1) / T;
-    TORCH_CHECK(B >= 0);
-    TORCH_CHECK(max_D <= {{ max_embedding_dim }});
+    TORCH_CHECK_GE(B, 0);
+    TORCH_CHECK_LE(max_D, {{ max_embedding_dim }});
     auto grad_indice_weights = empty_like(indices, indices.options().dtype(at::toAccumulateType(grad_output.scalar_type(), true)));
     if (B == 0) {
       return grad_indice_weights;

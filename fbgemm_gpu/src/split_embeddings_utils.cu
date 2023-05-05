@@ -25,8 +25,8 @@ inline at::Tensor asynchronous_complete_cumsum(at::Tensor t_in) {
   TORCH_CHECK(t_in.is_contiguous());
   TORCH_CHECK(t_in.dtype() == at::kInt || t_in.dtype() == at::kLong);
   // CUB only handles up to INT_MAX elements.
-  TORCH_CHECK(t_in.numel() < std::numeric_limits<int32_t>::max());
-  TORCH_CHECK(t_in.dim() == 1);
+  TORCH_CHECK_LT(t_in.numel(), std::numeric_limits<int32_t>::max());
+  TORCH_CHECK_EQ(t_in.dim(), 1);
   auto t_out = at::empty({t_in.numel() + 1}, t_in.options());
   t_out[0].zero_();
   AT_DISPATCH_INDEX_TYPES(
@@ -141,7 +141,10 @@ transpose_embedding_input(
     int64_t total_hash_size_bits,
     Tensor indices,
     Tensor offsets,
-    bool nobag) {
+    bool nobag,
+    const c10::optional<Tensor>& vbe_b_t_map,
+    const int64_t info_B_num_bits,
+    const int64_t info_B_mask) {
   const int32_t T = hash_size_cumsum.size(0) - 1;
   const int32_t B = (offsets.size(0) - 1) / T;
 

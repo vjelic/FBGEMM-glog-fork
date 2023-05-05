@@ -851,27 +851,47 @@ class SparseOpsTest(unittest.TestCase):
         L=st.integers(min_value=2, max_value=20),
         A=st.integers(min_value=1, max_value=20),
         Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
+        broadcast_lengths=st.booleans(),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_reorder_batched_ad_lengths(
-        self, B: int, T: int, L: int, A: int, Dtype: torch.dtype
+        self,
+        B: int,
+        T: int,
+        L: int,
+        A: int,
+        Dtype: torch.dtype,
+        broadcast_lengths: bool,
     ) -> None:
-        cat_ad_lengths = (
-            torch.cat([torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0)
-            .cuda()
-            .to(Dtype)
-        )
+        if broadcast_lengths:
+            cat_ad_lengths = (
+                torch.cat([torch.tensor([L for _ in range(T)]) for _ in range(B)], 0)
+                .cuda()
+                .to(Dtype)
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths.tile([A])
+        else:
+            cat_ad_lengths = (
+                torch.cat(
+                    [torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0
+                )
+                .cuda()
+                .to(Dtype)
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths
         batch_offsets = torch.tensor([A * b for b in range(B + 1)]).int().cuda()
         num_ads_in_batch = B * A
         reordered_batched_ad_lengths = torch.ops.fbgemm.reorder_batched_ad_lengths(
-            cat_ad_lengths, batch_offsets, num_ads_in_batch
+            cat_ad_lengths, batch_offsets, num_ads_in_batch, broadcast_lengths
         )
-        torch.testing.assert_close(cat_ad_lengths, reordered_batched_ad_lengths)
+        torch.testing.assert_close(
+            cat_ad_lengths_broadcasted, reordered_batched_ad_lengths
+        )
 
         cat_ad_lengths_cpu = cat_ad_lengths.cpu()
         batch_offsets_cpu = batch_offsets.cpu()
         reordered_batched_ad_lengths_cpu = torch.ops.fbgemm.reorder_batched_ad_lengths(
-            cat_ad_lengths_cpu, batch_offsets_cpu, num_ads_in_batch
+            cat_ad_lengths_cpu, batch_offsets_cpu, num_ads_in_batch, broadcast_lengths
         )
         torch.testing.assert_close(
             reordered_batched_ad_lengths_cpu, reordered_batched_ad_lengths.cpu()
@@ -884,22 +904,42 @@ class SparseOpsTest(unittest.TestCase):
         L=st.integers(min_value=2, max_value=20),
         A=st.integers(min_value=1, max_value=20),
         Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
+        broadcast_lengths=st.booleans(),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=40, deadline=None)
     def test_reorder_batched_ad_lengths_cpu(
-        self, B: int, T: int, L: int, A: int, Dtype: torch.dtype
+        self,
+        B: int,
+        T: int,
+        L: int,
+        A: int,
+        Dtype: torch.dtype,
+        broadcast_lengths: bool,
     ) -> None:
-        cat_ad_lengths = (
-            torch.cat([torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0)
-            .int()
-            .to(Dtype)
-        )
+        if broadcast_lengths:
+            cat_ad_lengths = (
+                torch.cat([torch.tensor([L for _ in range(T)]) for _ in range(B)], 0)
+                .int()
+                .to(Dtype)
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths.tile([A])
+        else:
+            cat_ad_lengths = (
+                torch.cat(
+                    [torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0
+                )
+                .int()
+                .to(Dtype)
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths
         batch_offsets = torch.tensor([A * b for b in range(B + 1)]).int()
         num_ads_in_batch = B * A
         reordered_batched_ad_lengths = torch.ops.fbgemm.reorder_batched_ad_lengths(
-            cat_ad_lengths, batch_offsets, num_ads_in_batch
+            cat_ad_lengths, batch_offsets, num_ads_in_batch, broadcast_lengths
         )
-        torch.testing.assert_close(cat_ad_lengths, reordered_batched_ad_lengths)
+        torch.testing.assert_close(
+            cat_ad_lengths_broadcasted, reordered_batched_ad_lengths
+        )
 
     @unittest.skipIf(*gpu_unavailable)
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
@@ -910,25 +950,65 @@ class SparseOpsTest(unittest.TestCase):
         A=st.integers(min_value=1, max_value=20),
         Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
         Itype=st.sampled_from([torch.int32, torch.int64]),
+        broadcast_indices=st.booleans(),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_reorder_batched_ad_indices(
-        self, B: int, T: int, L: int, A: int, Dtype: torch.dtype, Itype: torch.dtype
+        self,
+        B: int,
+        T: int,
+        L: int,
+        A: int,
+        Dtype: torch.dtype,
+        Itype: torch.dtype,
+        broadcast_indices: bool,
     ) -> None:
-        cat_ad_indices = (
-            torch.randint(low=0, high=100, size=(B * T * A * L,)).int().cuda().to(Dtype)
-        )
-        cat_ad_lengths = (
-            torch.cat([torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0)
-            .int()
-            .cuda()
-        )
+        if broadcast_indices:
+            cat_ad_indices = (
+                torch.randint(
+                    low=0,
+                    high=100,
+                    size=(B * T * L,),
+                )
+                .int()
+                .cuda()
+                .to(Dtype)
+            )
+            cat_ad_lengths = (
+                torch.cat(
+                    [torch.tensor([L for _ in range(T)]) for _ in range(B)],
+                    0,
+                )
+                .int()
+                .cuda()
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths.tile([A])
+        else:
+            cat_ad_indices = (
+                torch.randint(
+                    low=0,
+                    high=100,
+                    size=(B * T * A * L,),
+                )
+                .int()
+                .cuda()
+                .to(Dtype)
+            )
+            cat_ad_lengths = (
+                torch.cat(
+                    [torch.tensor([L for _ in range(T * A)]) for _ in range(B)],
+                    0,
+                )
+                .int()
+                .cuda()
+            )
+            cat_ad_lengths_broadcasted = cat_ad_lengths
         batch_offsets = torch.tensor([A * b for b in range(B + 1)]).int().cuda()
         num_ads_in_batch = B * A
         reordered_cat_ad_lengths = torch.ops.fbgemm.reorder_batched_ad_lengths(
-            cat_ad_lengths, batch_offsets, num_ads_in_batch
+            cat_ad_lengths, batch_offsets, num_ads_in_batch, broadcast_indices
         )
-        torch.testing.assert_close(cat_ad_lengths, reordered_cat_ad_lengths)
+        torch.testing.assert_close(cat_ad_lengths_broadcasted, reordered_cat_ad_lengths)
 
         cat_ad_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
             cat_ad_lengths
@@ -942,10 +1022,14 @@ class SparseOpsTest(unittest.TestCase):
             reordered_cat_ad_offsets,
             batch_offsets,
             num_ads_in_batch,
+            broadcast_indices,
+            B * T * A * L,
         )
         torch.testing.assert_close(
             reordered_cat_ad_indices.view(T, B, A, L).permute(1, 0, 2, 3),
-            cat_ad_indices.view(B, T, A, L),
+            cat_ad_indices.view(B, T, 1, L).tile([1, 1, A, 1])
+            if broadcast_indices
+            else cat_ad_indices.view(B, T, A, L),
         )
 
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
@@ -956,23 +1040,55 @@ class SparseOpsTest(unittest.TestCase):
         A=st.integers(min_value=1, max_value=20),
         Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
         Itype=st.sampled_from([torch.int32, torch.int64]),
+        broadcast_indices=st.booleans(),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=40, deadline=None)
     def test_reorder_batched_ad_indices_cpu(
-        self, B: int, T: int, L: int, A: int, Dtype: torch.dtype, Itype: torch.dtype
+        self,
+        B: int,
+        T: int,
+        L: int,
+        A: int,
+        Dtype: torch.dtype,
+        Itype: torch.dtype,
+        broadcast_indices: bool,
     ) -> None:
-        cat_ad_indices = (
-            torch.randint(low=0, high=100, size=(B * T * A * L,)).int().to(Dtype)
-        )
-        cat_ad_lengths = torch.cat(
-            [torch.tensor([L for _ in range(T * A)]) for _ in range(B)], 0
-        ).int()
+        if broadcast_indices:
+            cat_ad_indices = (
+                torch.randint(
+                    low=0,
+                    high=100,
+                    size=(B * T * L,),
+                )
+                .int()
+                .to(Dtype)
+            )
+            cat_ad_lengths = torch.cat(
+                [torch.tensor([L for _ in range(T)]) for _ in range(B)],
+                0,
+            ).int()
+            cat_ad_lengths_broadcasted = cat_ad_lengths.tile([A])
+        else:
+            cat_ad_indices = (
+                torch.randint(
+                    low=0,
+                    high=100,
+                    size=(B * T * A * L,),
+                )
+                .int()
+                .to(Dtype)
+            )
+            cat_ad_lengths = torch.cat(
+                [torch.tensor([L for _ in range(T * A)]) for _ in range(B)],
+                0,
+            ).int()
+            cat_ad_lengths_broadcasted = cat_ad_lengths
         batch_offsets = torch.tensor([A * b for b in range(B + 1)]).int()
         num_ads_in_batch = B * A
         reordered_cat_ad_lengths = torch.ops.fbgemm.reorder_batched_ad_lengths(
-            cat_ad_lengths, batch_offsets, num_ads_in_batch
+            cat_ad_lengths, batch_offsets, num_ads_in_batch, broadcast_indices
         )
-        torch.testing.assert_close(cat_ad_lengths, reordered_cat_ad_lengths)
+        torch.testing.assert_close(cat_ad_lengths_broadcasted, reordered_cat_ad_lengths)
         cat_ad_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
             cat_ad_lengths
         ).to(Itype)
@@ -985,14 +1101,18 @@ class SparseOpsTest(unittest.TestCase):
             reordered_cat_ad_offsets,
             batch_offsets,
             num_ads_in_batch,
+            broadcast_indices,
+            B * T * A * L,
         )
         torch.testing.assert_close(
             reordered_cat_ad_indices.view(T, B, A, L).permute(1, 0, 2, 3),
-            cat_ad_indices.view(B, T, A, L),
+            cat_ad_indices.view(B, T, 1, L).tile([1, 1, A, 1])
+            if broadcast_indices
+            else cat_ad_indices.view(B, T, A, L),
         )
 
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
-    @given(data_type=st.sampled_from([torch.half, torch.float32]))
+    @given(data_type=st.sampled_from([torch.bfloat16, torch.half, torch.float32]))
     @settings(verbosity=Verbosity.verbose, deadline=None)
     def test_histogram_binning_calibration(self, data_type: torch.dtype) -> None:
         num_bins = 5000
@@ -1022,11 +1142,20 @@ class SparseOpsTest(unittest.TestCase):
             [1426, 1437, 1437, 1428, 1431], dtype=torch.long
         )
 
+        error_tolerance = 1e-03
+        if data_type == torch.bfloat16:
+            # Due to smaller significand bits.
+            error_tolerance = 1e-02
+
+            expected_bin_ids = torch.tensor(
+                [1426, 1438, 1438, 1430, 1430], dtype=torch.long
+            )
+
         torch.testing.assert_close(
             calibrated_prediction,
             expected_calibrated_prediction,
-            rtol=1e-03,
-            atol=1e-03,
+            rtol=error_tolerance,
+            atol=error_tolerance,
         )
 
         self.assertTrue(
@@ -1054,8 +1183,8 @@ class SparseOpsTest(unittest.TestCase):
             torch.testing.assert_close(
                 calibrated_prediction_gpu,
                 expected_calibrated_prediction.cuda(),
-                rtol=1e-03,
-                atol=1e-03,
+                rtol=error_tolerance,
+                atol=error_tolerance,
             )
 
             self.assertTrue(
@@ -1067,7 +1196,7 @@ class SparseOpsTest(unittest.TestCase):
 
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
     @given(
-        data_type=st.sampled_from([torch.half, torch.float32]),
+        data_type=st.sampled_from([torch.bfloat16, torch.half, torch.float32]),
         segment_value_type=st.sampled_from([torch.int, torch.long]),
         segment_length_type=st.sampled_from([torch.int, torch.long]),
     )
@@ -1115,11 +1244,20 @@ class SparseOpsTest(unittest.TestCase):
             [206426, 161437, 166437, 71428, 161431], dtype=torch.long
         )
 
+        error_tolerance = 1e-03
+        if data_type == torch.bfloat16:
+            # Due to smaller significand bits.
+            error_tolerance = 1e-02
+
+            expected_bin_ids = torch.tensor(
+                [206426, 161438, 166438, 71430, 161430], dtype=torch.long
+            )
+
         torch.testing.assert_close(
             calibrated_prediction,
             expected_calibrated_prediction,
-            rtol=1e-03,
-            atol=1e-03,
+            rtol=error_tolerance,
+            atol=error_tolerance,
         )
 
         self.assertTrue(
@@ -1151,8 +1289,8 @@ class SparseOpsTest(unittest.TestCase):
             torch.testing.assert_close(
                 calibrated_prediction_gpu,
                 expected_calibrated_prediction.cuda(),
-                rtol=1e-03,
-                atol=1e-03,
+                rtol=error_tolerance,
+                atol=error_tolerance,
             )
 
             self.assertTrue(
@@ -1164,7 +1302,7 @@ class SparseOpsTest(unittest.TestCase):
 
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
     @given(
-        data_type=st.sampled_from([torch.half, torch.float32]),
+        data_type=st.sampled_from([torch.bfloat16, torch.half, torch.float32]),
         segment_value_type=st.sampled_from([torch.int, torch.long]),
         segment_length_type=st.sampled_from([torch.int, torch.long]),
     )
@@ -1217,11 +1355,20 @@ class SparseOpsTest(unittest.TestCase):
             [206426, 161437, 166437, 71428, 161431], dtype=torch.long
         )
 
+        error_tolerance = 1e-03
+        if data_type == torch.bfloat16:
+            # Due to smaller significand bits.
+            error_tolerance = 1e-02
+
+            expected_bin_ids = torch.tensor(
+                [206426, 161438, 166438, 71430, 161430], dtype=torch.long
+            )
+
         torch.testing.assert_close(
             calibrated_prediction,
             expected_calibrated_prediction,
-            rtol=1e-03,
-            atol=1e-03,
+            rtol=error_tolerance,
+            atol=error_tolerance,
         )
 
         self.assertTrue(
@@ -1251,8 +1398,8 @@ class SparseOpsTest(unittest.TestCase):
             torch.testing.assert_close(
                 calibrated_prediction_gpu,
                 expected_calibrated_prediction.cuda(),
-                rtol=1e-03,
-                atol=1e-03,
+                rtol=error_tolerance,
+                atol=error_tolerance,
             )
 
             self.assertTrue(
@@ -1265,7 +1412,7 @@ class SparseOpsTest(unittest.TestCase):
     @unittest.skipIf(*gpu_unavailable)
     # pyre-ignore [56]: Invalid decoration, was not able to infer the type of argument
     @given(
-        data_type=st.sampled_from([torch.half, torch.float32]),
+        data_type=st.sampled_from([torch.bfloat16, torch.half, torch.float32]),
     )
     @settings(verbosity=Verbosity.verbose, deadline=None)
     def test_generic_histogram_binning_calibration_by_feature_cpu_gpu(

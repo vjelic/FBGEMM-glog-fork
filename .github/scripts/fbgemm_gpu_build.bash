@@ -169,6 +169,11 @@ __build_fbgemm_gpu_common_pre_steps () {
   (test_binpath "${env_name}" c++) || return 1
   (test_binpath "${env_name}" g++) || return 1
 
+  # Determine the package name based on release type and variant
+  package_name="fbgemm_gpu"
+  if [ "$fbgemm_release_type" != "release" ]; then
+    package_name="${package_name}_${fbgemm_release_type}"
+  fi
   if [ "$fbgemm_variant" == "cpu" ]; then
     package_name="${package_name}-cpu"
   elif [ "$fbgemm_variant" == "rocm" ]; then
@@ -177,6 +182,7 @@ __build_fbgemm_gpu_common_pre_steps () {
     # Set to the default variant
     fbgemm_variant="cuda"
   fi
+  echo "[BUILD] Determined Python package name to use: ${package_name}"
 
   # Extract the Python tag
   # shellcheck disable=SC2207
@@ -236,19 +242,20 @@ run_fbgemm_gpu_postbuild_checks () {
     )
   fi
 
-  for library in "${fbgemm_gpu_so_files[@]}"; do
-    echo "[CHECK] Listing out the GLIBCXX versions referenced by the library: ${library}"
-    print_glibc_info "${library}"
+  # Print info for only the first instance of the .SO file, since the build makes multiple copies
+  local library="${fbgemm_gpu_so_files[0]}"
+  echo "[CHECK] Listing out the GLIBCXX versions referenced by the library: ${library}"
+  print_glibc_info "${library}"
 
-    echo "[CHECK] Listing out undefined symbols in the library: ${library}"
-    print_exec nm -gDCu "${library}"
+  echo "[CHECK] Listing out undefined symbols in the library: ${library}"
+  print_exec nm -gDCu "${library}" | sort
 
-    echo "[CHECK] Verifying sample subset of symbols in the library ..."
-    for symbol in "${lib_symbols_to_check[@]}"; do
-      (test_library_symbol "${library}" "${symbol}") || return 1
-    done
+  echo "[CHECK] Listing out external shared libraries required by the library: ${library}"
+  print_exec ldd "${library}"
 
-    echo ""
+  echo "[CHECK] Verifying sample subset of symbols in the library ..."
+  for symbol in "${lib_symbols_to_check[@]}"; do
+    (test_library_symbol "${library}" "${symbol}") || return 1
   done
 }
 
@@ -258,17 +265,17 @@ run_fbgemm_gpu_postbuild_checks () {
 
 build_fbgemm_gpu_package () {
   env_name="$1"
-  package_name="$2"
+  fbgemm_release_type="$2"
   fbgemm_variant="$3"
   fbgemm_variant_targets="$4"
   if [ "$fbgemm_variant" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} ENV_NAME PACKAGE_NAME VARIANT [TARGETS]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cpu                           # CPU-only variant"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cuda                          # CUDA variant for default target(s)"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly cuda '7.0;8.0'                # CUDA variant for custom target(s)"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly rocm                          # ROCm variant for default target(s)"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu_nightly rocm 'gfx906;gfx908;gfx90a'   # ROCm variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} build_env nightly cpu                           # Nightly CPU-only variant"
+    echo "    ${FUNCNAME[0]} build_env nightly cuda                          # Nightly CUDA variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env nightly cuda '7.0;8.0'                # Nightly CUDA variant for custom target(s)"
+    echo "    ${FUNCNAME[0]} build_env release rocm                          # Release ROCm variant for default target(s)"
+    echo "    ${FUNCNAME[0]} build_env release rocm 'gfx906;gfx908;gfx90a'   # Release ROCm variant for custom target(s)"
     return 1
   fi
 
@@ -290,7 +297,7 @@ build_fbgemm_gpu_package () {
     python setup.py bdist_wheel \
       --package_name="${package_name}" \
       --python-tag="${python_tag}" \
-      --plat-name=manylinux1_x86_64 \
+      --plat-name="manylinux1_${MACHINE_NAME}" \
       "${build_args[@]}"
 
   # Run checks on the built libraries
