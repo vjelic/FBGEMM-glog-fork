@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -17,12 +17,15 @@ import numpy as np
 import tabulate
 import torch
 
-from fbgemm_gpu.split_table_batched_embeddings_ops import (
+from fbgemm_gpu.split_embedding_configs import SparseType
+from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
     BoundsCheckMode,
     EmbeddingLocation,
-    IntNBitTableBatchedEmbeddingBagsCodegen,
-    SparseType,
 )
+from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
+    IntNBitTableBatchedEmbeddingBagsCodegen,
+)
+
 from torch import Tensor
 from torch.profiler import profile, ProfilerActivity
 
@@ -228,7 +231,7 @@ def print_p2p_bandwidth(
     print(table)
 
 
-def benchmark(
+def benchmark(  # noqa C901
     all_to_one_only: bool,
     sum_reduce_to_one_only: bool,
     num_ads: int,

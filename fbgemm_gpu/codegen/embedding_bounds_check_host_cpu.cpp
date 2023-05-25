@@ -1,9 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
+
 #include <ATen/ATen.h>
 #include <ATen/TypeDefault.h>
 #include <ATen/core/op_registration/op_registration.h>
@@ -94,10 +96,9 @@ void bounds_check_indices_cpu(
         offsets_acc[B * T] = num_indices;
       }
     }
-
-    for (auto t = 0; t < T; ++t) {
+    for (const auto t : c10::irange(T)) {
       auto num_rows = rows_per_table_acc[t];
-      for (auto b = 0; b < B; ++b) {
+      for (const auto b : c10::irange(B)) {
         auto indices_start = offsets_acc[t * B + b];
         auto indices_end = offsets_acc[t * B + b + 1];
         if (bounds_check_mode == BoundsCheckMode::FATAL) {
@@ -132,7 +133,7 @@ void bounds_check_indices_cpu(
         }
 
         auto L = indices_end - indices_start;
-        for (auto l = 0; l < L; ++l) {
+        for (const auto l : c10::irange(L)) {
           auto idx = indices_acc[indices_start + l];
           if (idx == -1) {
             // -1 indicates pruned rows.

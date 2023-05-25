@@ -1,6 +1,7 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
@@ -14,6 +15,10 @@
 
 #include "fbgemm_gpu/sparse_ops.h"
 #include "fbgemm_gpu/sparse_ops_utils.h"
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace fbgemm_gpu {
 
@@ -66,7 +71,7 @@ std::vector<at::TensorAccessor<index_t, 1>> collect_offsets_accessors(
   // Also check x_offsets are consistent
   int num_lengths_expected = outer_dense_size;
   std::vector<at::TensorAccessor<index_t, 1>> x_offsets_accessors;
-  for (int d = 0; d < num_jagged_dim; ++d) {
+  for (const auto d : c10::irange(num_jagged_dim)) {
     TENSOR_ON_CPU(x_offsets[d]);
     x_offsets_accessors.emplace_back(x_offsets[d].accessor<index_t, 1>());
     TORCH_CHECK(
@@ -155,8 +160,7 @@ void jagged_dense_elementwise_dense_output_kernel_(
       y_reshaped.accessor<scalar_t, 3>();
   at::TensorAccessor<scalar_t, 3> output_accessor =
       output_reshaped.accessor<scalar_t, 3>();
-
-  for (int oidx = 0; oidx < outer_dense_size; ++oidx) {
+  for (const auto oidx : c10::irange(outer_dense_size)) {
     for (int joidx = 0; joidx < jagged_folded_size / jagged_innermost_size;
          ++joidx) {
       int offset_base = oidx;
@@ -177,7 +181,7 @@ void jagged_dense_elementwise_dense_output_kernel_(
             output_accessor[oidx][jidx][0] =
                 f(x_accessor[begin + jiidx][0], y_accessor[oidx][jidx][0]);
           } else {
-            for (int iidx = 0; iidx < inner_dense_size; ++iidx) {
+            for (const auto iidx : c10::irange(inner_dense_size)) {
               output_accessor[oidx][jidx][iidx] =
                   f(x_accessor[begin + jiidx][iidx],
                     y_accessor[oidx][jidx][iidx]);
@@ -191,7 +195,7 @@ void jagged_dense_elementwise_dense_output_kernel_(
           output_accessor[oidx][jidx][0] =
               f(padding_value, y_accessor[oidx][jidx][0]);
         } else {
-          for (int iidx = 0; iidx < inner_dense_size; ++iidx) {
+          for (const auto iidx : c10::irange(inner_dense_size)) {
             output_accessor[oidx][jidx][iidx] =
                 f(padding_value, y_accessor[oidx][jidx][iidx]);
           }
@@ -302,8 +306,7 @@ void jagged_dense_elementwise_jagged_output_kernel_(
       y_reshaped.accessor<scalar_t, 3>();
   at::TensorAccessor<scalar_t, 2> output_accessor =
       output_values.accessor<scalar_t, 2>();
-
-  for (int oidx = 0; oidx < outer_dense_size; ++oidx) {
+  for (const auto oidx : c10::irange(outer_dense_size)) {
     for (int joidx = 0; joidx < jagged_folded_size / jagged_innermost_size;
          ++joidx) {
       int offset_base = oidx;
@@ -324,7 +327,7 @@ void jagged_dense_elementwise_jagged_output_kernel_(
             output_accessor[begin + jiidx][0] =
                 f(x_accessor[begin + jiidx][0], y_accessor[oidx][jidx][0]);
           } else {
-            for (int iidx = 0; iidx < inner_dense_size; ++iidx) {
+            for (const auto iidx : c10::irange(inner_dense_size)) {
               output_accessor[begin + jiidx][iidx] =
                   f(x_accessor[begin + jiidx][iidx],
                     y_accessor[oidx][jidx][iidx]);
@@ -367,7 +370,7 @@ void jagged_dense_elementwise_jagged_output_(
 at::Tensor jagged_to_padded_dense_forward(
     const Tensor& values,
     const std::vector<Tensor>& offsets,
-    const std::vector<int64_t>& max_lengths,
+    const at::ArrayRef<at::SymInt>& max_lengths,
     const double padding_value) {
   const size_t num_jagged_dim = offsets.size();
   TORCH_CHECK(
@@ -384,7 +387,7 @@ at::Tensor jagged_to_padded_dense_forward(
            values.sizes().end(),
            1,
            std::multiplies<size_t>())});
-  at::DimVector padded_values_shape({offsets[0].size(0) - 1});
+  at::SymDimVector padded_values_shape({at::SymInt(offsets[0].size(0) - 1)});
   padded_values_shape.insert(
       padded_values_shape.end(), max_lengths.begin(), max_lengths.end());
 
@@ -394,7 +397,8 @@ at::Tensor jagged_to_padded_dense_forward(
   if (!D_folded) {
     padded_values_shape.push_back(values.size(-1));
   }
-  Tensor padded_values = at::empty(padded_values_shape, values.options());
+  Tensor padded_values =
+      at::empty_symint(padded_values_shape, values.options());
   if (values.numel() == 0) {
     // To avoid an error due to values_canonicalized.data_ptr is nullptr.
     padded_values.fill_(padding_value);
@@ -424,7 +428,7 @@ at::Tensor jagged_to_padded_dense_forward(
 at::Tensor jagged_to_padded_dense_backward(
     const Tensor& grad_output,
     const std::vector<Tensor>& offsets,
-    const int64_t total_L) {
+    const at::SymInt& total_L) {
   auto grad_padded_values = grad_output;
 
   // Canonicalize padded_values by unsqueeze the last dim if the inner dense
@@ -436,7 +440,8 @@ at::Tensor jagged_to_padded_dense_backward(
   int32_t D = grad_padded_values_view.size(-1);
   // Initialize with zeros so output will be zero for the portion truncated
   // in forward.
-  auto grad_values = at::zeros({total_L, D}, grad_padded_values.options());
+  auto grad_values =
+      at::zeros_symint({total_L, D}, grad_padded_values.options());
 
   AT_DISPATCH_ALL_TYPES_AND2(
       at::ScalarType::Half,
@@ -458,19 +463,19 @@ at::Tensor jagged_to_padded_dense_backward(
 Tensor dense_to_jagged_forward(
     const Tensor& dense,
     const std::vector<Tensor>& offsets,
-    const c10::optional<int64_t>& total_L) {
+    const c10::optional<at::SymInt>& total_L) {
   // D is the embedding dimension
   auto D = dense.size(-1);
 
   // If total_L is not given then compute it
-  int64_t total_L_computed;
+  at::SymInt total_L_computed;
   if (total_L.has_value()) {
     total_L_computed = total_L.value();
   } else {
     total_L_computed = (int64_t)offsets.back().max().item<int64_t>();
   }
-  auto values = at::empty({total_L_computed, D}, dense.options());
-  auto output = at::zeros({total_L_computed, D}, dense.options());
+  auto values = at::empty_symint({total_L_computed, D}, dense.options());
+  auto output = at::zeros_symint({total_L_computed, D}, dense.options());
 
   AT_DISPATCH_ALL_TYPES_AND2(
       at::ScalarType::Half,
@@ -497,9 +502,9 @@ at::Tensor jagged_dense_dense_elementwise_add_jagged_output_forward(
     const at::Tensor& y_1) {
   // Convert to jagged
   auto jagged_values_0 =
-      dense_to_jagged_forward(y_0, x_offsets, c10::optional<int64_t>());
+      dense_to_jagged_forward(y_0, x_offsets, c10::optional<at::SymInt>());
   auto jagged_values_1 =
-      dense_to_jagged_forward(y_1, x_offsets, c10::optional<int64_t>());
+      dense_to_jagged_forward(y_1, x_offsets, c10::optional<at::SymInt>());
 
   // Add jagged_values + x_values -> sum_values
   auto sum_values = x_values + jagged_values_0 + jagged_values_1;
@@ -568,8 +573,7 @@ void jagged_jagged_elementwise_dense_output_kernel_(
       y_values.accessor<scalar_t, 2>();
   at::TensorAccessor<scalar_t, 3> output_accessor =
       output_reshaped.accessor<scalar_t, 3>();
-
-  for (int oidx = 0; oidx < outer_dense_size; ++oidx) {
+  for (const auto oidx : c10::irange(outer_dense_size)) {
     for (int joidx = 0; joidx < jagged_folded_size / jagged_innermost_size;
          ++joidx) {
       int offset_base = oidx;
@@ -590,7 +594,7 @@ void jagged_jagged_elementwise_dense_output_kernel_(
             output_accessor[oidx][jidx][0] =
                 f(x_accessor[begin + jiidx][0], y_accessor[begin + jiidx][0]);
           } else {
-            for (int iidx = 0; iidx < inner_dense_size; ++iidx) {
+            for (const auto iidx : c10::irange(inner_dense_size)) {
               output_accessor[oidx][jidx][iidx] =
                   f(x_accessor[begin + jiidx][iidx],
                     y_accessor[begin + jiidx][iidx]);
@@ -603,7 +607,7 @@ void jagged_jagged_elementwise_dense_output_kernel_(
         if (NO_INNER_DENSE) {
           output_accessor[oidx][jidx][0] = padding_value;
         } else {
-          for (int iidx = 0; iidx < inner_dense_size; ++iidx) {
+          for (const auto iidx : c10::irange(inner_dense_size)) {
             output_accessor[oidx][jidx][iidx] = padding_value;
           }
         }
@@ -645,7 +649,7 @@ Tensor jagged_dense_elementwise_mul_forward(
     const Tensor& y) {
   // Convert to jagged
   auto jagged_values =
-      dense_to_jagged_forward(y, x_offsets, c10::optional<int64_t>());
+      dense_to_jagged_forward(y, x_offsets, c10::optional<at::SymInt>());
 
   // Multiply x_values * jagged_values -> prod_values
   auto prod_values = x_values * jagged_values;
@@ -690,25 +694,24 @@ void dense_vec_jagged_2d_bmm(
   const int H = v.size(0) / B;
   const int max_L = v.size(1);
   const int D = output.size(1);
-
-  for (int b = 0; b < B; ++b) {
+  for (const auto b : c10::irange(B)) {
     const int row_start = a_offsets[b];
     const int row_end = a_offsets[b + 1];
     const int length = std::min(row_end - row_start, max_L);
     if (length == 0) {
-      for (int h = 0; h < H; ++h) {
-        for (int d = 0; d < D; ++d) {
+      for (const auto h : c10::irange(H)) {
+        for (const auto d : c10::irange(D)) {
           output[b * H + h][d] = 0;
         }
       }
     } else {
-      for (int h = 0; h < H; ++h) {
-        for (int d = 0; d < D; ++d) {
+      for (const auto h : c10::irange(H)) {
+        for (const auto d : c10::irange(D)) {
           // use is_cuda=true because acc_type<float, false> = double is too
           // conservative
           at::acc_type<scalar_t, true> acc =
               v[b * H + h][0] * a_values[row_start][h * D + d];
-          for (int l = 1; l < length; ++l) {
+          for (const auto l : c10::irange(1, length)) {
             acc += v[b * H + h][l] * a_values[row_start + l][h * D + d];
           }
           output[b * H + h][d] = acc;
@@ -728,25 +731,24 @@ void dense_vec_jagged_2d_transposed_bmm(
   const int H = v.size(0) / B;
   const int max_L = output.size(1);
   const int D = v.size(1);
-
-  for (int b = 0; b < B; ++b) {
+  for (const auto b : c10::irange(B)) {
     const int row_start = a_offsets[b];
     const int row_end = a_offsets[b + 1];
     const int length = std::min(row_end - row_start, max_L);
 
     if (D == 0) {
-      for (int h = 0; h < H; ++h) {
-        for (int l = 0; l < max_L; ++l) {
+      for (const auto h : c10::irange(H)) {
+        for (const auto l : c10::irange(max_L)) {
           output[b * H + h][l] = 0;
         }
       }
     } else {
-      for (int h = 0; h < H; ++h) {
+      for (const auto h : c10::irange(H)) {
         int l;
         for (l = 0; l < length; ++l) {
           at::acc_type<scalar_t, true> acc =
               v[b * H + h][0] * a_values[row_start + l][h * D];
-          for (int d = 1; d < D; ++d) {
+          for (const auto d : c10::irange(1, D)) {
             acc += v[b * H + h][d] * a_values[row_start + l][h * D + d];
           }
           output[b * H + h][l] = acc;
@@ -769,14 +771,13 @@ void outer_prod_jagged_2d_output(
   const int H = x.size(0) / B;
   const int max_L = x.size(1);
   const int D = y.size(1);
-
-  for (int b = 0; b < B; ++b) {
+  for (const auto b : c10::irange(B)) {
     const int row_start = offsets[b];
     const int row_end = offsets[b + 1];
     const int length = row_end - row_start;
-    for (int h = 0; h < H; ++h) {
+    for (const auto h : c10::irange(H)) {
       for (int l = 0; l < std::min(length, max_L); ++l) {
-        for (int d = 0; d < D; ++d) {
+        for (const auto d : c10::irange(D)) {
           output_values[row_start + l][h * D + d] =
               x[b * H + h][l] * y[b * H + h][d];
         }
@@ -974,7 +975,10 @@ jagged_2d_to_dense_forward_cpu(Tensor values, Tensor offsets, int64_t max_L) {
   TORCH_CHECK(max_L > 0);
 
   return jagged_to_padded_dense_forward(
-      values, {offsets}, {max_L}, /*padding_value=*/0);
+      values,
+      {offsets},
+      at::ArrayRef<at::SymInt>({max_L}),
+      /*padding_value=*/0);
 }
 
 std::vector<Tensor> stacked_jagged_1d_to_dense_cpu(
@@ -992,7 +996,7 @@ std::vector<Tensor> stacked_jagged_1d_to_dense_cpu(
   auto offsets = at::empty({B + 1}, lengths.options());
   offsets[0].zero_();
   std::vector<Tensor> padded_values_per_key;
-  for (int32_t t = 0; t < T; t++) {
+  for (const auto t : c10::irange(T)) {
     int64_t max_L = max_lengths_per_key[t];
     AT_DISPATCH_INDEX_TYPES(
         lengths_contig.scalar_type(), "length_to_offset_cpu_kernel", [&] {
@@ -1029,7 +1033,7 @@ std::vector<Tensor> stacked_jagged_2d_to_dense_cpu(
   int32_t T = lengths.size(0);
   std::vector<Tensor> padded_values_per_key;
   std::vector<Tensor> offsets_tensor_per_key;
-  for (int32_t t = 0; t < T; t++) {
+  for (const auto t : c10::irange(T)) {
     int64_t max_L = max_lengths_per_key[t];
     auto offsets = at::empty({B + 1}, lengths.options());
     offsets[0].zero_();
@@ -1067,8 +1071,7 @@ void jagged_index_select_2d_kernel(
   const auto num_cols = input.size(1);
   at::parallel_for(
       0, num_dense_output_rows, 0, [&](int64_t start, int64_t end) {
-        for (auto dense_output_offset = start; dense_output_offset < end;
-             dense_output_offset++) {
+        for (const auto dense_output_offset : c10::irange(start, end)) {
           int index_pos;
           binary_search_range_cpu(
               &index_pos,
@@ -1080,8 +1083,7 @@ void jagged_index_select_2d_kernel(
           const index_t index = indices[index_pos];
           const offset_t input_offset =
               (index == 0 ? 0 : input_offsets[index - 1]) + rel_index;
-
-          for (int i = 0; i < num_cols; i++) {
+          for (const auto i : c10::irange(num_cols)) {
             output[dense_output_offset][i] = input[input_offset][i];
           }
         }
@@ -1150,8 +1152,7 @@ void jagged_index_add_2d_kernel(
   // Allocate one lock per row
   std::atomic_flag* locks = new std::atomic_flag[output.size(0)];
   at::parallel_for(0, num_dense_input_rows, 0, [&](int64_t start, int64_t end) {
-    for (auto dense_input_offset = start; dense_input_offset < end;
-         dense_input_offset++) {
+    for (const auto dense_input_offset : c10::irange(start, end)) {
       int index_pos;
       binary_search_range_cpu(
           &index_pos,
@@ -1173,7 +1174,7 @@ void jagged_index_add_2d_kernel(
 #endif
           ;
       }
-      for (int i = 0; i < num_cols; i++) {
+      for (const auto i : c10::irange(num_cols)) {
         output[output_offset][i] += input[dense_input_offset][i];
       }
       // Release lock
@@ -1235,27 +1236,29 @@ void jagged_softmax_kernel(
   const int B = offsets.size(0) - 1;
   const int D = values.size(1);
 
-  for (int b = 0; b < B; ++b) {
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+  for (auto b = 0; b < B; b++) {
     const int row_start = offsets[b];
     const int row_end = offsets[b + 1];
     const int length = std::min(row_end - row_start, (int)max_L);
 
     if (length == 0)
       continue;
-
-    for (int d = 0; d < D; ++d) {
+    for (const auto d : c10::irange(D)) {
       // use is_cuda=true because acc_type<float, false> = double is too
       // conservative
       scalar_t max_value = values[row_start][d];
-      for (int l = 1; l < length; ++l) {
+      for (const auto l : c10::irange(1, length)) {
         max_value = std::max(max_value, values[row_start + l][d]);
       }
       at::acc_type<scalar_t, true> acc =
           std::exp(values[row_start][d] - max_value);
-      for (int l = 1; l < length; ++l) {
+      for (const auto l : c10::irange(1, length)) {
         acc += std::exp(values[row_start + l][d] - max_value);
       }
-      for (int l = 0; l < length; ++l) {
+      for (const auto l : c10::irange(length)) {
         output[row_start + l][d] =
             std::exp(values[row_start + l][d] - max_value) / acc;
       }
@@ -1272,6 +1275,10 @@ Tensor jagged_softmax_forward(
   const int B = offsets.numel() - 1;
   const int D = values.size(1);
   auto output = at::empty_like(values);
+
+#ifdef _OPENMP
+  omp_set_num_threads(10);
+#endif
 
   if (B > 0 && D > 0) {
     AT_DISPATCH_INDEX_TYPES(
@@ -1302,19 +1309,23 @@ void jagged_softmax_backward_kernel(
     const int64_t max_L) {
   const int B = offsets.size(0) - 1;
   const int D = grad_output.size(1);
-  for (int b = 0; b < B; ++b) {
+
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+  for (auto b = 0; b < B; b++) {
     const int row_start = offsets[b];
     const int row_end = offsets[b + 1];
     const int length = std::min(row_end - row_start, (int)max_L);
     if (length == 0)
       continue;
-    for (int d = 0; d < D; ++d) {
+    for (const auto d : c10::irange(D)) {
       at::acc_type<scalar_t, true> sum_value =
           grad_output[row_start][d] * output[row_start][d];
-      for (int l = 1; l < length; ++l) {
+      for (const auto l : c10::irange(1, length)) {
         sum_value += grad_output[row_start + l][d] * output[row_start + l][d];
       }
-      for (int l = 0; l < length; ++l) {
+      for (const auto l : c10::irange(length)) {
         grad_input[row_start + l][d] =
             (grad_output[row_start + l][d] - sum_value) *
             output[row_start + l][d];
@@ -1334,6 +1345,10 @@ Tensor jagged_softmax_backward(
   const int B = offsets.numel() - 1;
   const int D = grad_output.size(1);
   auto grad_input = at::empty_like(grad_output);
+
+#ifdef _OPENMP
+  omp_set_num_threads(10);
+#endif
 
   if (B > 0 && D > 0) {
     AT_DISPATCH_INDEX_TYPES(
@@ -1367,15 +1382,17 @@ void jagged_jagged_bmm_kernel(
   const int M = x_values.size(1);
   const int N = y_values.size(1);
 
-  for (int b = 0; b < B; ++b) {
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+  for (auto b = 0; b < B; b++) {
     const int row_start = offsets[b];
     const int row_end = offsets[b + 1];
     const int length = std::min(row_end - row_start, (int)max_L);
-
-    for (int m = 0; m < M; ++m) {
-      for (int n = 0; n < N; ++n) {
+    for (const auto m : c10::irange(M)) {
+      for (const auto n : c10::irange(N)) {
         at::acc_type<scalar_t, true> acc = 0;
-        for (int l = 0; l < length; ++l) {
+        for (const auto l : c10::irange(length)) {
           acc += x_values[row_start + l][m] * y_values[row_start + l][n];
         }
         output[b][m][n] = acc;
@@ -1396,6 +1413,11 @@ Tensor jagged_jagged_bmm_forward(
   const int M = x_values.size(-1);
   const int N = y_values.size(-1);
   auto output = at::zeros({B, M, N}, x_values.options());
+
+#ifdef _OPENMP
+  omp_set_num_threads(10);
+#endif
+
   if (B > 0 && M > 0 && N > 0) {
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_jagged_bmm_kernel_1", [&] {
@@ -1430,14 +1452,17 @@ void jagged_dense_bmm_kernel(
   const int K = x_values.size(1);
   const int N = y.size(2);
 
-  for (int b = 0; b < B; ++b) {
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+  for (auto b = 0; b < B; b++) {
     const int row_start = x_offsets[b];
     const int row_end = x_offsets[b + 1];
     const int length = std::min(row_end - row_start, (int)max_L);
-    for (int l = 0; l < length; ++l) {
-      for (int n = 0; n < N; ++n) {
+    for (const auto l : c10::irange(length)) {
+      for (const auto n : c10::irange(N)) {
         at::acc_type<scalar_t, true> acc = 0;
-        for (int k = 0; k < K; ++k) {
+        for (const auto k : c10::irange(K)) {
           acc += x_values[row_start + l][k] * y[b][k][n];
         }
         output[row_start + l][n] = acc;
@@ -1459,6 +1484,11 @@ Tensor jagged_dense_bmm_forward(
   const int N = y.size(-1);
   const int total_L = x_values.size(0);
   auto output = at::zeros({total_L, N}, x_values.options());
+
+#ifdef _OPENMP
+  omp_set_num_threads(10);
+#endif
+
   if (B > 0 && M > 0 && N > 0) {
     AT_DISPATCH_INDEX_TYPES(
         x_offsets.scalar_type(), "jagged_dense_bmm_kernel_1", [&] {
@@ -1570,10 +1600,13 @@ Tensor jagged_slice_forward_cpu(
 
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   // (dense, offsets) -> jagged. Offsets output is same as input.
+  // SymInt is a new PyTorch 2.0 feature to support dynamic shape. See more
+  // details at https://pytorch.org/get-started/pytorch-2.0/#dynamic-shapes. If
+  // you find it doesn't compile, please pull the new PyTorch 2.0 code
   m.def(
-      "dense_to_jagged(Tensor dense, Tensor[] x_offsets, int? total_L=None) -> (Tensor, Tensor[])");
+      "dense_to_jagged(Tensor dense, Tensor[] x_offsets, SymInt? total_L=None) -> (Tensor, Tensor[])");
   m.def(
-      "dense_to_jagged_forward(Tensor dense, Tensor[] x_offsets, int? total_L=None) -> Tensor");
+      "dense_to_jagged_forward(Tensor dense, Tensor[] x_offsets, SymInt? total_L=None) -> Tensor");
   m.def(
       "jagged_2d_to_dense(Tensor values, Tensor offsets, int max_sequence_length) -> Tensor");
   m.def(
@@ -1589,9 +1622,9 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "jagged_to_padded_dense(Tensor values, Tensor[] offsets, int[] max_lengths, float padding_value = 0) -> Tensor");
   m.def(
-      "jagged_to_padded_dense_forward(Tensor values, Tensor[] offsets, int[] max_lengths, float padding_value = 0) -> Tensor");
+      "jagged_to_padded_dense_forward(Tensor values, Tensor[] offsets, SymInt[] max_lengths, float padding_value = 0) -> Tensor");
   m.def(
-      "jagged_to_padded_dense_backward(Tensor grad_output, Tensor[] offsets, int total_L) -> Tensor");
+      "jagged_to_padded_dense_backward(Tensor grad_output, Tensor[] offsets, SymInt total_L) -> Tensor");
   // jagged + dense -> dense
   m.def(
       "jagged_dense_elementwise_add(Tensor x_values, Tensor[] x_offsets, Tensor y) -> Tensor");

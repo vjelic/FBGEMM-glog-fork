@@ -1,7 +1,7 @@
 #!/bin/bash
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -248,7 +248,7 @@ run_fbgemm_gpu_postbuild_checks () {
   print_glibc_info "${library}"
 
   echo "[CHECK] Listing out undefined symbols in the library: ${library}"
-  print_exec nm -gDCu "${library}" | sort
+  print_exec "nm -gDCu ${library} | sort"
 
   echo "[CHECK] Listing out external shared libraries required by the library: ${library}"
   print_exec ldd "${library}"

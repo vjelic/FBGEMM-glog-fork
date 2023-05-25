@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from fbgemm_gpu.bench.bench_utils import benchmark_requests
 from fbgemm_gpu.split_embedding_utils import generate_requests, round_up
-from fbgemm_gpu.split_table_batched_embeddings_ops import (
+from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
     IntNBitTableBatchedEmbeddingBagsCodegen,
 )
 from fbgemm_gpu.ssd_split_table_batched_embeddings_ops import (

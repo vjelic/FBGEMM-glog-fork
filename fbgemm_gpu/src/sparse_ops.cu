@@ -1,9 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
+
 #include "fbgemm_gpu/sparse_ops.cuh"
 #include "fbgemm_gpu/sparse_ops.h"
 #include "fbgemm_gpu/sparse_ops_utils.h"
@@ -1869,7 +1871,8 @@ __launch_bounds__(kMaxThreads) void batched_unary_embeddings_backward_kernel(
     const int32_t* __restrict__ sorted_linear_indices_cumulative_run_lengths,
     const int32_t* __restrict__ sorted_infos,
     const int32_t* __restrict__ sorted_linear_indices_num_runs,
-    FixedDivisor fd) {
+    const int32_t info_B_num_bits,
+    const uint32_t info_B_mask) {
   int32_t run_id = blockIdx.x * blockDim.x + threadIdx.x;
   int32_t n = blockIdx.y;
   if (n >= N) {
@@ -1893,12 +1896,15 @@ __launch_bounds__(kMaxThreads) void batched_unary_embeddings_backward_kernel(
 
   // now, each segment corresponds to exactly one table `t` and row in
   // that table (`idx`). Thus, we can hoist out some of the book-keeping.
-  auto info = sorted_infos[segment_start];
-  int t = fd.Div(info);
+  const auto info =
+      reinterpret_cast<const uint32_t*>(sorted_infos)[segment_start];
+  int t = info >> info_B_num_bits;
 
   at::acc_type<scalar_t, true> grad_sum = 0.0;
   for (int32_t sl = 0; sl < SL; ++sl) {
-    int32_t b = fd.Mod(sorted_infos[segment_start + sl]);
+    const auto b =
+        reinterpret_cast<const uint32_t*>(sorted_infos)[segment_start + sl] &
+        info_B_mask;
     grad_sum += grad_output[(n * B + b) * T + t];
   }
 
@@ -1931,6 +1937,10 @@ Tensor batched_unary_embeddings_backward_cuda(
   TORCH_CHECK(B > 0);
   TORCH_CHECK(T > 0);
 
+  int32_t info_B_num_bits;
+  uint32_t info_B_mask;
+  std::tie(info_B_num_bits, info_B_mask) = adjust_info_B_num_bits(B, T);
+
   // weight: [N, sum_E]
   // total_hash_size_bits = log2(sum_E)
   int64_t total_hash_size_bits = log2(weight.numel() / N) + 1;
@@ -1949,7 +1959,14 @@ Tensor batched_unary_embeddings_backward_cuda(
       sorted_linear_indices_num_runs,
       sorted_linear_indices_cumulative_run_lengths) =
       transpose_embedding_input(
-          table_offsets, total_hash_size_bits, indices, offsets);
+          table_offsets,
+          total_hash_size_bits,
+          indices,
+          offsets,
+          false, // nobag
+          c10::optional<Tensor>(),
+          info_B_num_bits,
+          info_B_mask);
 
   int threads = std::min<int32_t>(sorted_linear_indices_run.numel(), 512);
   dim3 blocks(
@@ -1977,7 +1994,8 @@ Tensor batched_unary_embeddings_backward_cuda(
                           .data_ptr<int32_t>(),
                       infos_sorted.data_ptr<int32_t>(),
                       sorted_linear_indices_num_runs.data_ptr<int32_t>(),
-                      FixedDivisor(B));
+                      info_B_num_bits,
+                      info_B_mask);
               C10_CUDA_KERNEL_LAUNCH_CHECK();
             });
       });
@@ -2447,9 +2465,11 @@ Tensor pack_segments_forward_cuda(
   TENSOR_NDIM_EQUALS(lengths, 1);
   TORCH_CHECK(
       t_in.dtype() == at::ScalarType::Float ||
-          t_in.dtype() == at::ScalarType::Double,
-      "t_in must be of type float or double");
-  TORCH_CHECK(max_length > 0, "max_length must be a positive number");
+          t_in.dtype() == at::ScalarType::Double ||
+          t_in.dtype() == at::ScalarType::Half ||
+          t_in.dtype() == at::ScalarType::BFloat16,
+      "t_in must be of type float or double or half or bfloat16");
+  TORCH_CHECK_GT(max_length, 0);
 
   at::cuda::OptionalCUDAGuard device_guard;
   device_guard.set_index(t_in.get_device());
@@ -2545,13 +2565,13 @@ Tensor pack_segments_backward_cuda(
   TENSOR_ON_CUDA_GPU(lengths);
   TENSOR_NDIM_IS_GE(data, 2);
   TENSOR_NDIM_EQUALS(lengths, 1);
-  TORCH_CHECK(
-      data.size(0) == lengths.size(0),
-      "LENGTHS and DATA must match in dimension 0");
+  TORCH_CHECK_EQ(data.size(0), lengths.size(0));
   TORCH_CHECK(
       data.dtype() == at::ScalarType::Float ||
-          data.dtype() == at::ScalarType::Double,
-      "data must be of type float or double");
+          data.dtype() == at::ScalarType::Double ||
+          data.dtype() == at::ScalarType::Half ||
+          data.dtype() == at::ScalarType::BFloat16,
+      "data must be of type float or double or half or bfloat16");
   TORCH_CHECK(
       max_length == data.size(1),
       "max_length should be equal to the second dimension of the packed segments");
@@ -2617,10 +2637,10 @@ template <
     bool indices_sorted>
 __global__ __launch_bounds__(kMaxThreads) void index_select_2d_kernel(
     const at::PackedTensorAccessor64<scalar_t, 2, at::RestrictPtrTraits> input,
-    const at::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits> indices,
-    const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits>
+    const at::PackedTensorAccessor64<index_t, 1, at::RestrictPtrTraits> indices,
+    const at::PackedTensorAccessor64<int64_t, 1, at::RestrictPtrTraits>
         orig_indices,
-    at::PackedTensorAccessor32<scalar_t, 2> output) {
+    at::PackedTensorAccessor64<scalar_t, 2> output) {
   const int N = indices.size(0);
   const int input_size = input.size(0);
   const int D = input.size(1);
@@ -2757,6 +2777,16 @@ dummy_packed_accessor32() {
   return {nullptr, zeros.data(), zeros.data()};
 }
 
+template <
+    typename scalar_t,
+    int ndim,
+    template <typename U> class PtrTraits = at::DefaultPtrTraits>
+at::PackedTensorAccessor64<scalar_t, ndim, PtrTraits>
+dummy_packed_accessor64() {
+  std::array<int64_t, ndim> zeros{};
+  return {nullptr, zeros.data(), zeros.data()};
+}
+
 Tensor index_select_cuda(
     const Tensor& input,
     const Tensor& indices,
@@ -2788,12 +2818,12 @@ Tensor index_select_cuda(
          at::cuda::getCurrentCUDAStream()>>>(                                 \
           input_reshaped                                                      \
               .packed_accessor64<scalar_t, 2, at::RestrictPtrTraits>(),       \
-          indices.packed_accessor32<index_t, 1, at::RestrictPtrTraits>(),     \
+          indices.packed_accessor64<index_t, 1, at::RestrictPtrTraits>(),     \
           INDICES_SORTED                                                      \
               ? orig_indices                                                  \
-                    .packed_accessor32<int64_t, 1, at::RestrictPtrTraits>()   \
-              : dummy_packed_accessor32<int64_t, 1, at::RestrictPtrTraits>(), \
-          output.packed_accessor32<scalar_t, 2>());
+                    .packed_accessor64<int64_t, 1, at::RestrictPtrTraits>()   \
+              : dummy_packed_accessor64<int64_t, 1, at::RestrictPtrTraits>(), \
+          output.packed_accessor64<scalar_t, 2>());
 
   AT_DISPATCH_INDEX_TYPES(indices.scalar_type(), "index_add_2d_kernel_1", [&] {
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(

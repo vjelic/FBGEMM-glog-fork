@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -18,20 +18,26 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import click
 import fbgemm_gpu
 import numpy as np
+
 import torch
+
+from fbgemm_gpu.split_embedding_configs import EmbOptimType as OptimType, SparseType
 from fbgemm_gpu.split_embedding_utils import generate_requests, get_device, round_up
-from fbgemm_gpu.split_table_batched_embeddings_ops import (
+
+from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
     BoundsCheckMode,
     CacheAlgorithm,
-    ComputeDevice,
-    DenseTableBatchedEmbeddingBagsCodegen,
     EmbeddingLocation,
-    IntNBitTableBatchedEmbeddingBagsCodegen,
-    OptimType,
     PoolingMode,
     RecordCacheMetrics,
+)
+from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
+    IntNBitTableBatchedEmbeddingBagsCodegen,
     rounded_row_size_in_bytes,
-    SparseType,
+)
+from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
+    ComputeDevice,
+    DenseTableBatchedEmbeddingBagsCodegen,
     SplitTableBatchedEmbeddingBagsCodegen,
 )
 from torch import Tensor
