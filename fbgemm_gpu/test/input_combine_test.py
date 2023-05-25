@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -32,7 +32,7 @@ class TBEInputPrepareReference(torch.nn.Module):
         super().__init__()
         self.include_last_offsets = include_last_offsets
 
-    def forward(
+    def forward(  # noqa C901
         self,
         indices_list: List[torch.Tensor],
         offsets_list: List[torch.Tensor],

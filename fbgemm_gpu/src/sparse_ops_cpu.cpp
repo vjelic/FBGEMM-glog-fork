@@ -1,6 +1,7 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
@@ -1112,7 +1113,7 @@ Tensor asynchronous_complete_cumsum_cpu(const Tensor& t_in) {
           const auto num_vecs = t_in_contig->size(0);
           const auto N = t_in_contig->size(1);
           at::parallel_for(0, num_vecs, 1, [&](int64_t start, int64_t end) {
-            for (auto i = start; i < end; i++) {
+            for (const auto i : c10::irange(start, end)) {
               scalar_t* out_ptr = output.data_ptr<scalar_t>() + i * (N + 1);
               out_ptr[N] = exclusive_scan_ptrs_cpu(
                   N, t_in_contig->data_ptr<scalar_t>() + i * N, out_ptr);
@@ -1138,16 +1139,15 @@ void reorder_batched_ad_lengths_(
   const auto* batch_offsets_data = batch_offsets.data_ptr<index_t>();
   const auto* cat_ad_lengths_data = cat_ad_lengths.data_ptr<scalar_t>();
   auto* output_data = output.data_ptr<scalar_t>();
-
-  for (auto b = 0; b < nB; b++) {
+  for (const auto b : c10::irange(nB)) {
     const auto num_ads_b = batch_offsets_data[b + 1] - batch_offsets_data[b];
-    for (auto t = 0; t < nT; t++) {
+    for (const auto t : c10::irange(nT)) {
       const int32_t input_segment_start = broadcast_lengths
           ? nT * b + t
           : nT * batch_offsets_data[b] + t * num_ads_b;
       const int32_t output_segment_start =
           t * num_ads_in_batch + batch_offsets_data[b];
-      for (auto i = 0; i < num_ads_b; i++) {
+      for (const auto i : c10::irange(num_ads_b)) {
         output_data[output_segment_start + i] = broadcast_lengths
             ? cat_ad_lengths_data[input_segment_start]
             : cat_ad_lengths_data[input_segment_start + i];
@@ -1208,10 +1208,9 @@ void reorder_batched_ad_indices_cpu_(
       reordered_cat_ad_offsets.data_ptr<index_t>();
   const auto* cat_ad_indices_data = cat_ad_indices.data_ptr<scalar_t>();
   auto* output_data = output.data_ptr<scalar_t>();
-
-  for (auto b = 0; b < nB; b++) {
+  for (const auto b : c10::irange(nB)) {
     const auto num_ads_b = batch_offsets_data[b + 1] - batch_offsets_data[b];
-    for (auto t = 0; t < nT; t++) {
+    for (const auto t : c10::irange(nT)) {
       const auto output_segment_offset_start =
           t * num_ads_in_batch + batch_offsets_data[b];
       const auto output_segment_start =
@@ -2243,9 +2242,10 @@ Tensor pack_segments_forward_cpu(
   TENSOR_NDIM_EQUALS(lengths, 1);
   TORCH_CHECK(
       t_in.dtype() == at::ScalarType::Float ||
-          t_in.dtype() == at::ScalarType::Double,
-      "t_in must be of type float or double");
-  TORCH_CHECK(max_length > 0, "max_length must be a positive number");
+          t_in.dtype() == at::ScalarType::Double ||
+          t_in.dtype() == at::ScalarType::Half,
+      "t_in must be of type float or double or half");
+  TORCH_CHECK_GT(max_length, 0);
 
   const auto t_in_cont = t_in.expect_contiguous();
   Tensor packed_tensor;
@@ -2265,8 +2265,11 @@ Tensor pack_segments_forward_cpu(
           return; // Return empty output (with the proper shape)
         }
 
-        AT_DISPATCH_FLOATING_TYPES(
-            t_in_cont->scalar_type(), "pack_segments_cpu-packing", ([&]() {
+        AT_DISPATCH_ALL_TYPES_AND(
+            at::ScalarType::Half,
+            t_in_cont->scalar_type(),
+            "pack_segments_cpu-packing",
+            ([&]() {
               const auto sizes =
                   t_in_cont->sizes().slice(1, t_in_cont->sizes().size() - 1);
               const auto block_size = c10::multiply_integers(sizes);
@@ -2310,8 +2313,9 @@ Tensor pack_segments_backward_cpu(
       "LENGTHS and DATA must match in dimension 0");
   TORCH_CHECK(
       data.dtype() == at::ScalarType::Float ||
-          data.dtype() == at::ScalarType::Double,
-      "data must be of type float or double");
+          data.dtype() == at::ScalarType::Double ||
+          data.dtype() == at::ScalarType::Half,
+      "data must be of type float or double or half");
   TORCH_CHECK(
       max_length == data.sizes()[1],
       "max_length should be equal to the second dimension of the packed segments");
@@ -2333,8 +2337,11 @@ Tensor pack_segments_backward_cpu(
           return;
         }
 
-        AT_DISPATCH_FLOATING_TYPES(
-            data.scalar_type(), "unpack_segments_cpu-unpacking", ([&]() {
+        AT_DISPATCH_ALL_TYPES_AND(
+            at::ScalarType::Half,
+            data.scalar_type(),
+            "unpack_segments_cpu-unpacking",
+            ([&]() {
               const auto sizes = data.sizes().slice(2, data.sizes().size() - 2);
               const auto block_size = c10::multiply_integers(sizes);
               const auto block_bytesize = data.itemsize() * block_size;
@@ -2421,7 +2428,7 @@ std::vector<Tensor> group_index_select_dim0(
   int num_groups = input_group.size();
   TORCH_CHECK(num_groups == (int)indices_group.size())
   std::vector<Tensor> output_group;
-  for (int i = 0; i < num_groups; i++) {
+  for (const auto i : c10::irange(num_groups)) {
     output_group.push_back(
         at::index_select(input_group[i], 0, indices_group[i]));
   }
@@ -2451,7 +2458,7 @@ Tensor bottom_k_per_row(
 
   at::parallel_for(
       0, input_reshaped.size(0), 1, [&](int64_t start, int64_t end) {
-        for (auto i = start; i < end; i++) {
+        for (const auto i : c10::irange(start, end)) {
           auto start_k_offset =
               use_fixed_k ? i * fixed_k : k_offsets_accessor[i];
           auto k = use_fixed_k ? fixed_k

@@ -1,6 +1,7 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
@@ -8,6 +9,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/core/Device.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/util/Logging.h>
 #include <algorithm>
 
 #include "fbgemm_gpu/topology_utils.h"

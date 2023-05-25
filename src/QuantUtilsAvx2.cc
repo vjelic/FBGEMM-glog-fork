@@ -1,9 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
+
 #define FBGEMM_EXPORTS
 #include "fbgemm/QuantUtilsAvx2.h"
 #if defined(__x86_64__) || defined(__i386__) || \
@@ -39,7 +41,7 @@ void QuantizeAvx2(
   // that is exactly representable in float
   constexpr int32_t int32_float_max_val =
       std::numeric_limits<int32_t>::max() - 127;
-  int i = 0;
+  int64_t i = 0;
   float inverse_scale = 1.f / qparams.scale;
   __m256 inverse_scale_v = _mm256_set1_ps(inverse_scale);
   // clang-format off

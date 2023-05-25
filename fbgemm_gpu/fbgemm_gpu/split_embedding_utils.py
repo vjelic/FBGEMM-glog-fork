@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -86,7 +87,7 @@ def b_indices(
         return b(to_device(indices, use_cpu))
 
 
-def generate_requests(
+def generate_requests(  # noqa C901
     iters: int,
     B: int,
     T: int,

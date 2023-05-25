@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -329,19 +330,31 @@ target_include_directories(fbgemm BEFORE
     PUBLIC $<BUILD_INTERFACE:${FBGEMM_SOURCE_DIR}>
     PUBLIC $<BUILD_INTERFACE:${FBGEMM_SOURCE_DIR}/include>)
 
-target_link_libraries(fbgemm $<BUILD_INTERFACE:asmjit>
+target_link_libraries(fbgemm
+  $<BUILD_INTERFACE:asmjit>
   $<BUILD_INTERFACE:cpuinfo>)
-add_dependencies(fbgemm asmjit cpuinfo)
+add_dependencies(fbgemm
+  asmjit
+  cpuinfo)
 
-install(TARGETS fbgemm EXPORT fbgemmLibraryConfig
+if(OpenMP_FOUND)
+  target_link_libraries(fbgemm OpenMP::OpenMP_CXX)
+endif()
+
+install(
+  TARGETS fbgemm
+  EXPORT fbgemmLibraryConfig
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}) #For windows
 
-install(FILES ${FBGEMM_PUBLIC_HEADERS}
+install(
+  FILES ${FBGEMM_PUBLIC_HEADERS}
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/fbgemm")
 
-install(EXPORT fbgemmLibraryConfig DESTINATION share/cmake/fbgemm
+install(
+  EXPORT fbgemmLibraryConfig
+  DESTINATION share/cmake/fbgemm
   FILE fbgemmLibraryConfig.cmake)
 
 if(MSVC)

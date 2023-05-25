@@ -1,5 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -159,7 +160,7 @@ file(GLOB_RECURSE asmjit_sources
 # FBGEMM_GPU Generated Sources
 ################################################################################
 
-set(OPTIMIZERS
+set(COMMON_OPTIMIZERS
     adagrad
     adam
     approx_rowwise_adagrad
@@ -176,6 +177,26 @@ set(OPTIMIZERS
     rowwise_weighted_adagrad
     sgd)
 
+# To be populated in the subsequent diffs
+set(CPU_ONLY_OPTIMIZERS "")
+
+set(GPU_ONLY_OPTIMIZERS "")
+
+set(DEPRECATED_OPTIMIZERS "")
+
+set(ALL_OPTIMIZERS
+  ${COMMON_OPTIMIZERS}
+  ${CPU_ONLY_OPTIMIZERS}
+  ${GPU_ONLY_OPTIMIZERS}
+  ${DEPRECATED_OPTIMIZERS})
+
+set(CPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${CPU_ONLY_OPTIMIZERS})
+
+set(GPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${GPU_ONLY_OPTIMIZERS})
+
+# Optimizers with the VBE support
+set(VBE_OPTIMIZERS rowwise_adagrad)
+
 set(gen_gpu_kernel_source_files
     "gen_embedding_forward_dense_weighted_codegen_cuda.cu"
     "gen_embedding_forward_dense_unweighted_codegen_cuda.cu"
@@ -183,7 +204,9 @@ set(gen_gpu_kernel_source_files
     "gen_embedding_forward_split_unweighted_codegen_cuda.cu"
     "gen_embedding_backward_dense_indice_weights_codegen_cuda.cu"
     "gen_embedding_backward_split_indice_weights_codegen_cuda.cu"
-    "gen_embedding_backward_split_grad.cu")
+    "gen_embedding_backward_split_grad.cu"
+    "gen_embedding_forward_split_weighted_vbe_codegen_cuda.cu"
+    "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu")
 
 foreach(wdesc dense split)
   list(APPEND gen_gpu_kernel_source_files
@@ -192,18 +215,24 @@ endforeach()
 
 foreach(wdesc weighted unweighted_nobag unweighted)
   list(APPEND gen_gpu_kernel_source_files
-      "gen_embedding_forward_split_${wdesc}_kernel.cu"
-      "gen_embedding_forward_dense_${wdesc}_kernel.cu"
       "gen_embedding_forward_quantized_split_nbit_host_${wdesc}_codegen_cuda.cu"
+      "gen_embedding_forward_dense_${wdesc}_kernel.cu"
       "gen_embedding_backward_dense_split_${wdesc}_cuda.cu"
       "gen_embedding_backward_dense_split_${wdesc}_kernel_cta.cu"
       "gen_embedding_backward_dense_split_${wdesc}_kernel_warp.cu")
+
+  list(APPEND gen_gpu_kernel_source_files
+      "gen_embedding_forward_split_${wdesc}_kernel.cu")
 
   foreach(etype fp32 fp16 fp8 int8 int4 int2)
     list(APPEND gen_gpu_kernel_source_files
        "gen_embedding_forward_quantized_split_nbit_kernel_${wdesc}_${etype}_codegen_cuda.cu")
   endforeach()
 endforeach()
+
+list(APPEND gen_gpu_kernel_source_files
+     "gen_embedding_forward_split_weighted_vbe_kernel.cu"
+     "gen_embedding_forward_split_unweighted_vbe_kernel.cu")
 
 set(gen_cpu_source_files
     "gen_embedding_forward_quantized_unweighted_codegen_cpu.cpp"
@@ -212,25 +241,49 @@ set(gen_cpu_source_files
 
 set(gen_python_source_files ${CMAKE_BINARY_DIR}/__init__.py)
 
-foreach(optimizer ${OPTIMIZERS})
-  # For each of the optimizers, generate the backward split variant by adding
-  # the Python, CPU-only, GPU host, and GPU kernel source files
+# For each of the optimizers, generate the backward split variant by adding
+# the Python, CPU-only, GPU host, and GPU kernel source files
 
+# Generate the Python functions only if there is the backend support
+foreach(optimizer
+    ${COMMON_OPTIMIZERS}
+    ${CPU_ONLY_OPTIMIZERS}
+    ${GPU_ONLY_OPTIMIZERS})
   list(APPEND gen_python_source_files
     "${CMAKE_BINARY_DIR}/lookup_${optimizer}.py")
+endforeach()
 
+# Generate the backend API for all optimizers to preserve the backward
+# compatibility
+foreach(optimizer ${ALL_OPTIMIZERS})
   list(APPEND gen_cpu_source_files
-    "gen_embedding_backward_split_${optimizer}_cpu.cpp"
-    "gen_embedding_backward_${optimizer}_split_cpu.cpp")
-
+    "gen_embedding_backward_split_${optimizer}_cpu.cpp")
   list(APPEND gen_gpu_host_source_files
     "gen_embedding_backward_split_${optimizer}.cpp")
+endforeach()
 
+foreach(optimizer ${CPU_OPTIMIZERS})
+  list(APPEND gen_cpu_source_files
+    "gen_embedding_backward_${optimizer}_split_cpu.cpp")
+endforeach()
+
+foreach(optimizer ${GPU_OPTIMIZERS})
   foreach(wdesc weighted unweighted_nobag unweighted)
     list(APPEND gen_gpu_kernel_source_files
       "gen_embedding_backward_${optimizer}_split_${wdesc}_cuda.cu"
       "gen_embedding_backward_${optimizer}_split_${wdesc}_kernel_cta.cu"
       "gen_embedding_backward_${optimizer}_split_${wdesc}_kernel_warp.cu")
+  endforeach()
+
+endforeach()
+
+foreach(optimizer ${VBE_OPTIMIZERS})
+  # vbe is not supported in nobag
+  foreach(wdesc weighted unweighted)
+    list(APPEND gen_gpu_kernel_source_files
+      "gen_embedding_backward_${optimizer}_split_${wdesc}_vbe_cuda.cu"
+      "gen_embedding_backward_${optimizer}_split_${wdesc}_vbe_kernel_cta.cu"
+      "gen_embedding_backward_${optimizer}_split_${wdesc}_vbe_kernel_warp.cu")
   endforeach()
 endforeach()
 
@@ -419,6 +472,7 @@ set(fbgemm_gpu_sources_static_cpu
     src/layout_transform_ops_cpu.cpp
     src/quantize_ops_cpu.cpp
     src/sparse_ops_cpu.cpp
+    src/sparse_ops_meta.cpp
     src/embedding_inplace_update_cpu.cpp)
 
 if(NOT FBGEMM_CPU_ONLY)
@@ -462,18 +516,36 @@ if(NOT FBGEMM_CPU_ONLY)
       codegen/embedding_bounds_check.cu
       codegen/embedding_forward_quantized_split_lookup.cu
       src/cumem_utils.cu
+      src/embedding_inplace_update.cu
       src/histogram_binning_calibration_ops.cu
-      src/jagged_tensor_ops.cu
+      src/input_combine.cu
+      src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_backward.cu
+      src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_forward.cu
+      src/jagged_tensor_ops/dense_to_jagged_forward.cu
+      src/jagged_tensor_ops/jagged_dense_bmm_forward.cu
+      src/jagged_tensor_ops/jagged_dense_dense_elementwise_add_jagged_output_forward.cu
+      src/jagged_tensor_ops/jagged_dense_elementwise_add_jagged_output.cu
+      src/jagged_tensor_ops/jagged_dense_elementwise_mul_backward.cu
+      src/jagged_tensor_ops/jagged_dense_elementwise_mul_forward.cu
+      src/jagged_tensor_ops/jagged_index_add_2d_forward.cu
+      src/jagged_tensor_ops/jagged_index_select_2d_forward.cu
+      src/jagged_tensor_ops/jagged_jagged_bmm_forward.cu
+      src/jagged_tensor_ops/jagged_softmax_backward.cu
+      src/jagged_tensor_ops/jagged_softmax_forward.cu
+      src/jagged_tensor_ops/jagged_tensor_ops.cu
+      src/jagged_tensor_ops/jagged_to_padded_dense_backward.cu
+      src/jagged_tensor_ops/jagged_to_padded_dense_forward.cu
+      src/jagged_tensor_ops/keyed_jagged_index_select_dim1.cu
+      src/jagged_tensor_ops/stacked_jagged_1d_to_dense.cu
+      src/jagged_tensor_ops/stacked_jagged_2d_to_dense.cu
       src/layout_transform_ops.cu
-      src/permute_pooled_embedding_ops.cu
+      src/metric_ops.cu
       src/permute_pooled_embedding_ops_split.cu
+      src/permute_pooled_embedding_ops.cu
       src/quantize_ops.cu
       src/sparse_ops.cu
       src/split_embeddings_cache_cuda.cu
-      src/split_embeddings_utils.cu
-      src/metric_ops.cu
-      src/embedding_inplace_update.cu
-      src/input_combine.cu)
+      src/split_embeddings_utils.cu)
 
   set_source_files_properties(${fbgemm_gpu_sources_static_gpu}
     PROPERTIES COMPILE_OPTIONS

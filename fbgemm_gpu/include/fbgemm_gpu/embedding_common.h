@@ -1,9 +1,11 @@
 /*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  * All rights reserved.
+ *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree.
  */
+
 #pragma once
 #include <ATen/ATen.h>
 #include <c10/macros/Macros.h>
@@ -78,6 +80,16 @@ inline SparseType getSparseType(at::ScalarType dtype) {
     default:
       return SparseType::INVALID;
   }
+};
+
+struct VBEMetadata {
+  at::Tensor B_offsets; // torch.int
+  at::Tensor output_offsets_feature_rank; // torch.long
+  at::Tensor B_offsets_rank_per_feature; // torch.int
+  at::Tensor output_offsets; // torch.long
+  at::Tensor b_t_map; // torch.int
+  int32_t max_B_feature_rank;
+  int64_t output_size;
 };
 
 } // namespace fbgemm_gpu
