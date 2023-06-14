@@ -7,6 +7,7 @@
 import math
 import os
 import struct
+import subprocess
 import unittest
 from functools import wraps
 from typing import Any, Callable, List, Tuple
@@ -179,6 +180,15 @@ running_on_github: Tuple[bool, str] = (
     "Test is currently known to fail or hang when run in the GitHub runners",
 )
 
+# Used for `@unittest.skipIf` for tests that currently fail on ARM platform
+on_arm_platform: Tuple[bool, str] = (
+    subprocess.run(["uname", "-m"], stdout=subprocess.PIPE)
+    .stdout.decode("utf-8")
+    .strip()
+    == "aarch64",
+    "Test is currently known to fail when running on ARM platform",
+)
+
 
 def cpu_and_maybe_gpu() -> st.SearchStrategy[List[torch.device]]:
     gpu_available = torch.cuda.is_available() and torch.cuda.device_count() > 0
@@ -197,7 +207,7 @@ def cpu_only() -> st.SearchStrategy[List[torch.device]]:
 
 
 # pyre-fixme[3]: Return annotation cannot be `Any`.
-def skipIfRocm(reason: str = "test doesn't currently work on the ROCm stack") -> Any:
+def skipIfRocm(reason: str = "Test currently doesn't work on the ROCm stack") -> Any:
     # pyre-fixme[3]: Return annotation cannot be `Any`.
     # pyre-fixme[24]: Generic type `Callable` expects 2 type parameters.
     def skipIfRocmDecorator(fn: Callable) -> Any:
