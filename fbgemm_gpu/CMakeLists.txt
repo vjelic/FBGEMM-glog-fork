@@ -19,6 +19,7 @@ function(BLOCK_PRINT)
   message("")
 endfunction()
 
+set(CMAKEMODULES ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/modules)
 set(FBGEMM ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(THIRDPARTY ${FBGEMM}/third_party)
 
@@ -78,10 +79,17 @@ BLOCK_PRINT(
   "${CMAKE_CXX_FLAGS}"
 )
 
+# Strip all symbols from the .SO file after building
+add_link_options($<$<CONFIG:RELEASE>:-s>)
+
 
 ################################################################################
 # FBGEMM_GPU Build Kickstart
 ################################################################################
+
+if(SKBUILD)
+  BLOCK_PRINT("The project is built using scikit-build")
+endif()
 
 if(FBGEMM_CPU_ONLY OR USE_ROCM)
   project(
@@ -95,9 +103,7 @@ else()
     LANGUAGES CXX C CUDA)
 endif()
 
-if(SKBUILD)
-  BLOCK_PRINT("The project is built using scikit-build")
-endif()
+include(${CMAKEMODULES}/FindAVX.cmake)
 
 
 ################################################################################
@@ -162,17 +168,7 @@ file(GLOB_RECURSE asmjit_sources
 
 set(COMMON_OPTIMIZERS
     adagrad
-    adam
-    approx_rowwise_adagrad
-    approx_rowwise_adagrad_with_weight_decay
-    approx_rowwise_adagrad_with_counter
-    approx_sgd
-    lamb
-    lars_sgd
-    partial_rowwise_adam
-    partial_rowwise_lamb
     rowwise_adagrad
-    rowwise_adagrad_with_weight_decay
     rowwise_adagrad_with_counter
     rowwise_weighted_adagrad
     sgd)
@@ -180,9 +176,20 @@ set(COMMON_OPTIMIZERS
 # To be populated in the subsequent diffs
 set(CPU_ONLY_OPTIMIZERS "")
 
-set(GPU_ONLY_OPTIMIZERS "")
+set(GPU_ONLY_OPTIMIZERS
+  adam
+  lamb
+  partial_rowwise_adam
+  partial_rowwise_lamb
+  lars_sgd
+  rowwise_adagrad_with_weight_decay
+  approx_rowwise_adagrad_with_weight_decay
+  none)
 
-set(DEPRECATED_OPTIMIZERS "")
+set(DEPRECATED_OPTIMIZERS
+  approx_sgd
+  approx_rowwise_adagrad
+  approx_rowwise_adagrad_with_counter)
 
 set(ALL_OPTIMIZERS
   ${COMMON_OPTIMIZERS}
@@ -207,6 +214,12 @@ set(gen_gpu_kernel_source_files
     "gen_embedding_backward_split_grad.cu"
     "gen_embedding_forward_split_weighted_vbe_codegen_cuda.cu"
     "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu")
+
+if(NOT USE_ROCM)
+  list(APPEND gen_gpu_kernel_source_files
+    "gen_embedding_forward_split_weighted_v2_kernel.cu"
+    "gen_embedding_forward_split_unweighted_v2_kernel.cu")
+endif()
 
 foreach(wdesc dense split)
   list(APPEND gen_gpu_kernel_source_files
@@ -310,6 +323,7 @@ set(codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_cpu.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_cpu.h
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_kernel_template.cu
+    ${CMAKE_CODEGEN_DIR}/embedding_forward_split_kernel_v2_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_kernel_nobag_small_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_template_helpers.cuh
@@ -358,9 +372,15 @@ else()
     DEPENDS "${codegen_dependencies}")
 endif()
 
-set_source_files_properties(${gen_cpu_source_files}
-  PROPERTIES COMPILE_OPTIONS
-  "-mavx2;-mf16c;-mfma;-fopenmp")
+if(CXX_AVX2_FOUND)
+  set_source_files_properties(${gen_cpu_source_files}
+    PROPERTIES COMPILE_OPTIONS
+    "-mavx2;-mf16c;-mfma;-fopenmp")
+else()
+  set_source_files_properties(${gen_cpu_source_files}
+    PROPERTIES COMPILE_OPTIONS
+    "-fopenmp")
+endif()
 
 set_source_files_properties(${gen_cpu_source_files}
   PROPERTIES INCLUDE_DIRECTORIES
@@ -411,22 +431,27 @@ set(fbgemm_sources_avx2
 set(fbgemm_sources_avx512
   "${FBGEMM}/src/EmbeddingSpMDMAvx512.cc")
 
-# Add compilation flags
-set_source_files_properties(${fbgemm_sources_avx2}
-  PROPERTIES COMPILE_OPTIONS
-  "-mavx2;-mf16c;-mfma")
+if(CXX_AVX2_FOUND)
+  set_source_files_properties(${fbgemm_sources_avx2}
+    PROPERTIES COMPILE_OPTIONS
+    "-mavx2;-mf16c;-mfma")
+endif()
 
-set_source_files_properties(${fbgemm_sources_avx512}
-  PROPERTIES COMPILE_OPTIONS
-  "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
+if(CXX_AVX512_FOUND)
+  set_source_files_properties(${fbgemm_sources_avx512}
+    PROPERTIES COMPILE_OPTIONS
+    "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
+endif()
 
-if(USE_ROCM)
+set(fbgemm_sources ${fbgemm_sources_normal})
+if(CXX_AVX2_FOUND)
   set(fbgemm_sources
-    ${fbgemm_sources_normal}
+    ${fbgemm_sources}
     ${fbgemm_sources_avx2})
-else()
+endif()
+if(NOT USE_ROCM AND CXX_AVX512_FOUND)
   set(fbgemm_sources
-    ${fbgemm_sources_normal}
+    ${fbgemm_sources}
     ${fbgemm_sources_avx2}
     ${fbgemm_sources_avx512})
 endif()
@@ -507,9 +532,15 @@ if(NOT FBGEMM_CPU_ONLY)
   endif()
 endif()
 
-set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
-  PROPERTIES COMPILE_OPTIONS
-  "-mavx;-mf16c;-mfma;-mavx2;-fopenmp")
+if(CXX_AVX2_FOUND)
+  set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
+    PROPERTIES COMPILE_OPTIONS
+    "-mavx;-mf16c;-mfma;-mavx2;-fopenmp")
+else()
+  set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
+    PROPERTIES COMPILE_OPTIONS
+    "-fopenmp")
+endif()
 
 if(NOT FBGEMM_CPU_ONLY)
   set(fbgemm_gpu_sources_static_gpu
@@ -535,6 +566,7 @@ if(NOT FBGEMM_CPU_ONLY)
       src/jagged_tensor_ops/jagged_tensor_ops.cu
       src/jagged_tensor_ops/jagged_to_padded_dense_backward.cu
       src/jagged_tensor_ops/jagged_to_padded_dense_forward.cu
+      src/jagged_tensor_ops/jagged_unique_indices.cu
       src/jagged_tensor_ops/keyed_jagged_index_select_dim1.cu
       src/jagged_tensor_ops/stacked_jagged_1d_to_dense.cu
       src/jagged_tensor_ops/stacked_jagged_2d_to_dense.cu

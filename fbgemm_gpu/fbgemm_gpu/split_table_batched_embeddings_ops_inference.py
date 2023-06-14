@@ -1138,14 +1138,18 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.timestep_counter.reset()
 
     @torch.jit.export
-    def split_embedding_weights(
-        self, split_scale_shifts: bool = True
-    ) -> List[Tuple[Tensor, Optional[Tensor]]]:
+    def split_embedding_weights_with_scale_bias(
+        self, split_scale_bias_mode: int = 1
+    ) -> List[Tuple[Tensor, Optional[Tensor], Optional[Tensor]]]:
         """
         Returns a list of weights, split by table
+        split_scale_bias_mode:
+            0: return one row;
+            1: return weights + scale_bias;
+            2: return weights, scale, bias.
         """
         assert self.weight_initialized
-        splits: List[Tuple[Tensor, Optional[Tensor]]] = []
+        splits: List[Tuple[Tensor, Optional[Tensor], Optional[Tensor]]] = []
         for t, (_, rows, dim, weight_ty, _) in enumerate(self.embedding_specs):
             placement = self.weights_physical_placements[t]
             if placement == EmbeddingLocation.DEVICE.value:
@@ -1168,7 +1172,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 ),
             )
 
-            if split_scale_shifts:
+            if split_scale_bias_mode == 1 or split_scale_bias_mode == 2:
                 # remove the padding at the end of each row.
                 weights_shifts = weights_shifts[
                     :,
@@ -1181,28 +1185,70 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                     or weight_ty == SparseType.INT4
                     or weight_ty == SparseType.INT2
                 ):
-                    splits.append(
-                        (
-                            weights_shifts[:, self.scale_bias_size_in_bytes :],
-                            weights_shifts[:, : self.scale_bias_size_in_bytes],
+                    if split_scale_bias_mode == 1:
+                        splits.append(
+                            (
+                                weights_shifts[:, self.scale_bias_size_in_bytes :],
+                                weights_shifts[:, : self.scale_bias_size_in_bytes],
+                                None,
+                            )
                         )
-                    )
-                else:
-                    assert (
-                        weight_ty == SparseType.FP8
-                        or weight_ty == SparseType.FP16
-                        or weight_ty == SparseType.FP32
-                    )
+                    else:  # 2
+                        # weights_shifts: [0:2] is scale; [2:4] is bias; [4:] is real weights
+                        splits.append(
+                            (
+                                weights_shifts[:, self.scale_bias_size_in_bytes :],
+                                weights_shifts[
+                                    :, : self.scale_bias_size_in_bytes // 2
+                                ].view(torch.float16),
+                                weights_shifts[
+                                    :,
+                                    self.scale_bias_size_in_bytes
+                                    // 2 : self.scale_bias_size_in_bytes,
+                                ].view(torch.float16),
+                            )
+                        )
+                elif (
+                    weight_ty == SparseType.FP8
+                    or weight_ty == SparseType.FP16
+                    or weight_ty == SparseType.FP32
+                ):
                     splits.append(
                         (
                             weights_shifts,
                             None,
+                            None,
                         )
                     )
-            else:
-                splits.append((weights_shifts, None))
+                else:
+                    raise ValueError("weight_ty is not supported")
+
+            else:  # split_scale_bias_mode == 0:
+                splits.append((weights_shifts, None, None))
 
         return splits
+
+    @torch.jit.export
+    def split_embedding_weights(
+        self,
+        split_scale_shifts: bool = True
+        # When true, return list of two tensors, the first with weights and
+        # the second with scale_bias.
+        # This should've been named as split_scale_bias.
+        # Keep as is for backward compatibility.
+    ) -> List[Tuple[Tensor, Optional[Tensor]]]:
+        """
+        Returns a list of weights, split by table
+        """
+        splits: List[
+            Tuple[Tensor, Optional[Tensor], Optional[Tensor]]
+        ] = self.split_embedding_weights_with_scale_bias(
+            split_scale_bias_mode=(1 if split_scale_shifts else 0)
+        )
+        return [
+            (split_weight_scale_bias[0], split_weight_scale_bias[1])
+            for split_weight_scale_bias in splits
+        ]
 
     @torch.jit.export
     def initialize_weights(self) -> None:
