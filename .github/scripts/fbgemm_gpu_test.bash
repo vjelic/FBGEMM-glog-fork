@@ -106,6 +106,15 @@ run_fbgemm_gpu_tests () {
       echo "[TEST] Skipping test file known to be broken: ${test_file}"
     elif echo "${ignored_tests[@]}" | grep "${test_file}"; then
       echo "[TEST] Skipping test file: ${test_file}"
+    elif "$fbgemm_variant" == "rocm"; then
+      export ROCM_VERSION=$(awk -F'[.-]' '{print $1 * 10000 + $2 * 100 + $3}' /opt/rocm/.info/version-dev)
+      if [ "$ROCM_VERSION" -ge 50700 ] && ["${test_file}" == "uvm_test.py"]; then
+        export HSA_XNACK=1
+        if run_python_test "${env_name}" "${test_file}"; then
+          echo ""
+        fi
+        export HSA_XNACK=0
+      fi
     elif run_python_test "${env_name}" "${test_file}"; then
       echo ""
     else
