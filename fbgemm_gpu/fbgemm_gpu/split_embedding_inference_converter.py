@@ -9,12 +9,12 @@
 
 import logging
 import math
-from typing import Optional, Tuple
+from typing import cast, Optional, Tuple
 
-import numpy as np
 import torch
 
 from fbgemm_gpu.split_embedding_configs import QuantizationConfig, SparseType
+from fbgemm_gpu.split_embedding_utils import FP8QuantizationConfig, quantize_embs
 from fbgemm_gpu.split_table_batched_embeddings_ops_common import EmbeddingLocation
 from fbgemm_gpu.split_table_batched_embeddings_ops_inference import (
     IntNBitTableBatchedEmbeddingBagsCodegen,
@@ -23,8 +23,7 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
     ComputeDevice,
     SplitTableBatchedEmbeddingBagsCodegen,
 )
-
-from torch import nn, Tensor  # usort:skip
+from torch import Tensor  # usort:skip
 
 
 # TODO: add per-feature based converter option (based on embedding_specs during inference)
@@ -43,7 +42,7 @@ class SplitEmbInferenceConverter:
         self.use_array_for_index_remapping = use_array_for_index_remapping
         self.quantization_config = quantization_config
 
-    def convert_model(self, model: torch.nn.Module) -> nn.Module:
+    def convert_model(self, model: torch.nn.Module) -> torch.nn.Module:
         self._process_split_embs(model)
         return model
 
@@ -93,61 +92,10 @@ class SplitEmbInferenceConverter:
     def _quantize_embs(
         self, weight: Tensor, weight_ty: SparseType
     ) -> Tuple[Tensor, Optional[Tensor]]:
-        if weight_ty == SparseType.FP32:
-            q_weight = weight.float()
-            # FIXME: How to view the PyTorch Tensor as a different type (e.g., uint8)
-            # Here it uses numpy and it will introduce DtoH/HtoD overhead.
-            res_weight = torch.tensor(
-                q_weight.cpu().numpy().view(np.uint8)
-            ).contiguous()
-            return (res_weight, None)
+        fp8_quant_config = cast(FP8QuantizationConfig, self.quantization_config)
+        return quantize_embs(weight, weight_ty, fp8_quant_config)
 
-        elif weight_ty == SparseType.FP16:
-            q_weight = weight.half()
-            res_weight = torch.tensor(
-                q_weight.cpu().numpy().view(np.uint8)
-            ).contiguous()
-            return (res_weight, None)
-
-        elif weight_ty == SparseType.FP8:
-            # Output tensor is already in uint8
-            q_weight = torch.ops.fbgemm.FloatToHFP8Quantized(
-                weight.float(),
-                self._get_quantization_config("exponent_bits"),
-                self._get_quantization_config("exponent_bias"),
-                self._get_quantization_config("max_position"),
-            )
-            return (q_weight, None)
-
-        elif weight_ty == SparseType.INT8:
-            q_weight = torch.ops.fbgemm.FloatToFused8BitRowwiseQuantized(weight)
-            res_weight = torch.tensor(q_weight[:, :-8].cpu().numpy().view(np.uint8))
-            res_scale_shift = torch.tensor(
-                q_weight[:, -8:]
-                .contiguous()
-                .cpu()
-                .numpy()
-                .view(np.float32)
-                .astype(np.float16)
-                .view(np.uint8)
-            )  # [-4, -2]: scale; [-2:]: bias
-            return (res_weight, res_scale_shift)
-
-        elif weight_ty == SparseType.INT4 or weight_ty == SparseType.INT2:
-            q_weight = torch.ops.fbgemm.FloatToFusedNBitRowwiseQuantizedSBHalf(
-                weight,
-                bit_rate=weight_ty.bit_rate(),
-            )
-            res_weight = torch.tensor(q_weight[:, :-4].cpu().numpy().view(np.uint8))
-            res_scale_shift = torch.tensor(
-                q_weight[:, -4:].contiguous().cpu().numpy().view(np.uint8)
-            )  # [-4, -2]: scale; [-2:]: bias
-            return (res_weight, res_scale_shift)
-
-        else:
-            raise RuntimeError("Unsupported SparseType: {}".format(weight_ty))
-
-    def _process_split_embs(self, model: nn.Module) -> None:
+    def _process_split_embs(self, model: torch.nn.Module) -> None:
         for name, child in model.named_children():
             if isinstance(
                 child,

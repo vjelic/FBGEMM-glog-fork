@@ -108,7 +108,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Add address sanitizer
 set(USE_SANITIZER "" CACHE STRING "options include address, leak, ...")
 
-# Check if compiler supports avx512
+# Check if compiler supports AVX512
 include(CheckCXXCompilerFlag)
 if(MSVC)
   CHECK_CXX_COMPILER_FLAG(/arch:AVX512 COMPILER_SUPPORTS_AVX512)
@@ -185,6 +185,7 @@ else(MSVC)
   string(APPEND CMAKE_CXX_FLAGS " -Wextra")
   string(APPEND CMAKE_CXX_FLAGS " -Werror")
   string(APPEND CMAKE_CXX_FLAGS " -Wno-deprecated-declarations")
+  string(APPEND CMAKE_CXX_FLAGS " -Wimplicit-fallthrough")
   target_compile_options(fbgemm_avx2 PRIVATE
     "-m64" "-mavx2" "-mf16c" "-mfma")
   target_compile_options(fbgemm_avx512 PRIVATE

@@ -9,6 +9,7 @@
 
 import enum
 import logging
+import os
 from dataclasses import dataclass, field
 from itertools import accumulate
 from math import log2
@@ -103,6 +104,7 @@ def construct_split_state(
     cacheable: bool,
     precision: SparseType = SparseType.FP32,
     int8_emb_row_dim_offset: int = INT8_EMB_ROW_DIM_OFFSET,
+    placement: Optional[EmbeddingLocation] = None,
 ) -> SplitState:
     placements: List[EmbeddingLocation] = []
     offsets: List[int] = []
@@ -116,6 +118,7 @@ def construct_split_state(
         if precision == SparseType.INT8:
             embedding_dim += int8_emb_row_dim_offset
         state_size = num_embeddings * embedding_dim if not rowwise else num_embeddings
+        location = placement if placement is not None else location
         if location == EmbeddingLocation.HOST:
             placements.append(EmbeddingLocation.HOST)
             offsets.append(host_size)
@@ -187,14 +190,14 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         gradient_clipping: bool = False,
         max_gradient: float = 1.0,
         learning_rate: float = 0.01,
-        # used by EXACT_ADAGRAD, EXACT_ROWWISE_ADAGRAD, ROWWISE_ADAGRAD, EXACT_ROWWISE_WEIGHTED_ADAGRAD, LAMB, and ADAM only
+        # used by EXACT_ADAGRAD, EXACT_ROWWISE_ADAGRAD, EXACT_ROWWISE_WEIGHTED_ADAGRAD, LAMB, and ADAM only
         # NOTE that default is different from nn.optim.Adagrad default of 1e-10
         eps: float = 1.0e-8,
         momentum: float = 0.9,  # used by LARS-SGD
         # EXACT_ADAGRAD, SGD, EXACT_SGD do not support weight decay
         # LAMB, ADAM, PARTIAL_ROWWISE_ADAM, PARTIAL_ROWWISE_LAMB, LARS_SGD support decoupled weight decay
         # EXACT_ROWWISE_WEIGHTED_ADAGRAD supports L2 weight decay
-        # ROWWISE_ADAGRAD support both L2 and decoupled weight decay (via weight_decay_mode)
+        # EXACT_ROWWISE_ADAGRAD support both L2 and decoupled weight decay (via weight_decay_mode)
         weight_decay: float = 0.0,
         weight_decay_mode: WeightDecayMode = WeightDecayMode.NONE,
         eta: float = 0.001,  # used by LARS-SGD,
@@ -206,6 +209,8 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         pooling_mode: PoolingMode = PoolingMode.SUM,
         device: Optional[Union[str, int, torch.device]] = None,
         bounds_check_mode: BoundsCheckMode = BoundsCheckMode.WARNING,
+        uvm_non_rowwise_momentum: bool = False,  # place non-rowwise momentum on UVM
+        use_experimental_tbe: bool = False,  # set to True to use TBE v2 (only support NVIDIA GPUs)
     ) -> None:
         super(SplitTableBatchedEmbeddingBagsCodegen, self).__init__()
 
@@ -253,9 +258,10 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             ], "Fused pooled embedding quantization only supported for cuda."
 
         if device is None:
-            # pyre-fixme[8]: Attribute has type `device`; used as `Union[int, device]`.
             self.current_device: torch.device = (
-                torch.device("cpu") if self.use_cpu else torch.cuda.current_device()
+                torch.device("cpu")
+                if self.use_cpu
+                else torch.device(torch.cuda.current_device())
             )
         elif isinstance(device, torch.device):
             self.current_device = device
@@ -286,8 +292,8 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             table_has_feature[t] = True
         assert all(table_has_feature), "Each table must have at least one feature!"
 
-        D_offsets = [dims[t] for t in self.feature_table_map]
-        D_offsets = [0] + list(accumulate(D_offsets))
+        feature_dims = [dims[t] for t in self.feature_table_map]
+        D_offsets = [0] + list(accumulate(feature_dims))
         self.total_D: int = D_offsets[-1]
         self.max_D: int = max(dims)
         cached_dims = [
@@ -331,6 +337,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             "bounds_check_warning",
             torch.tensor([0], device=self.current_device, dtype=torch.int64),
         )
+        # Required for VBE
+        self.register_buffer(
+            "feature_dims",
+            torch.tensor(feature_dims, device="cpu", dtype=torch.int64),
+        )
 
         weight_split = construct_split_state(
             embedding_specs,
@@ -349,6 +360,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             enforce_hbm=enforce_hbm,
         )
 
+        assert optimizer not in (
+            OptimType.SGD,
+            OptimType.ROWWISE_ADAGRAD,
+        ), f"Optimizer {optimizer} is deprecated in the CPU + GPU modes."
+
         if self.use_cpu:
             # Construct optimizer states
             assert optimizer in (
@@ -356,9 +372,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 OptimType.EXACT_ROWWISE_ADAGRAD,
                 OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD,
                 OptimType.EXACT_SGD,
-                OptimType.ROWWISE_ADAGRAD,
-                OptimType.SGD,
-            ), f"Optimizer {optimizer} is not supported in cpu mode."
+            ), f"Optimizer {optimizer} is not supported in CPU mode."
         else:
             assert optimizer in (
                 OptimType.ADAM,
@@ -370,7 +384,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 OptimType.LARS_SGD,
                 OptimType.PARTIAL_ROWWISE_ADAM,
                 OptimType.PARTIAL_ROWWISE_LAMB,
-                OptimType.SGD,
             ), f"Optimizer {optimizer} is not supported."
 
         self.stochastic_rounding = stochastic_rounding
@@ -393,7 +406,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             )
 
         self._used_rowwise_adagrad_with_counter: bool = (
-            optimizer in (OptimType.EXACT_ROWWISE_ADAGRAD, OptimType.ROWWISE_ADAGRAD)
+            optimizer == OptimType.EXACT_ROWWISE_ADAGRAD
             and weight_decay_mode == WeightDecayMode.COUNTER
             and counter_based_regularization is not None
         )
@@ -434,23 +447,22 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             ),
         )
 
-        if optimizer in (
-            OptimType.SGD,
-            OptimType.EXACT_SGD,
-        ):
+        if optimizer in (OptimType.EXACT_SGD,):
             # NOTE: make TorchScript work!
             self._register_nonpersistent_buffers("momentum1")
         else:
+            rowwise = optimizer in [
+                OptimType.EXACT_ROWWISE_ADAGRAD,
+                OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD,
+            ]
             self._apply_split(
                 construct_split_state(
                     embedding_specs,
-                    rowwise=optimizer
-                    in [
-                        OptimType.EXACT_ROWWISE_ADAGRAD,
-                        OptimType.ROWWISE_ADAGRAD,
-                        OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD,
-                    ],
+                    rowwise=rowwise,
                     cacheable=False,
+                    placement=EmbeddingLocation.MANAGED
+                    if ((not rowwise) and uvm_non_rowwise_momentum)
+                    else None,
                 ),
                 prefix="momentum1",
                 # pyre-fixme[6]: Expected `Type[Type[torch._dtype]]` for 3rd param
@@ -464,12 +476,18 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             OptimType.LAMB,
             OptimType.PARTIAL_ROWWISE_LAMB,
         ):
+            rowwise = optimizer in (
+                OptimType.PARTIAL_ROWWISE_ADAM,
+                OptimType.PARTIAL_ROWWISE_LAMB,
+            )
             self._apply_split(
                 construct_split_state(
                     embedding_specs,
-                    rowwise=optimizer
-                    in (OptimType.PARTIAL_ROWWISE_ADAM, OptimType.PARTIAL_ROWWISE_LAMB),
+                    rowwise=rowwise,
                     cacheable=False,
+                    placement=EmbeddingLocation.MANAGED
+                    if ((not rowwise) and uvm_non_rowwise_momentum)
+                    else None,
                 ),
                 prefix="momentum2",
                 # pyre-fixme[6]: Expected `Type[Type[torch._dtype]]` for 3rd param
@@ -579,6 +597,22 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
 
         self.step = 0
 
+        # Check whether to use TBE v2
+        is_experimental = False
+        fbgemm_exp_tbe = os.environ.get("FBGEMM_EXPERIMENTAL_TBE")
+        if use_experimental_tbe:
+            is_experimental = True
+            logging.info(
+                "use_experimental_tbe is set to True; Use experimental TBE: True"
+            )
+        elif fbgemm_exp_tbe is not None:
+            is_experimental = int(fbgemm_exp_tbe) == 1
+            logging.info(
+                f"FBGEMM_EXPERIMENTAL_TBE is set to {fbgemm_exp_tbe}; "
+                f"Use experimental TBE: {is_experimental}"
+            )
+        self.is_experimental: bool = is_experimental
+
     def _register_nonpersistent_buffers(self, prefix: str) -> None:
         # NOTE: make TorchScript work!
         self.register_buffer(
@@ -654,7 +688,92 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         offsets: Tensor,
         per_sample_weights: Optional[Tensor] = None,
         feature_requires_grad: Optional[Tensor] = None,
+        # 2D tensor of batch size for each rank and feature.
+        # Shape (number of features, number of ranks)
+        batch_size_per_feature_per_rank: Optional[List[List[int]]] = None,
     ) -> Tensor:
+        if batch_size_per_feature_per_rank is not None:
+            assert (
+                self.optimizer == OptimType.EXACT_ROWWISE_ADAGRAD
+            ), "Variable batch size TBE support is enabled for OptimType.EXACT_ROWWISE_ADAGRAD only"
+            assert (
+                self.pooling_mode != PoolingMode.NONE.value
+            ), "Variable batch size TBE support is not enabled for PoolingMode.NONE"
+            # TODO: Add input check
+            zero_tensor = torch.zeros(1, device="cpu", dtype=torch.int32)
+
+            # Create B offsets
+            total_batch_size_per_feature = torch.tensor(
+                [sum(batch_sizes) for batch_sizes in batch_size_per_feature_per_rank],
+                device="cpu",
+                dtype=torch.int32,
+            )
+            max_B = int(total_batch_size_per_feature.max().item())
+            Bs = torch.concat([zero_tensor, total_batch_size_per_feature])
+            B_offsets = Bs.cumsum(dim=0).to(torch.int)
+
+            # Create output offsets
+            B_feature_rank = torch.tensor(
+                batch_size_per_feature_per_rank,
+                device="cpu",
+                dtype=torch.int64,
+            )
+            max_B_feature_rank = int(B_feature_rank.max().item())
+            # D->H only once
+            self.feature_dims = self.feature_dims.cpu()
+            output_sizes_feature_rank = B_feature_rank.transpose(
+                0, 1
+            ) * self.feature_dims.view(1, -1)
+            output_offsets_feature_rank = torch.concat(
+                [
+                    zero_tensor.to(torch.int64),
+                    output_sizes_feature_rank.flatten().cumsum(dim=0),
+                ]
+            )
+            output_size = int(output_offsets_feature_rank[-1].item())
+
+            # TODO: Support INT8 output
+            # B_offsets_rank_per_feature is for rank and (b, t) mapping
+            B_offsets_rank_per_feature = (
+                torch.tensor(
+                    [
+                        [0] + batch_size_per_feature
+                        for batch_size_per_feature in batch_size_per_feature_per_rank
+                    ],
+                    device="cpu",
+                    dtype=torch.int32,
+                )
+                .cumsum(dim=1)
+                .to(torch.int)
+            )
+
+            B_offsets = B_offsets.to(self.current_device, non_blocking=True)
+            output_offsets_feature_rank = output_offsets_feature_rank.to(
+                self.current_device, non_blocking=True
+            )
+            B_offsets_rank_per_feature = B_offsets_rank_per_feature.to(
+                self.current_device, non_blocking=True
+            )
+
+            # TODO: Use int32 for B_offsets and int64 for output_offsets_feature_rank
+            vbe_metadata = invokers.lookup_args.VBEMetadata(
+                B_offsets=B_offsets,
+                output_offsets_feature_rank=output_offsets_feature_rank,
+                B_offsets_rank_per_feature=B_offsets_rank_per_feature,
+                max_B=max_B,
+                max_B_feature_rank=max_B_feature_rank,
+                output_size=output_size,
+            )
+        else:
+            vbe_metadata = invokers.lookup_args.VBEMetadata(
+                B_offsets=None,
+                output_offsets_feature_rank=None,
+                B_offsets_rank_per_feature=None,
+                max_B=-1,
+                max_B_feature_rank=-1,
+                output_size=-1,
+            )
+
         (indices, offsets) = indices.long(), offsets.long()
         if self.bounds_check_mode_int != BoundsCheckMode.NONE.value:
             torch.ops.fbgemm.bounds_check_indices(
@@ -664,6 +783,8 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 self.bounds_check_mode_int,
                 self.bounds_check_warning,
                 per_sample_weights,
+                B_offsets=vbe_metadata.B_offsets,
+                max_B=vbe_metadata.max_B,
             )
         self.step += 1
         if len(self.timesteps_prefetched) == 0:
@@ -707,13 +828,12 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             feature_requires_grad=feature_requires_grad,
             lxu_cache_locations=lxu_cache_locations,
             output_dtype=self.output_dtype,
+            vbe_metadata=vbe_metadata,
+            is_experimental=self.is_experimental,
         )
 
         if self.optimizer == OptimType.EXACT_SGD:
             return invokers.lookup_sgd.invoke(common_args, self.optimizer_args)
-        elif self.optimizer == OptimType.SGD:
-            assert self.use_cpu, "Approx SGD is only supported in CPU mode"
-            return invokers.lookup_approx_sgd.invoke(common_args, self.optimizer_args)
 
         momentum1 = invokers.lookup_args.Momentum(
             # pyre-fixme[6]: Expected `Tensor` for 1st param but got `Union[Tensor,
@@ -870,23 +990,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 )
             else:
                 return invokers.lookup_rowwise_adagrad.invoke(
-                    common_args, self.optimizer_args, momentum1
-                )
-        if self.optimizer == OptimType.ROWWISE_ADAGRAD:
-            assert self.use_cpu, "Approx rowwise AdaGrad is only supported in CPU mode"
-            if self._used_rowwise_adagrad_with_counter:
-                return invokers.lookup_approx_rowwise_adagrad_with_counter.invoke(
-                    common_args,
-                    self.optimizer_args,
-                    momentum1,
-                    prev_iter,
-                    row_counter,
-                    # pyre-fixme[6]: Expected `int` for 6th param but got `Union[float, int]`.
-                    self.iter.item(),
-                    self.max_counter.item(),
-                )
-            else:
-                return invokers.lookup_approx_rowwise_adagrad.invoke(
                     common_args, self.optimizer_args, momentum1
                 )
 
@@ -1134,7 +1237,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         split_optimizer_states = self.split_optimizer_states()
         if (
             self.optimizer == OptimType.EXACT_ROWWISE_ADAGRAD
-            or self.optimizer == OptimType.ROWWISE_ADAGRAD
             or self.optimizer == OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD
             or self.optimizer == OptimType.EXACT_ADAGRAD
         ):
@@ -1200,10 +1302,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             return splits
 
         states: List[List[torch.Tensor]] = []
-        if self.optimizer not in (
-            OptimType.SGD,
-            OptimType.EXACT_SGD,
-        ):
+        if self.optimizer not in (OptimType.EXACT_SGD,):
             states.append(
                 get_optimizer_states(
                     # pyre-fixme[6]: Expected `Tensor` for 1st param but got
@@ -1224,7 +1323,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                     rowwise=self.optimizer
                     in [
                         OptimType.EXACT_ROWWISE_ADAGRAD,
-                        OptimType.ROWWISE_ADAGRAD,
                         OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD,
                     ],
                 )
@@ -1659,7 +1757,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
 
         rowwise = self.optimizer in [
             OptimType.EXACT_ROWWISE_ADAGRAD,
-            OptimType.ROWWISE_ADAGRAD,
             OptimType.EXACT_ROWWISE_WEIGHTED_ADAGRAD,
         ]
         if rowwise:
