@@ -36,6 +36,16 @@
 #include "fbgemm_gpu/sparse_ops_utils.h"
 #include "fbgemm_gpu/split_embeddings_utils.cuh"
 
+/*
+ * We annotate the public fbgemm functions and hide the rest. Those
+ * public symbols can be called via fbgemm_gpu::func() or pytorch
+ * operator dispatcher. We'll hide other symbols, especially cub APIs,
+ * because different .so may include the same cub CUDA kernels, which
+ * results in confusion and libA may end up calling libB's cub kernel,
+ * causing failures when we static link libcudart_static.a
+ */
+#define DLL_PUBLIC __attribute__((visibility("default")))
+
 constexpr size_t kCacheMaxThreads = 512;
 
 using Tensor = at::Tensor;
@@ -94,7 +104,7 @@ int get_max_thread_blocks_for_cache_kernels_() {
 
 } // namespace
 
-int64_t host_lxu_cache_slot(int64_t h_in, int64_t C) {
+DLL_PUBLIC int64_t host_lxu_cache_slot(int64_t h_in, int64_t C) {
   return static_cast<int64_t>(cache_slot(h_in, static_cast<int32_t>(C)));
 }
 
@@ -178,7 +188,7 @@ __global__ __launch_bounds__(kMaxThreads) void lxu_cache_flush_kernel(
 
 } // namespace
 
-void lxu_cache_flush_cuda(
+DLL_PUBLIC void lxu_cache_flush_cuda(
     Tensor uvm_weights,
     Tensor cache_hash_size_cumsum,
     Tensor cache_index_table_map,
@@ -236,9 +246,8 @@ void lxu_cache_flush_cuda(
                     .packed_accessor64<cache_t, 2, at::RestrictPtrTraits>(),
                 stochastic_rounding,
                 rng_engine_inputs);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return;
 }
 
 namespace {
@@ -285,7 +294,7 @@ __global__ __launch_bounds__(kMaxThreads) void linearize_cache_indices_kernel(
 
 } // namespace
 
-Tensor linearize_cache_indices_cuda(
+DLL_PUBLIC Tensor linearize_cache_indices_cuda(
     Tensor cache_hash_size_cumsum,
     Tensor indices,
     Tensor offsets) {
@@ -360,7 +369,7 @@ __launch_bounds__(kMaxThreads) void linearize_cache_indices_from_row_idx_kernel(
 
 } // namespace
 
-Tensor linearize_cache_indices_from_row_idx_cuda(
+DLL_PUBLIC Tensor linearize_cache_indices_from_row_idx_cuda(
     Tensor cache_hash_size_cumsum,
     Tensor update_table_indices,
     Tensor update_row_indices) {
@@ -401,7 +410,8 @@ Tensor linearize_cache_indices_from_row_idx_cuda(
   return linear_cache_indices;
 }
 
-std::tuple<Tensor, Tensor, c10::optional<Tensor>> get_unique_indices_cuda(
+DLL_PUBLIC std::tuple<Tensor, Tensor, c10::optional<Tensor>>
+get_unique_indices_cuda(
     Tensor linear_indices,
     int64_t max_indices,
     bool compute_count) {
@@ -532,7 +542,7 @@ __global__ __launch_bounds__(kMaxThreads) void emulate_cache_miss_kernel(
 }
 } // namespace
 
-Tensor emulate_cache_miss(
+DLL_PUBLIC Tensor emulate_cache_miss(
     Tensor lxu_cache_locations,
     const int64_t enforced_misses_per_256,
     const bool gather_cache_stats,
@@ -697,7 +707,7 @@ __launch_bounds__(kMaxThreads) void direct_mapped_lru_cache_find_uncached_kernel
 }
 } // namespace
 
-std::pair<Tensor, Tensor> lru_cache_find_uncached_cuda(
+DLL_PUBLIC std::pair<Tensor, Tensor> lru_cache_find_uncached_cuda(
     Tensor unique_indices,
     Tensor unique_indices_length,
     int64_t max_indices,
@@ -861,7 +871,6 @@ __global__ __launch_bounds__(kMaxThreads) void lru_cache_insert_kernel(
         uvm_cache_stats) {
   const int32_t C = lxu_cache_state.size(0);
   int32_t n_conflict_misses = 0;
-  int32_t n_inserted = 0;
   for (int32_t n = blockIdx.x * blockDim.y + threadIdx.y; n < *N_unique;
        n += gridDim.x * blockDim.y) {
     // check if this warp is responsible for this whole segment.
@@ -883,6 +892,7 @@ __global__ __launch_bounds__(kMaxThreads) void lru_cache_insert_kernel(
     while (n + SL < *N_unique && sorted_cache_sets[n + SL] == cache_set) {
       SL += 1;
     }
+    int32_t n_inserted = 0;
 
     // now, we need to insert the (unique!) values in indices[n:n + SL] into
     // our slots.
@@ -1091,13 +1101,13 @@ void lru_cache_insert_cuda(
                 gather_cache_stats,
                 uvm_cache_stats
                     .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 } // namespace
 
-void lru_cache_populate_cuda(
+DLL_PUBLIC void lru_cache_populate_cuda(
     Tensor weights,
     Tensor cache_hash_size_cumsum,
     const int64_t total_cache_hash_size,
@@ -1211,7 +1221,6 @@ __global__ __launch_bounds__(kMaxThreads) void lru_cache_insert_byte_kernel(
     const int64_t row_alignment) {
   const int32_t C = lxu_cache_state.size(0);
   int64_t n_conflict_misses = 0;
-  int64_t n_inserted = 0;
   for (int32_t n = blockIdx.x * blockDim.y + threadIdx.y; n < *N_unique;
        n += gridDim.x * blockDim.y) {
     // check if this warp is responsible for this whole segment.
@@ -1233,6 +1242,7 @@ __global__ __launch_bounds__(kMaxThreads) void lru_cache_insert_byte_kernel(
     while (n + SL < *N_unique && sorted_cache_sets[n + SL] == cache_set) {
       SL += 1;
     }
+    int64_t n_inserted = 0;
 
     // now, we need to insert the (unique!) values in indices[n:n + SL] into
     // our slots.
@@ -1523,7 +1533,7 @@ void direct_mapped_lru_cache_insert_byte_cuda(
 
 } // namespace
 
-void lru_cache_populate_byte_cuda(
+DLL_PUBLIC void lru_cache_populate_byte_cuda(
     Tensor weights,
     Tensor cache_hash_size_cumsum,
     int64_t total_cache_hash_size,
@@ -1609,7 +1619,7 @@ void lru_cache_populate_byte_cuda(
       row_alignment);
 }
 
-void direct_mapped_lru_cache_populate_byte_cuda(
+DLL_PUBLIC void direct_mapped_lru_cache_populate_byte_cuda(
     Tensor weights,
     Tensor cache_hash_size_cumsum,
     int64_t total_cache_hash_size,
@@ -1742,8 +1752,8 @@ void lfu_update_counts_cuda(
             unique_indices_count
                 .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
             lfu_state.packed_accessor64<int64_t, 1, at::RestrictPtrTraits>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 constexpr int32_t kCacheSetBits = 24;
@@ -2116,13 +2126,13 @@ void lfu_cache_insert_cuda(
                     .packed_accessor64<int64_t, 1, at::RestrictPtrTraits>(),
                 stochastic_rounding,
                 rng_engine_inputs);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 } // namespace
 
-void lfu_cache_populate_cuda(
+DLL_PUBLIC void lfu_cache_populate_cuda(
     Tensor weights,
     Tensor cache_hash_size_cumsum,
     int64_t total_cache_hash_size,
@@ -2383,14 +2393,13 @@ void lfu_cache_insert_byte_cuda(
                 .packed_accessor64<uint8_t, 2, at::RestrictPtrTraits>(),
             lfu_state.packed_accessor64<int64_t, 1, at::RestrictPtrTraits>(),
             row_alignment);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 } // namespace
 
-void lfu_cache_populate_byte_cuda(
+DLL_PUBLIC void lfu_cache_populate_byte_cuda(
     Tensor weights,
     Tensor cache_hash_size_cumsum,
     int64_t total_cache_hash_size,
@@ -2567,7 +2576,7 @@ __launch_bounds__(kMaxThreads) void direct_mapped_lxu_cache_lookup_kernel(
 
 } // namespace
 
-Tensor lxu_cache_lookup_cuda(
+DLL_PUBLIC Tensor lxu_cache_lookup_cuda(
     Tensor linear_cache_indices,
     Tensor lxu_cache_state,
     int64_t invalid_index,
@@ -2619,7 +2628,7 @@ Tensor lxu_cache_lookup_cuda(
   return lxu_cache_locations;
 }
 
-Tensor direct_mapped_lxu_cache_lookup_cuda(
+DLL_PUBLIC Tensor direct_mapped_lxu_cache_lookup_cuda(
     Tensor linear_cache_indices,
     Tensor lxu_cache_state,
     int64_t invalid_index) {
@@ -2845,7 +2854,7 @@ __global__ __launch_bounds__(kMaxThreads) void reset_weight_momentum_kernel(
   }
 }
 
-void reset_weight_momentum_cuda(
+DLL_PUBLIC void reset_weight_momentum_cuda(
     Tensor dev_weights,
     Tensor uvm_weights,
     Tensor lxu_cache_weights,
@@ -2967,6 +2976,6 @@ void reset_weight_momentum_cuda(
             buffer_ids.packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
             lxu_cache_locations
                 .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
