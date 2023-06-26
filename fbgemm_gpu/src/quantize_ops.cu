@@ -25,6 +25,16 @@
 #include "fbgemm_gpu/sparse_ops.h"
 #include "fbgemm_gpu/sparse_ops_utils.h"
 
+/*
+ * We annotate the public fbgemm functions and hide the rest. Those
+ * public symbols can be called via fbgemm_gpu::func() or pytorch
+ * operator dispatcher. We'll hide other symbols, especially cub APIs,
+ * because different .so may include the same cub CUDA kernels, which
+ * results in confusion and libA may end up calling libB's cub kernel,
+ * causing failures when we static link libcudart_static.a
+ */
+#define DLL_PUBLIC __attribute__((visibility("default")))
+
 using Tensor = at::Tensor;
 
 /// @defgroup quantize-data-cuda Quantization Data CUDA Operators
@@ -32,7 +42,7 @@ using Tensor = at::Tensor;
 
 namespace fbgemm_gpu {
 ///@ingroup quantize-data-cuda
-at::Tensor _float_to_bfloat16_gpu(const at::Tensor& input) {
+DLL_PUBLIC at::Tensor _float_to_bfloat16_gpu(const at::Tensor& input) {
   at::cuda::OptionalCUDAGuard device_guard;
   device_guard.set_index(input.get_device());
 
@@ -56,7 +66,7 @@ at::Tensor _float_to_bfloat16_gpu(const at::Tensor& input) {
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _bfloat16_to_float_gpu(const at::Tensor& input) {
+DLL_PUBLIC at::Tensor _bfloat16_to_float_gpu(const at::Tensor& input) {
   at::cuda::OptionalCUDAGuard device_guard;
   device_guard.set_index(input.get_device());
 
@@ -767,8 +777,8 @@ Tensor _float_to_fused8bitrowwise_gpu_t(const Tensor& input) {
                   nrows,
                   ncols,
                   output.data_ptr<std::uint8_t>());
+          C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
     // range_tensor is used to store the range for each embedding row.
     // We save range/255.0f as row scale, and use 255.0f / (range + kEpsilon) to
@@ -806,8 +816,8 @@ Tensor _float_to_fused8bitrowwise_gpu_t(const Tensor& input) {
                     ncols,
                     output.data_ptr<std::uint8_t>(),
                     range_tensor.data_ptr<float>());
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
     {
@@ -826,8 +836,8 @@ Tensor _float_to_fused8bitrowwise_gpu_t(const Tensor& input) {
                     nrows,
                     ncols,
                     output.data_ptr<std::uint8_t>());
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
   }
 
@@ -835,16 +845,16 @@ Tensor _float_to_fused8bitrowwise_gpu_t(const Tensor& input) {
 }
 
 ///@ingroup quantize-data-cuda
-Tensor _float_to_fused8bitrowwise_gpu(const Tensor& input) {
+DLL_PUBLIC Tensor _float_to_fused8bitrowwise_gpu(const Tensor& input) {
   return _float_to_fused8bitrowwise_gpu_t<float>(input);
 }
 
-Tensor _half_to_fused8bitrowwise_gpu(const Tensor& input) {
+DLL_PUBLIC Tensor _half_to_fused8bitrowwise_gpu(const Tensor& input) {
   return _float_to_fused8bitrowwise_gpu_t<at::Half>(input);
 }
 
 ///@ingroup quantize-data-cuda
-Tensor _float_or_half_to_fused8bitrowwise_gpu(const Tensor& input) {
+DLL_PUBLIC Tensor _float_or_half_to_fused8bitrowwise_gpu(const Tensor& input) {
   Tensor output;
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
       input.scalar_type(),
@@ -902,8 +912,8 @@ Tensor _float_to_FP8rowwise_gpu_t(const Tensor& input, const bool forward) {
                   ncols,
                   output.data_ptr<std::uint8_t>(),
                   forward);
+          C10_CUDA_KERNEL_LAUNCH_CHECK();
         });
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else {
     // range_tensor is used to store the range for each embedding row.
     // We save max_pos/max_val(rowwise) as row scale to quantize
@@ -943,8 +953,8 @@ Tensor _float_to_FP8rowwise_gpu_t(const Tensor& input, const bool forward) {
                     output.data_ptr<std::uint8_t>(),
                     range_tensor.data_ptr<float>(),
                     forward);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
 
     {
@@ -964,8 +974,8 @@ Tensor _float_to_FP8rowwise_gpu_t(const Tensor& input, const bool forward) {
                     ncols,
                     output.data_ptr<std::uint8_t>(),
                     forward);
+            C10_CUDA_KERNEL_LAUNCH_CHECK();
           });
-      C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
   }
 
@@ -1030,12 +1040,13 @@ Tensor _float_to_paddedFP8rowwise_gpu_t(
 }
 
 ///@ingroup quantize-data-cuda
-Tensor _float_to_FP8rowwise_gpu(const Tensor& input, const bool forward) {
+DLL_PUBLIC Tensor
+_float_to_FP8rowwise_gpu(const Tensor& input, const bool forward) {
   return _float_to_FP8rowwise_gpu_t<float>(input, forward);
 }
 
 ///@ingroup quantize-data-cuda
-Tensor _float_to_paddedFP8rowwise_gpu(
+DLL_PUBLIC Tensor _float_to_paddedFP8rowwise_gpu(
     const Tensor& input,
     const bool forward,
     const int64_t row_dim) {
@@ -1097,22 +1108,22 @@ Tensor _fused8bitrowwise_to_float_gpu_t(const Tensor& input) {
                 nrows,
                 ncols,
                 output.data_ptr<scalar_t>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return output;
 }
 
-at::Tensor _fused8bitrowwise_to_float_gpu(const at::Tensor& input) {
+DLL_PUBLIC at::Tensor _fused8bitrowwise_to_float_gpu(const at::Tensor& input) {
   return _fused8bitrowwise_to_float_gpu_t<float>(input);
 }
 
-at::Tensor _fused8bitrowwise_to_half_gpu(const at::Tensor& input) {
+DLL_PUBLIC at::Tensor _fused8bitrowwise_to_half_gpu(const at::Tensor& input) {
   return _fused8bitrowwise_to_float_gpu_t<at::Half>(input);
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _fused8bitrowwise_to_float_or_half_gpu(
+DLL_PUBLIC at::Tensor _fused8bitrowwise_to_float_or_half_gpu(
     const at::Tensor& input,
     const int64_t output_dtype) {
   Tensor output;
@@ -1188,8 +1199,8 @@ Tensor _FP8rowwise_to_float_gpu_t(const Tensor& input, bool forward) {
                 ncols,
                 output.data_ptr<scalar_t>(),
                 forward);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return output;
 }
@@ -1298,11 +1309,13 @@ Tensor _paddedFP8rowwise_to_float_gpu_t(
   return output;
 }
 
-at::Tensor _FP8rowwise_to_float_gpu(const at::Tensor& input, bool forward) {
+DLL_PUBLIC at::Tensor _FP8rowwise_to_float_gpu(
+    const at::Tensor& input,
+    bool forward) {
   return _FP8rowwise_to_float_gpu_t<float>(input, forward);
 }
 
-at::Tensor _paddedFP8rowwise_to_float_gpu(
+DLL_PUBLIC at::Tensor _paddedFP8rowwise_to_float_gpu(
     const at::Tensor& input,
     const bool forward,
     const int64_t row_dim,
@@ -1312,7 +1325,7 @@ at::Tensor _paddedFP8rowwise_to_float_gpu(
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _fused8bitrowwise_to_float_mixed_dim_gpu(
+DLL_PUBLIC at::Tensor _fused8bitrowwise_to_float_mixed_dim_gpu(
     const at::Tensor& input,
     const at::Tensor& D_offsets,
     const int64_t output_dtype) {
@@ -1418,28 +1431,27 @@ Tensor _float_to_fusednbitrowwise_gpu_t(
                 nrows,
                 ncols,
                 output.data_ptr<std::uint8_t>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return output;
 }
 
 ///@ingroup quantize-data-cuda
-Tensor _float_to_fusednbitrowwise_gpu(
-    const Tensor& input,
-    const int64_t bit_rate) {
+DLL_PUBLIC Tensor
+_float_to_fusednbitrowwise_gpu(const Tensor& input, const int64_t bit_rate) {
   return _float_to_fusednbitrowwise_gpu_t<float>(input, bit_rate);
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _half_to_fusednbitrowwise_gpu(
+DLL_PUBLIC at::Tensor _half_to_fusednbitrowwise_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _float_to_fusednbitrowwise_gpu_t<at::Half>(input, bit_rate);
 }
 
 ///@ingroup sparse-data-cuda
-Tensor _float_or_half_to_fusednbitrowwise_gpu(
+DLL_PUBLIC Tensor _float_or_half_to_fusednbitrowwise_gpu(
     const Tensor& input,
     const int64_t bit_rate) {
   Tensor output;
@@ -1506,27 +1518,27 @@ Tensor _fusednbitrowwise_to_float_gpu_t(
                 nrows,
                 ncols,
                 output.data_ptr<scalar_t>());
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
       });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   return output;
 }
 
-at::Tensor _fusednbitrowwise_to_float_gpu(
+DLL_PUBLIC at::Tensor _fusednbitrowwise_to_float_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _fusednbitrowwise_to_float_gpu_t<float>(input, bit_rate);
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _fusednbitrowwise_to_half_gpu(
+DLL_PUBLIC at::Tensor _fusednbitrowwise_to_half_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _fusednbitrowwise_to_float_gpu_t<at::Half>(input, bit_rate);
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _fusednbitrowwise_to_float_or_half_gpu(
+DLL_PUBLIC at::Tensor _fusednbitrowwise_to_float_or_half_gpu(
     const at::Tensor& input,
     const int64_t bit_rate,
     const int64_t output_dtype) {
@@ -1547,7 +1559,7 @@ at::Tensor _fusednbitrowwise_to_float_or_half_gpu(
   return output;
 }
 
-at::Tensor _float_to_hfp8_gpu(
+DLL_PUBLIC at::Tensor _float_to_hfp8_gpu(
     const at::Tensor& input,
     const int64_t ebits,
     const int64_t exponent_bias,
@@ -1574,7 +1586,7 @@ at::Tensor _float_to_hfp8_gpu(
   return output;
 }
 
-at::Tensor _hfp8_to_float_gpu(
+DLL_PUBLIC at::Tensor _hfp8_to_float_gpu(
     const at::Tensor& input,
     const int64_t ebits,
     const int64_t exponent_bias) {
@@ -1692,7 +1704,7 @@ __global__ inline void _compute_msfp_shared_exponent_cuda_kernel(
   }
 }
 
-at::Tensor _float_to_msfp_gpu(
+DLL_PUBLIC at::Tensor _float_to_msfp_gpu(
     const at::Tensor& input,
     const int64_t bounding_box_size,
     const int64_t ebits,
@@ -1759,7 +1771,7 @@ at::Tensor _float_to_msfp_gpu(
 }
 
 ///@ingroup quantize-data-cuda
-at::Tensor _msfp_to_float_gpu(
+DLL_PUBLIC at::Tensor _msfp_to_float_gpu(
     const at::Tensor& input,
     const int64_t ebits,
     const int64_t mbits,

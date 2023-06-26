@@ -13,7 +13,7 @@ import pickle
 import random
 import unittest
 from itertools import accumulate
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import fbgemm_gpu
 import hypothesis.strategies as st
@@ -24,6 +24,11 @@ from fbgemm_gpu.split_embedding_configs import (
     EmbOptimType as OptimType,
     FP8QuantizationConfig,
     SparseType,
+)
+from fbgemm_gpu.split_embedding_optimizer_ops import (
+    SplitEmbeddingArgs,
+    SplitEmbeddingOptimizerParams,
+    SplitEmbeddingRowwiseAdagrad,
 )
 from fbgemm_gpu.split_embedding_utils import (
     b_indices,
@@ -1503,6 +1508,340 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             param.requires_grad = False
         torch.autograd.gradcheck(
             cc, (indices, offsets, per_sample_weights), eps=1e-2, atol=1e-3, rtol=1e-3
+        )
+
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=0, max_value=20),
+        weights_precision=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+        weighted=st.booleans(),
+        long_segments=st.booleans(),
+        pooling_mode=st.sampled_from(
+            [
+                PoolingMode.SUM,
+                PoolingMode.MEAN,
+                PoolingMode.NONE,
+            ]
+        ),
+        output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+    )
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=MAX_EXAMPLES,
+        deadline=None,
+        suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
+    )
+    def test_backward_none(self, **kwargs: Any) -> None:
+        self.execute_backward_none_(**kwargs)
+
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=0, max_value=20),
+        weights_precision=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+        weighted=st.booleans(),
+        long_segments=st.booleans(),
+        pooling_mode=st.sampled_from(
+            [
+                PoolingMode.SUM,
+                PoolingMode.MEAN,
+                PoolingMode.NONE,
+            ]
+        ),
+        output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+    )
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=MAX_EXAMPLES,
+        deadline=None,
+        suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
+    )
+    def test_backward_none_with_rowwise_adagrad(self, **kwargs: Any) -> None:
+        self.execute_backward_none_(optimizer=OptimType.EXACT_ROWWISE_ADAGRAD, **kwargs)
+
+    def execute_backward_none_(  # noqa C901
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        weights_precision: SparseType,
+        weighted: bool,
+        long_segments: bool,
+        pooling_mode: PoolingMode,
+        output_dtype: SparseType,
+        optimizer: Optional[OptimType] = None,
+    ) -> None:
+        use_cpu = False
+        mixed = False
+        use_cache = False
+
+        # NOTE: cache is not applicable to CPU version.
+        assume(not use_cpu or not use_cache)
+        # NOTE: limit (T * B * L * D) to avoid timeout for CPU version!
+        assume(not use_cpu or T * B * L * D <= 2048)
+        assume(not (use_cpu and weights_precision == SparseType.FP16))
+        # No bag ops only work on GPUs, no mixed, no weighted
+        assume(not use_cpu or pooling_mode != PoolingMode.NONE)
+        assume(not mixed or pooling_mode != PoolingMode.NONE)
+        assume(not weighted or pooling_mode != PoolingMode.NONE)
+
+        assume(pooling_mode == PoolingMode.SUM or not weighted)
+
+        if pooling_mode == PoolingMode.SUM:
+            mode = "sum"
+            do_pooling = True
+        elif pooling_mode == PoolingMode.MEAN:
+            mode = "mean"
+            do_pooling = True
+        elif pooling_mode == PoolingMode.NONE:
+            mode = "sum"
+            do_pooling = False
+        else:
+            # This proves that we have exhaustively checked all PoolingModes
+            raise RuntimeError("Unknown PoolingMode!")
+
+        E = int(10**log_E)
+        if use_cpu:
+            D = (D + 15) // 16 * 4
+        else:
+            D = D * 4
+        if not mixed:
+            Ds = [D] * T
+            Es = [E] * T
+        else:
+            Ds = [
+                round_up(np.random.randint(low=int(0.25 * D), high=int(1.0 * D)), 4)
+                for _ in range(T)
+            ]
+            Es = [
+                np.random.randint(low=int(0.5 * E), high=int(2.0 * E)) for _ in range(T)
+            ]
+        compute_device = ComputeDevice.CUDA
+        if use_cpu:
+            managed = [EmbeddingLocation.HOST] * T
+            compute_device = ComputeDevice.CPU
+        elif TEST_WITH_ROCM:
+            # ROCm managed memory allocation is under development
+            managed = [EmbeddingLocation.DEVICE] * T
+        elif use_cache:
+            managed = [EmbeddingLocation.MANAGED_CACHING] * T
+            if mixed:
+                average_D = sum(Ds) // T
+                for t, d in enumerate(Ds):
+                    managed[t] = (
+                        EmbeddingLocation.DEVICE if d < average_D else managed[t]
+                    )
+        else:
+            managed = [
+                np.random.choice(
+                    [
+                        EmbeddingLocation.DEVICE,
+                    ]
+                )
+                for _ in range(T)
+            ]
+        if do_pooling:
+            bs = [
+                to_device(torch.nn.EmbeddingBag(E, D, mode=mode, sparse=True), use_cpu)
+                for (E, D) in zip(Es, Ds)
+            ]
+        else:
+            bs = [
+                to_device(torch.nn.Embedding(E, D, sparse=True), use_cpu)
+                for (E, D) in zip(Es, Ds)
+            ]
+
+        if weights_precision == SparseType.FP16:
+            bs = [b.half() for b in bs]
+
+        feature_table_map = list(range(T))
+        xs = [
+            to_device(
+                torch.from_numpy(
+                    np.random.choice(range(Es[t]), size=(B, L)).astype(np.int64)
+                ),
+                use_cpu,
+            )
+            for t in feature_table_map
+        ]
+
+        if long_segments and L > 0:
+            for x in xs:
+                x[:, 0] = 0
+
+        xws = [to_device(torch.randn(size=(B, L)), use_cpu) for _ in range(len(xs))]
+        xws_acc_type = copy.deepcopy(xws)
+
+        if weights_precision == SparseType.FP16:
+            xws = [xw.half() for xw in xws]
+
+        x = torch.cat([x.view(1, B, L) for x in xs], dim=0)
+        xw = torch.cat([xw.view(1, B, L) for xw in xws_acc_type], dim=0)
+
+        (indices, offsets) = get_table_batched_offsets_from_dense(x, use_cpu=use_cpu)
+        embedding_specs = [
+            (E, D, M, compute_device) for (E, D, M) in zip(Es, Ds, managed)
+        ]
+
+        # Hyperparameters in case optimizer is not None
+        lr = 0.5
+        eps = 0.2
+        stochastic_rounding = random.choice([True, False])
+
+        if optimizer is None:
+            fs = (
+                [
+                    b_indices(b, x, use_cpu=use_cpu, do_pooling=do_pooling)
+                    for (b, x) in zip(bs, xs)
+                ]
+                if not weighted
+                else [
+                    b_indices(
+                        b,
+                        x,
+                        per_sample_weights=xw.view(-1),
+                        use_cpu=use_cpu,
+                        do_pooling=do_pooling,
+                    )
+                    for (b, x, xw) in zip(bs, xs, xws)
+                ]
+            )
+            gos: Union[List[Tensor], Tensor] = [torch.randn_like(f) for f in fs]
+            [f.backward(go) for (f, go) in zip(fs, gos)]
+        else:
+            bs_ = SplitTableBatchedEmbeddingBagsCodegen(
+                embedding_specs=embedding_specs,
+                optimizer=optimizer,
+                feature_table_map=feature_table_map,
+                weights_precision=weights_precision,
+                pooling_mode=pooling_mode,
+                output_dtype=output_dtype,
+                learning_rate=lr,
+                eps=eps,
+                stochastic_rounding=stochastic_rounding,
+            )
+
+            for t in range(T):
+                bs_.split_embedding_weights()[t].data.copy_(bs[t].weight)
+
+            fs = (
+                bs_(indices, offsets)
+                if not weighted
+                else bs_(
+                    indices,
+                    offsets,
+                    to_device(xw.contiguous().view(-1), use_cpu),
+                )
+            )
+            gos: Union[List[Tensor], Tensor] = torch.rand_like(fs)
+            fs.backward(gos)
+
+        cc = SplitTableBatchedEmbeddingBagsCodegen(
+            embedding_specs=embedding_specs,
+            optimizer=OptimType.NONE,
+            feature_table_map=feature_table_map,
+            weights_precision=weights_precision,
+            pooling_mode=pooling_mode,
+            output_dtype=output_dtype,
+        )
+
+        for t in range(T):
+            cc.split_embedding_weights()[t].data.copy_(bs[t].weight)
+
+        total_unique_indices = 0
+        # Compute number of unique indices
+        for t in range(len(feature_table_map)):
+            start = offsets[t * B]
+            end = offsets[(t + 1) * B]
+            uniq_indices = indices[start:end].unique()
+            total_unique_indices += uniq_indices.numel()
+
+        fc2 = (
+            cc(indices, offsets, total_unique_indices=total_unique_indices)
+            if not weighted
+            else cc(
+                indices,
+                offsets,
+                to_device(xw.contiguous().view(-1), use_cpu),
+                total_unique_indices=total_unique_indices,
+            )
+        )
+        if optimizer is None:
+            assert type(gos) == list
+            if do_pooling:
+                goc = torch.cat([go.view(B, -1) for go in gos], dim=1)
+            else:
+                goc = torch.cat(gos, dim=0)
+        else:
+            assert type(gos) == Tensor
+            goc = gos.clone()
+        fc2.backward(goc)
+
+        if optimizer is not None:
+            # pyre-ignore[6]
+            params = SplitEmbeddingOptimizerParams(weights_dev=cc.weights_dev)
+            embedding_args = SplitEmbeddingArgs(
+                # pyre-ignore[6]
+                weights_placements=cc.weights_placements,
+                # pyre-ignore[6]
+                weights_offsets=cc.weights_offsets,
+                max_D=cc.max_D,
+            )
+            optim = SplitEmbeddingRowwiseAdagrad(
+                params,
+                embedding_args,
+                embedding_specs,
+                feature_table_map,
+                learning_rate=lr,
+                eps=eps,
+                stochastic_rounding=stochastic_rounding,
+            )
+            optim.step()
+
+        if use_cache:
+            cc.flush()
+
+        if optimizer is None:
+            test_tensor = cc.weights_dev.grad
+            weight_grads = []
+            for t in range(T):
+                grad = bs[t].weight.grad
+                # Check grad to suppress pyre error
+                assert grad is not None
+                weight_grads.append(grad)
+            ref_grad = torch.concat(weight_grads, dim=0).to_sparse().coalesce()
+            ref_tensor = (
+                ref_grad.half() if weights_precision == SparseType.FP16 else ref_grad
+            )
+        else:
+            # pyre-ignore[16]
+            indices = cc.weights_dev.grad._indices().flatten()
+            # Select only the part in the table that is updated
+            test_tensor = torch.index_select(cc.weights_dev.view(-1, D), 0, indices)
+            ref_tensor = torch.index_select(bs_.weights_dev.view(-1, D), 0, indices)
+
+        tolerance = (
+            1.0e-2
+            if long_segments
+            else (
+                1.0e-4
+                if weights_precision == SparseType.FP32
+                and output_dtype == SparseType.FP32
+                else 1.0e-2
+            )
+        )
+        torch.testing.assert_close(
+            test_tensor,
+            ref_tensor,
+            atol=tolerance,
+            rtol=tolerance,
         )
 
     def execute_backward_sgd_(  # noqa C901
@@ -3990,7 +4329,81 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else:
             weights_ty: SparseType = nbit_weights_ty
             mixed_weights_ty = False
-        output_dtype = random.choice([SparseType.FP32, SparseType.FP16])
+        output_dtype = random.choice(
+            (
+                [SparseType.BF16]
+                if weights_ty in [SparseType.INT4, SparseType.INT2]
+                else []
+            )
+            + [SparseType.FP32, SparseType.FP16]
+        )
+        self.execute_nbit_forward_(
+            T,
+            D,
+            B,
+            log_E,
+            L,
+            weighted,
+            mixed,
+            pooling_mode,
+            weights_ty,
+            use_cache,
+            cache_algorithm,
+            use_cpu,
+            use_array_for_index_remapping,
+            do_pruning,
+            mixed_weights_ty,
+            output_dtype,
+        )
+
+    @given(
+        nbit_weights_ty=st.sampled_from([SparseType.INT4, SparseType.INT2]),
+        use_array_for_index_remapping=st.booleans(),
+        do_pruning=st.booleans(),
+    )
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=MAX_EXAMPLES_LONG_RUNNING,
+        deadline=None,
+    )
+    def test_nbit_forward_cpu_bf16_out(
+        self,
+        nbit_weights_ty: Optional[SparseType],
+        use_array_for_index_remapping: bool,
+        do_pruning: bool,
+    ) -> None:
+        use_cpu = True
+        T = random.randint(1, 50)
+        B = random.randint(0, 128)
+        L = random.randint(0, 32)
+        D = random.randint(2, 2048)
+        log_E = random.randint(2, 4)
+
+        use_cache = False
+        # cache_algorithm is don't care as we don't use cache.
+        cache_algorithm = CacheAlgorithm.LRU
+
+        pooling_mode = random.choice(
+            [
+                PoolingMode.SUM,
+                PoolingMode.MEAN,
+            ]
+        )
+        mixed = random.choice([True, False])
+
+        if pooling_mode == PoolingMode.SUM:
+            weighted = random.choice([True, False])
+        else:
+            weighted = False
+
+        if nbit_weights_ty is None:
+            # don't care when mixed type is used.
+            weights_ty: SparseType = SparseType.INT8
+            mixed_weights_ty = True
+        else:
+            weights_ty: SparseType = nbit_weights_ty
+            mixed_weights_ty = False
+        output_dtype = SparseType.BF16
         self.execute_nbit_forward_(
             T,
             D,
@@ -4061,7 +4474,9 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else:
             weights_ty: SparseType = nbit_weights_ty
             mixed_weights_ty = False
-        output_dtype = random.choice([SparseType.FP32, SparseType.FP16])
+        output_dtype = random.choice(
+            [SparseType.FP32, SparseType.FP16, SparseType.BF16]
+        )
         self.execute_nbit_forward_(
             T,
             D,
