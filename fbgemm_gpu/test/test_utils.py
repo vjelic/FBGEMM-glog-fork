@@ -234,7 +234,7 @@ def skipIfRocmLessThan(version):
             rocmVer = rocmVer.replace('-', '').split('.')
             rocmVer = int(rocmVer[0]) * 10000 + int(rocmVer[1]) * 100 + int(rocmVer[2])
             if TEST_WITH_ROCM and rocmVer < version:
-                raise unittest.SkipTest("skip the test since rocm version is less than " + str(version) )
+                raise unittest.SkipTest("skip the test since rocm version is less than " + str(version))
             else:
                 fn(*args, **kwargs)
 
