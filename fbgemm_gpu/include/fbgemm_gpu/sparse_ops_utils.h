@@ -36,9 +36,7 @@ inline std::optional<int64_t> get_device_index_from_tensor(
 }
 
 inline std::string torch_tensor_device_name(const at::Tensor& ten) {
-  const auto index = get_device_index_from_tensor(ten);
-  return c10::DeviceTypeName(ten.device().type()) +
-      (index ? ":" + std::to_string(index.value()) : "");
+  return c10::DeviceTypeName(ten.device().type());
 }
 
 inline std::string torch_tensor_device_name(
@@ -103,6 +101,9 @@ inline bool torch_tensor_empty_or_on_cpu_check(
 
 #define DISPATCH_TO_CPU(name, function) \
   m.impl(name, torch::dispatch(c10::DispatchKey::CPU, TORCH_FN(function)))
+
+#define DISPATCH_TO_META(name, function) \
+  m.impl(name, torch::dispatch(c10::DispatchKey::Meta, TORCH_FN(function)))
 
 #define DISPATCH_TO_ALL(name, function) \
   m.impl(name, torch::dispatch(c10::DispatchKey::CatchAll, TORCH_FN(function)))
@@ -259,7 +260,12 @@ std::string tensor_on_same_gpu_if_not_optional_check(
         }
         msg.append(
             var_names.at(current_idx++) + "(" +
-            torch_tensor_device_name(tensor) + ")");
+            torch_tensor_device_name(tensor));
+        const auto gpu_device_index = get_device_index_from_tensor(tensor);
+        if (gpu_device_index) {
+          msg.append(":" + std::to_string(*gpu_device_index));
+        }
+        msg.append(")");
       }(tensors),
       ...);
 
