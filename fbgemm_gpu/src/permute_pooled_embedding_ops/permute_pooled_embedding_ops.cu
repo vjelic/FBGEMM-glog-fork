@@ -22,12 +22,48 @@ using Tensor = at::Tensor;
 
 namespace fbgemm_gpu {
 
+Tensor permute_duplicate_pooled_embs_gpu(
+    const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
+    const Tensor& offset_dim_list,
+    const Tensor& permute_list,
+    const Tensor& inv_offset_dim_list,
+    const Tensor& inv_permute_list) {
+  TORCH_CHECK(offset_dim_list.numel() > 0);
+  TORCH_CHECK(inv_offset_dim_list.numel() > 0);
+
+  return permute_pooled_embs_gpu_impl(
+      pooled_embs,
+      offset_dim_list,
+      permute_list,
+      inv_offset_dim_list,
+      inv_permute_list,
+      true);
+}
+
 Tensor permute_pooled_embs_gpu(
     const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
     const Tensor& offset_dim_list,
     const Tensor& permute_list,
     const Tensor& inv_offset_dim_list,
     const Tensor& inv_permute_list) {
+  TORCH_CHECK(offset_dim_list.numel() == permute_list.numel() + 1);
+  TORCH_CHECK(offset_dim_list.numel() == inv_offset_dim_list.numel());
+
+  return permute_pooled_embs_gpu_impl(
+      pooled_embs,
+      offset_dim_list,
+      permute_list,
+      inv_offset_dim_list,
+      inv_permute_list,
+      false);
+}
+Tensor permute_pooled_embs_gpu_impl(
+    const Tensor& pooled_embs, // [B_local][Sum_T_global(D)]
+    const Tensor& offset_dim_list,
+    const Tensor& permute_list,
+    const Tensor& inv_offset_dim_list,
+    const Tensor& inv_permute_list,
+    const bool& allow_duplicates = false) {
   // inv_permute_list is not being used so it's not checked here.
   TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
       pooled_embs, offset_dim_list, permute_list, inv_offset_dim_list);
@@ -45,9 +81,14 @@ Tensor permute_pooled_embs_gpu(
   TENSORS_ON_SAME_DEVICE(pooled_embs_contiguous, offset_dim_list);
   TENSORS_ON_SAME_DEVICE(pooled_embs_contiguous, permute_list);
   TENSORS_ON_SAME_DEVICE(pooled_embs_contiguous, inv_offset_dim_list);
-  TORCH_CHECK(offset_dim_list.numel() == permute_list.numel() + 1);
-  TORCH_CHECK(offset_dim_list.numel() == inv_offset_dim_list.numel());
-  Tensor permuted_pooled_embs = at::empty_like(pooled_embs_contiguous);
+
+  // Last index in inv_offset_dim_list contains the size of output.
+  // This will result in a D -> H sync.
+  const int64_t permuted_embs_dim_sum =
+      allow_duplicates ? inv_offset_dim_list[-1].item<int64_t>() : dim_sum;
+  Tensor permuted_pooled_embs = at::empty(
+      {pooled_embs_contiguous.size(0), permuted_embs_dim_sum},
+      pooled_embs_contiguous.options());
 
   // This kernel is moving D elements per warp.
   // We are launching ( div_round_up(T, warp_per_block), B ) blocks.
@@ -62,8 +103,12 @@ Tensor permute_pooled_embs_gpu(
       std::min(static_cast<int32_t>(B), max_grid_dim_y),
       (B + max_grid_dim_y - 1) / max_grid_dim_y);
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      pooled_embs_contiguous.scalar_type(), "permute_pooled_embeddings", [&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half,
+      at::ScalarType::BFloat16,
+      pooled_embs_contiguous.scalar_type(),
+      "permute_pooled_embeddings",
+      [&] {
         permute_pooled_embs_kernel<scalar_t>
             <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                 pooled_embs_contiguous.data_ptr<scalar_t>(),

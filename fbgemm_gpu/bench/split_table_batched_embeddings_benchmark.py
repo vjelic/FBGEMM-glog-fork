@@ -674,14 +674,12 @@ def cache(  # noqa C901
         requests,
         lambda indices, offsets, per_sample_weights: emb_nc(
             indices.long(), offsets.long(), per_sample_weights
-        ),
+        ).backward(grad_output),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
-        bwd_only=True,
-        grad=grad_output,
     )
     logging.info(
-        f"Backward (UVM), B: {B}, E: {E}, T: {T}, D: {D}, L: {L}, "
-        f"BW: {2 * param_size_multiplier * B * sum(Ds) * L / time_per_iter / 1.0e9: .2f} GB/s, "
+        f"ForwardBackward (UVM), B: {B}, E: {E}, T: {T}, D: {D}, L: {L}, "
+        f"BW: {3 * param_size_multiplier * B * sum(Ds) * L / time_per_iter / 1.0e9: .2f} GB/s, "
         f"T: {time_per_iter * 1.0e6:.0f}us"
     )
 
@@ -693,17 +691,10 @@ def cache(  # noqa C901
     exchanged_cache_lines = []
     NOT_FOUND = -1
     for indices, offsets, _ in requests:
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.clone)[[Named(self,
-        #  Variable[torch._TTensor (bound to Tensor)])], Variable[torch._TTensor (bound
-        #  to Tensor)]], Tensor], Tensor, torch.nn.Module]` is not a function.
         old_lxu_cache_state = emb.lxu_cache_state.clone()
         emb.prefetch(indices.long(), offsets.long())
         exchanged_cache_lines.append(
-            # pyre-fixme[16]: `bool` has no attribute `sum`.
-            (emb.lxu_cache_state != old_lxu_cache_state)
-            .sum()
-            .item()
+            (emb.lxu_cache_state != old_lxu_cache_state).sum().item()
         )
         cache_misses.append((emb.lxu_cache_locations_list[0] == NOT_FOUND).sum().item())
         emb.forward(indices.long(), offsets.long())
@@ -851,6 +842,7 @@ def nbit_cpu(  # noqa C901
         weighted=weighted,
         requests_data_file=requests_data_file,
         tables=tables,
+        use_cpu=True,
     )
     requests = [
         (a.cpu().int(), b.cpu().int(), c.cpu() if c else None) for (a, b, c) in requests
@@ -1169,6 +1161,7 @@ def nbit_device(  # noqa C901
 @click.option("--report-aibench", is_flag=True)
 @click.option("--fp8-exponent-bits", type=int, default=None)
 @click.option("--fp8-exponent-bias", type=int, default=None)
+@click.option("--use-cpu", is_flag=True, default=False)
 def nbit_device_with_spec(  # noqa C901
     alpha: float,
     bag_size_list: str,
@@ -1193,6 +1186,7 @@ def nbit_device_with_spec(  # noqa C901
     report_aibench: bool,
     fp8_exponent_bits: Optional[int],
     fp8_exponent_bias: Optional[int],
+    use_cpu: bool,
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -1241,6 +1235,9 @@ def nbit_device_with_spec(  # noqa C901
         managed_option = EmbeddingLocation.DEVICE
     else:
         managed_option = EmbeddingLocation.MANAGED
+    # Override managed_option to HOST if using CPU
+    if use_cpu:
+        managed_option = EmbeddingLocation.HOST
 
     if pooling is None or pooling == "sum":
         pooling = "sum"
@@ -1255,6 +1252,7 @@ def nbit_device_with_spec(  # noqa C901
 
     emb = IntNBitTableBatchedEmbeddingBagsCodegen(
         [("", e, d, weights_precision, managed_option) for d, e in zip(Ds, Es)],
+        device="cpu" if use_cpu else None,
         bounds_check_mode=BoundsCheckMode(bounds_check_mode),
         index_remapping=index_remapping,
         pruning_hash_load_factor=pruning_hash_load_factor,
@@ -1263,7 +1261,11 @@ def nbit_device_with_spec(  # noqa C901
         pooling_mode=pooling_mode,
         fp8_exponent_bits=fp8_exponent_bits,
         fp8_exponent_bias=fp8_exponent_bias,
-    ).cuda()
+    )
+    if use_cpu:
+        emb = emb.cpu()
+    else:
+        emb = emb.cuda()
     emb.fill_random_weights()
 
     nparams_byte = sum(w.numel() for (w, _) in emb.split_embedding_weights())
@@ -1316,6 +1318,7 @@ def nbit_device_with_spec(  # noqa C901
                 # need many more samples for zipf if bag_size is very small.
                 zipf_oversample_ratio=3 if bag_size > 5 else 10,
                 weighted=weighted,
+                use_cpu=use_cpu,
             )
             for it, (indices, offsets, weights) in enumerate(requests):
                 all_requests["indices"][it].append(indices)
@@ -1333,22 +1336,38 @@ def nbit_device_with_spec(  # noqa C901
             else:
                 weights = None
             requests.append((indices, offsets, weights))
-        requests = [(a.int(), b.int(), c if c else None) for (a, b, c) in requests]
+        if use_cpu:
+            requests = [
+                (a.cpu().int(), b.cpu().int(), c.cpu() if c else None)
+                for (a, b, c) in requests
+            ]
+        else:
+            requests = [(a.int(), b.int(), c if c else None) for (a, b, c) in requests]
         del all_requests
         assert len(requests) == iters
 
         # forward
-        time_per_iter = benchmark_requests(
-            requests,
-            lambda indices, offsets, per_sample_weights: emb.forward(
-                indices.int(),
-                offsets.int(),
-                per_sample_weights,
-            ),
-            check_median=check_median,
-        )
+        if use_cpu:
+            time_per_iter = benchmark_cpu_requests(
+                requests,
+                lambda indices, offsets, per_sample_weights: emb.forward(
+                    indices.int(),
+                    offsets.int(),
+                    per_sample_weights,
+                ),
+            )
+        else:
+            time_per_iter = benchmark_requests(
+                requests,
+                lambda indices, offsets, per_sample_weights: emb.forward(
+                    indices.int(),
+                    offsets.int(),
+                    per_sample_weights,
+                ),
+                check_median=check_median,
+            )
 
-        # free up GPU memory
+        # free up memory
         del requests
 
         logging.info(
@@ -2064,17 +2083,10 @@ def nbit_cache(  # noqa C901
         emb.reset_uvm_cache_stats()
 
     for indices, offsets, _ in requests:
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.clone)[[Named(self,
-        #  Variable[torch._TTensor (bound to Tensor)])], Variable[torch._TTensor (bound
-        #  to Tensor)]], Tensor], Tensor, torch.nn.Module]` is not a function.
         old_lxu_cache_state = emb.lxu_cache_state.clone()
         emb.prefetch(indices, offsets)
         exchanged_cache_lines.append(
-            # pyre-fixme[16]: `bool` has no attribute `sum`.
-            (emb.lxu_cache_state != old_lxu_cache_state)
-            .sum()
-            .item()
+            (emb.lxu_cache_state != old_lxu_cache_state).sum().item()
         )
         cache_misses.append(
             (emb.lxu_cache_locations_list.top() == NOT_FOUND).sum().item()
@@ -2319,6 +2331,7 @@ def pruned_array(  # noqa C901
         E,
         requests_data_file=requests_data_file,
         tables=tables,
+        use_cpu=True if device == "cpu" else False,
     )
     requests = [(a.int().to(device), b.int().to(device), c) for (a, b, c) in requests]
 

@@ -116,6 +116,16 @@ def nbit_construct_split_state(
     )
 
 
+def random_quant_scaled_tensor(shape: torch.Size, device: torch.device) -> torch.Tensor:
+    return torch.randint(
+        0,
+        255,
+        size=shape,
+        dtype=torch.uint8,
+        device=device,
+    )
+
+
 # pyre-fixme[13]: Attribute `cache_miss_counter` is never initialized.
 class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
     """
@@ -490,9 +500,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
     def prefetch(self, indices: Tensor, offsets: Tensor) -> None:
         self.timestep_counter.increment()
         self.timestep_prefetch_size.increment()
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if not self.lxu_cache_weights.numel():
             return
 
@@ -669,9 +676,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         CACHE_MISS = torch.tensor([-1], device=self.current_device, dtype=torch.int32)
         CACHE_HIT = torch.tensor([-2], device=self.current_device, dtype=torch.int32)
 
-        # pyre-ignore[6]:
-        # Incompatible parameter type [6]: Expected `typing.Sized` for 1st
-        # positional only parameter to call `len` but got `typing.Union[Tensor, nn.Module]`.
         num_tables = len(self.cache_hash_size_cumsum) - 1
         num_offsets_per_table = (len(offsets) - 1) // num_tables
         cache_missed_locations = torch.where(
@@ -1128,9 +1132,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             self.reset_uvm_cache_stats()
 
     def reset_cache_states(self) -> None:
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if not self.lxu_cache_weights.numel():
             return
         self.lxu_cache_state.fill_(-1)
@@ -1272,12 +1273,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         weights = self.split_embedding_weights()
         for dest_weight in weights:
             dest_weight[0].copy_(
-                torch.randint(
-                    0,
-                    255,
-                    size=dest_weight[0].shape,
-                    dtype=torch.uint8,
-                    device=self.current_device,
+                random_quant_scaled_tensor(
+                    shape=dest_weight[0].shape, device=self.current_device
                 )
             )
 
@@ -1500,9 +1497,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             )
 
         lxu_cache_locations = None
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if self.lxu_cache_weights.numel() > 0:
             linear_cache_indices = (
                 torch.ops.fbgemm.linearize_cache_indices_from_row_idx(

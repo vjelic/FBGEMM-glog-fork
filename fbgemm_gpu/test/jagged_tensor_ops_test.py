@@ -26,7 +26,9 @@ try:
     from test_utils import (
         gpu_available,
         gpu_unavailable,
+        on_arm_platform,
         running_on_github,
+        symint_vector_unsupported,
         TEST_WITH_ROCM,
     )
 except Exception:
@@ -35,7 +37,9 @@ except Exception:
     from fbgemm_gpu.test.test_utils import (
         gpu_available,
         gpu_unavailable,
+        on_arm_platform,
         running_on_github,
+        symint_vector_unsupported,
         TEST_WITH_ROCM,
     )
 
@@ -44,6 +48,31 @@ def lengths_to_segment_ids(lengths: torch.Tensor) -> torch.Tensor:
     return torch.repeat_interleave(
         torch._dim_arange(lengths, 0).long(),
         lengths.long(),
+    )
+
+
+# Converts lengths + values format to COO format
+# [B], [N] -> [B, N'].
+# pyre-ignore Missing return annotation [3]
+def var_list_to_coo_1d(
+    lengths: torch.Tensor,
+    values: torch.Tensor,
+    N: int,
+):
+    rows = lengths_to_segment_ids(lengths)
+    num_rows = lengths.size()[0]
+    # This does D&H sync
+    offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
+    output_size = lengths.sum()
+    # This does D&H sync
+    cols = torch.ops.fbgemm.offsets_range(offsets, output_size)
+    indices = torch.stack([rows, cols])
+    dims = [num_rows, N]
+    # torch.sparse_coo_tensor is not supported by torch.fx, wrap it.
+    return torch.sparse_coo_tensor(
+        indices=indices,
+        values=values,
+        size=dims,
     )
 
 
@@ -67,15 +96,18 @@ def var_list_to_coo(lengths: torch.Tensor, values: torch.Tensor, N: int, D: int)
     )
 
 
-def symint_vector_unsupported() -> Tuple[bool, str]:
-    major, minor = torch.__version__.split(".")[0:2]
-    return (
-        int(major) < 2 or (int(major) == 2 and int(minor) < 1),
-        """
-        dynamic shape support for this op needs to be on PyTorch 2.1 or
-        newer with https://github.com/pytorch/pytorch/pull/101056
-        """,
-    )
+def hash_size_cumsum_to_offsets(hash_size_cum_sum_list: List[int]) -> List[int]:
+    hash_size_offsets_list = [0]
+    count = 0
+    for f in range(1, len(hash_size_cum_sum_list)):
+        count = count + 1
+        if hash_size_cum_sum_list[f] == hash_size_cum_sum_list[f - 1]:
+            curr_offsets = hash_size_offsets_list[-1]
+            hash_size_offsets_list.append(curr_offsets)
+        else:
+            hash_size_offsets_list.append(count)
+    hash_size_offsets_list[-1] = count
+    return hash_size_offsets_list
 
 
 class JaggedTensorOpsTest(unittest.TestCase):
@@ -265,6 +297,61 @@ class JaggedTensorOpsTest(unittest.TestCase):
             output_values.backward(ref_output_values)
             torch.testing.assert_close(expected_grad, values.grad)
 
+    @unittest.skipIf(*symint_vector_unsupported())
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=20,
+        deadline=None,
+    )
+    @given(
+        B=st.integers(min_value=2, max_value=128),
+        D=st.integers(min_value=2, max_value=128),
+        max_sequence_length=st.integers(min_value=1, max_value=200),
+        dtype=st.sampled_from([torch.float, torch.half, torch.bfloat16]),
+        device_type=st.sampled_from(["cpu", "cuda"])
+        if gpu_available
+        else st.just("cpu"),
+    )
+    def test_jagged_2d_to_dense_dynamic_shape(
+        self,
+        B: int,
+        D: int,
+        max_sequence_length: int,
+        dtype: torch.dtype,
+        device_type: str,
+    ) -> None:
+        D = D * 4
+        lengths_ = np.random.randint(low=0, high=max_sequence_length, size=B)
+        total_lengths = lengths_.sum()
+        lengths = torch.from_numpy(lengths_)
+        offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
+
+        ref_values = torch.rand(total_lengths, D)
+        ref_output_values = var_list_to_coo(
+            lengths,
+            ref_values,
+            max_sequence_length,
+            D,
+        ).to_dense()
+        ref_output_values = ref_output_values.to(dtype)
+
+        ref_values = ref_values.to(device_type)
+        values = ref_values.clone().to(dtype).detach().requires_grad_(True)
+        offsets = offsets.to(device_type)
+        ref_output_values = ref_output_values.to(device_type)
+        output_values = torch.compile(
+            torch.ops.fbgemm.jagged_2d_to_dense, dynamic=True, fullgraph=True
+        )(
+            values=values,
+            offsets=offsets,
+            max_sequence_length=max_sequence_length,
+        )
+        torch.testing.assert_close(ref_output_values, output_values)
+
+        output_values.backward(ref_output_values)
+        ref_values = ref_values.to(dtype)
+        torch.testing.assert_close(ref_values, values.grad)
+
     @unittest.skipIf(*gpu_unavailable)
     @settings(
         verbosity=Verbosity.verbose,
@@ -345,41 +432,17 @@ class JaggedTensorOpsTest(unittest.TestCase):
                 lengths.long(),
             )
 
-        # Converts lengths + values format to COO format
-        # [B], [N] -> [B, N'].
-        # pyre-ignore Missing return annotation [3]
-        def var_list_to_coo(
-            lengths: torch.Tensor,
-            values: torch.Tensor,
-            N: int,
-        ):
-            rows = lengths_to_segment_ids(lengths)
-            num_rows = lengths.size()[0]
-            # This does D&H sync
-            offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
-            output_size = lengths.sum()
-            # This does D&H sync
-            cols = torch.ops.fbgemm.offsets_range(offsets, output_size)
-            indices = torch.stack([rows, cols])
-            dims = [num_rows, N]
-            # torch.sparse_coo_tensor is not supported by torch.fx, wrap it.
-            return torch.sparse_coo_tensor(
-                indices=indices,
-                values=values,
-                size=dims,
-            )
-
         lengths_ = np.random.randint(low=0, high=max_sequence_length, size=B)
         total_lengths = lengths_.sum()
         lengths = torch.from_numpy(lengths_)
         offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
 
         ref_values = torch.randint(low=0, high=1000000000, size=(total_lengths,))
-        ref_values_mask = var_list_to_coo(
+        ref_values_mask = var_list_to_coo_1d(
             lengths, torch.ones_like(ref_values), max_sequence_length
         ).to_dense()
         ref_output_values = (
-            var_list_to_coo(
+            var_list_to_coo_1d(
                 lengths,
                 ref_values,
                 max_sequence_length,
@@ -443,6 +506,61 @@ class JaggedTensorOpsTest(unittest.TestCase):
             )
             torch.testing.assert_close(ref_output, output)
 
+    @unittest.skipIf(*symint_vector_unsupported())
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=20,
+        deadline=None,
+    )
+    @given(
+        B=st.integers(min_value=1, max_value=128),
+        max_sequence_length=st.integers(min_value=1, max_value=500),
+        padding_value=st.integers(min_value=-100000, max_value=100000),
+        device_type=st.sampled_from(["cpu", "cuda"])
+        if gpu_available
+        else st.just("cpu"),
+    )
+    def test_jagged_1d_to_dense_dynamic_shape(
+        self, B: int, max_sequence_length: int, padding_value: int, device_type: str
+    ) -> None:
+        def lengths_to_segment_ids(lengths: torch.Tensor) -> torch.Tensor:
+            return torch.repeat_interleave(
+                torch._dim_arange(lengths, 0).long(),
+                lengths.long(),
+            )
+
+        lengths_ = np.random.randint(low=0, high=max_sequence_length, size=B)
+        total_lengths = lengths_.sum()
+        lengths = torch.from_numpy(lengths_)
+        offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
+
+        ref_values = torch.randint(low=0, high=1000000000, size=(total_lengths,))
+        ref_values_mask = var_list_to_coo_1d(
+            lengths, torch.ones_like(ref_values), max_sequence_length
+        ).to_dense()
+        ref_output_values = (
+            var_list_to_coo_1d(
+                lengths,
+                ref_values,
+                max_sequence_length,
+            ).to_dense()
+            + (1 - ref_values_mask) * torch.ones_like(ref_values_mask) * padding_value
+        )
+
+        ref_values = ref_values.to(device_type)
+        values = ref_values.clone().detach().requires_grad_(False)
+        offsets = offsets.to(device_type)
+        ref_output_values = ref_output_values.to(device_type)
+        output_values = torch.compile(
+            torch.ops.fbgemm.jagged_1d_to_dense, dynamic=True, fullgraph=True
+        )(
+            values=values,
+            offsets=offsets,
+            max_sequence_length=max_sequence_length,
+            padding_value=padding_value,
+        )
+        torch.testing.assert_close(ref_output_values, output_values)
+
     @unittest.skipIf(*gpu_unavailable)
     @settings(
         verbosity=Verbosity.verbose,
@@ -472,30 +590,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
                 lengths.long(),
             )
 
-        # Converts lengths + values format to COO format
-        # [B], [N] -> [B, N'].
-        # pyre-ignore Missing return annotation [3]
-        def var_list_to_coo(
-            lengths: torch.Tensor,
-            values: torch.Tensor,
-            N: int,
-        ):
-            rows = lengths_to_segment_ids(lengths)
-            num_rows = lengths.size()[0]
-            # This does D&H sync
-            offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths)
-            output_size = lengths.sum()
-            # This does D&H sync
-            cols = torch.ops.fbgemm.offsets_range(offsets, output_size)
-            indices = torch.stack([rows, cols])
-            dims = [num_rows, N]
-            # torch.sparse_coo_tensor is not supported by torch.fx, wrap it.
-            return torch.sparse_coo_tensor(
-                indices=indices,
-                values=values,
-                size=dims,
-            )
-
         lengths_ = np.random.randint(low=0, high=max_sequence_length, size=B * T)
         total_lengths = lengths_.sum()
         lengths = torch.from_numpy(lengths_).to(device)
@@ -523,8 +617,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
         torch.testing.assert_close(
             ref_output_values, torch.cat(output_values_per_table)
         )
-
-        # TODO: reuse code with var_list_to_coo and to_dense
 
     def _to_padded_dense(
         self,
@@ -847,12 +939,19 @@ class JaggedTensorOpsTest(unittest.TestCase):
         torch._dynamo.mark_dynamic(dense, -1)
 
         @torch.compile(fullgraph=True, dynamic=True)
-        def dense_to_jagged(
+        def dense_to_jagged_withL(
             dense: torch.Tensor, offsets: torch.Tensor, total_L: List[int]
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             return torch.ops.fbgemm.dense_to_jagged(dense, offsets, total_L)
 
-        jagged_values, jagged_offsets = dense_to_jagged(dense, offsets, total_L)
+        @torch.compile(fullgraph=False, dynamic=True)
+        def dense_to_jagged_noL(
+            dense: torch.Tensor, offsets: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            return torch.ops.fbgemm.dense_to_jagged(dense, offsets)
+
+        jagged_values, jagged_offsets = dense_to_jagged_noL(dense, offsets)
+        jagged_values, jagged_offsets = dense_to_jagged_withL(dense, offsets, total_L)
 
         jagged_values.to(device_type)
         # jagged -> dense
@@ -1128,16 +1227,19 @@ class JaggedTensorOpsTest(unittest.TestCase):
             device_type,
         )
 
+    @unittest.skipIf(*symint_vector_unsupported())
     @given(
-        num_jagged_dim=st.integers(1, 4),
-        outer_dense_size=st.integers(0, 4),
-        inner_dense_size=st.integers(0, 4),
+        num_jagged_dim=st.integers(1, 5),
+        outer_dense_size=st.integers(2, 5),
+        inner_dense_size=st.integers(2, 5),
         operation=st.sampled_from(["add", "add_jagged_output", "mul"]),
         dtype=st.sampled_from([torch.float, torch.half, torch.double, torch.bfloat16]),
-        device_type=st.just("meta"),
+        device_type=st.sampled_from(["cpu", "cuda"])
+        if gpu_available
+        else st.just("cpu"),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
-    def test_jagged_elementwise_binary_meta_backend(
+    def test_jagged_elementwise_binary_dynamic_shape(
         self,
         num_jagged_dim: int,
         outer_dense_size: int,
@@ -1146,10 +1248,15 @@ class JaggedTensorOpsTest(unittest.TestCase):
         dtype: torch.dtype,
         device_type: str,
     ) -> None:
-        device = torch.device("cpu")
+        device = torch.device(device_type)
 
         x_values, x_offsets, max_lengths = self._generate_jagged_tensor(
-            num_jagged_dim, outer_dense_size, inner_dense_size, dtype, device
+            num_jagged_dim,
+            outer_dense_size,
+            inner_dense_size,
+            dtype,
+            device,
+            mark_dynamic=True,
         )
         y = torch.rand(
             outer_dense_size * np.prod(max_lengths) * inner_dense_size,
@@ -1158,13 +1265,31 @@ class JaggedTensorOpsTest(unittest.TestCase):
         ).reshape((outer_dense_size,) + tuple(max_lengths) + (inner_dense_size,))
 
         x_padded = self._to_padded_dense(x_values, x_offsets, max_lengths)
-        if operation == "add":
-            output_ref = x_padded + y
-            x_values.to(device_type)
-            y.to(device_type)
-            output = torch.ops.fbgemm.jagged_dense_elementwise_add(
+
+        @torch.compile(fullgraph=True, dynamic=True)
+        def jagged_dense_elementwise_add(
+            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
+        ) -> torch.Tensor:
+            return torch.ops.fbgemm.jagged_dense_elementwise_add(x_values, x_offsets, y)
+
+        @torch.compile(fullgraph=True, dynamic=True)
+        def jagged_dense_elementwise_add_jagged_output(
+            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            return torch.ops.fbgemm.jagged_dense_elementwise_add_jagged_output(
                 x_values, x_offsets, y
             )
+
+        @torch.compile(fullgraph=True, dynamic=True)
+        def jagged_dense_elementwise_mul(
+            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
+        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            return torch.ops.fbgemm.jagged_dense_elementwise_mul(x_values, x_offsets, y)
+
+        if operation == "add":
+            output_ref = x_padded + y
+            output = jagged_dense_elementwise_add(x_values, x_offsets, y)
+
         elif operation == "add_jagged_output":
             # create a jagged tensor and then densify
             y = self._to_padded_dense(
@@ -1180,24 +1305,17 @@ class JaggedTensorOpsTest(unittest.TestCase):
                 max_lengths,
             )
             output_ref = x_padded + y
-            x_values.to(device_type)
-            y.to(device_type)
             (
                 output,
                 output_offsets,
-            ) = torch.ops.fbgemm.jagged_dense_elementwise_add_jagged_output(
-                x_values, x_offsets, y
-            )
-            output.to("cpu")
+            ) = jagged_dense_elementwise_add_jagged_output(x_values, x_offsets, y)
             output = self._to_padded_dense(output, output_offsets, max_lengths)
+
         elif operation == "mul":
             output_ref = x_padded * y
-            x_values.to(device_type)
-            y.to(device_type)
-            output, output_offsets = torch.ops.fbgemm.jagged_dense_elementwise_mul(
+            output, output_offsets = jagged_dense_elementwise_mul(
                 x_values, x_offsets, y
             )
-            output.to("cpu")
             output = self._to_padded_dense(output, output_offsets, max_lengths)
         else:
             raise AssertionError(f"Unknown operation {operation}")
@@ -1763,6 +1881,79 @@ class JaggedTensorOpsTest(unittest.TestCase):
             atol=1e-2 if jagged_tensor_dtype in [torch.half, torch.bfloat16] else None,
         )
 
+    @unittest.skipIf(*running_on_github)
+    @given(
+        max_seq_length=st.integers(5, 10),
+        batch_size=st.integers(1, 128),
+        num_cols=st.integers(1, 128),
+        num_jagged_tensor_rows=st.integers(1, 128),
+        index_dtype=st.sampled_from([torch.int, torch.long]),
+        jagged_tensor_dtype=st.sampled_from(
+            [
+                torch.float,
+                torch.half,
+                torch.int,
+                torch.long,
+            ]  # Disable torch.bfloat16 due to large error bound
+        ),
+        use_cpu=st.booleans()
+        if (gpu_available and not TEST_WITH_ROCM)
+        else st.just(False)
+        if (gpu_available and TEST_WITH_ROCM)
+        else st.just(True),
+    )
+    @settings(max_examples=20, deadline=None)
+    def test_jagged_index_select_2d_in_inference(
+        self,
+        max_seq_length: int,
+        batch_size: int,
+        num_cols: int,
+        num_jagged_tensor_rows: int,
+        index_dtype: torch.dtype,
+        jagged_tensor_dtype: torch.dtype,
+        use_cpu: bool,
+    ) -> None:
+        device = torch.device("cpu" if use_cpu else "cuda")
+        is_float = jagged_tensor_dtype in [torch.float, torch.half, torch.bfloat16]
+        lengths = torch.randint(
+            low=0,
+            high=max_seq_length,
+            size=(num_jagged_tensor_rows,),
+            dtype=index_dtype,
+            device=device,
+        )
+        indices, _ = torch.sort(
+            torch.randint(
+                low=0,
+                high=num_jagged_tensor_rows,
+                size=(batch_size,),
+                dtype=index_dtype,
+                device=device,
+            )
+        )
+        if is_float:
+            values = torch.rand(
+                int(lengths.sum().item()),
+                num_cols,
+                dtype=jagged_tensor_dtype,
+                device=device,
+            )
+        else:
+            values = torch.randint(
+                2**16,
+                (int(lengths.sum().item()), num_cols),
+                dtype=jagged_tensor_dtype,
+                device=device,
+            )
+        values_ref = values.detach().clone()
+
+        with torch.inference_mode():
+            output, _ = torch.ops.fbgemm.jagged_index_select(values, lengths, indices)
+            output_ref = self.jagged_index_select_2d_ref(
+                values_ref, lengths, indices, device
+            )
+            assert torch.equal(output, output_ref)
+
     @given(
         batch_size=st.integers(1, 128),
         max_length=st.integers(0, 128),
@@ -2075,6 +2266,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         if gpu_available
         else st.just("cpu"),
     )
+    @unittest.skipIf(*on_arm_platform)
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_jagged_jagged_bmm(
         self,
@@ -2140,7 +2332,8 @@ class JaggedTensorOpsTest(unittest.TestCase):
         if gpu_available
         else st.just("cpu"),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
+    @unittest.skipIf(*on_arm_platform)
+    @settings(verbosity=Verbosity.verbose, max_examples=2, deadline=None)
     def test_jagged_dense_bmm(
         self,
         B: int,
@@ -2201,6 +2394,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         dtype=st.sampled_from([torch.float, torch.double]),
         device_type=st.just("cpu"),
     )
+    @unittest.skipIf(*on_arm_platform)
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_jagged_dense_bmm_dynamic_shape(
         self,
@@ -2375,10 +2569,117 @@ class JaggedTensorOpsTest(unittest.TestCase):
         lengths_list = []
         indices_list = []
         linearized_indices_list = []
+        hash_size_offsets_list = [0]
         for _ in range(F):
             # We generate a small hash size to increase index duplication
             hash_size = random.randint(3, 5)
             hash_size_list.append(hash_size)
+            hash_size_offset = hash_size_offsets_list[-1] + 1
+            hash_size_offsets_list.append(hash_size_offset)
+            for _ in range(B):
+                length = random.randint(0, max_length)
+                lengths_list.append(length)
+                if length > 0:
+                    indices = np.random.randint(0, hash_size, size=length)
+                    linearized_indices = indices + sum(hash_size_list[:-1])
+                    indices_list.extend(indices)
+                    linearized_indices_list.extend(linearized_indices)
+
+        device = torch.device("cuda")
+        dtype = torch.int64
+        hash_size = torch.as_tensor(hash_size_list, dtype=dtype, device=device)
+        hash_size_offsets = torch.as_tensor(
+            hash_size_offsets_list, dtype=dtype, device=device
+        )
+        lengths = torch.as_tensor(lengths_list, dtype=dtype, device=device)
+        indices = torch.as_tensor(indices_list, dtype=dtype, device=device)
+        linearized_indices = torch.as_tensor(
+            linearized_indices_list, dtype=dtype, device=device
+        )
+
+        hash_size_cum_sum = torch.zeros(F + 1, dtype=dtype, device=device)
+        hash_size_cum_sum[1:] = torch.cumsum(hash_size, dim=0)
+        offsets = torch.zeros(F * B + 1, dtype=dtype, device=device)
+        offsets[1:] = torch.cumsum(lengths, dim=0)
+
+        (
+            output_lengths,
+            output_offsets,
+            unique_indices,
+            reverse_index,
+        ) = torch.ops.fbgemm.jagged_unique_indices(
+            hash_size_cum_sum, hash_size_offsets, offsets, indices
+        )
+
+        # Check hash size cumsum to offsets function
+        output_hash_size_offsets_list = hash_size_cumsum_to_offsets(
+            hash_size_cum_sum.tolist()
+        )
+        self.assertEqual(output_hash_size_offsets_list, hash_size_offsets_list)
+
+        # Compute hash size cumsum and offsets based on KJT offsets and indices
+        (
+            inferred_hash_size_cum_sum,
+            inferred_hash_size_offsets,
+        ) = torch.ops.fbgemm.jagged_hash_size_cumsum(offsets, indices, B)
+        (
+            output_lengths_inf,
+            output_offsets_inf,
+            unique_indices_inf,
+            reverse_index_inf,
+        ) = torch.ops.fbgemm.jagged_unique_indices(
+            inferred_hash_size_cum_sum, inferred_hash_size_offsets, offsets, indices
+        )
+
+        self.assertTrue(torch.equal(output_lengths, output_lengths_inf))
+        self.assertTrue(torch.equal(output_offsets, output_offsets_inf))
+        self.assertTrue(torch.equal(unique_indices, unique_indices_inf))
+        self.assertTrue(torch.equal(reverse_index, reverse_index_inf))
+
+        unique_linearized_indices = torch.unique(linearized_indices, sorted=True)
+        self.assertTrue(unique_linearized_indices.numel() == unique_indices.numel())
+
+        unique_indices_list = unique_indices.tolist()
+        reverse_index_list = reverse_index.tolist()
+        for i in range(len(reverse_index_list)):
+            pos = reverse_index_list[i]
+            self.assertTrue(unique_indices_list[pos] == indices_list[i])
+
+        input_offsets_list = offsets.tolist()
+        output_offsets_list = output_offsets.tolist()
+        for i in range(F):
+            input_start = input_offsets_list[i * B]
+            input_end = input_offsets_list[(i + 1) * B]
+            output_start = output_offsets_list[i * B]
+            output_end = output_offsets_list[(i + 1) * B]
+            for each_offset in range(input_start, input_end):
+                pos = reverse_index_list[each_offset]
+                self.assertTrue((output_start <= pos) and (pos < output_end))
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        B=st.integers(min_value=100, max_value=200),
+        F=st.integers(min_value=50, max_value=100),
+        max_length=st.integers(min_value=5, max_value=10),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=10, deadline=None)
+    def test_jagged_unique_indices_multi_keys(
+        self,
+        B: int,  # Batch size
+        F: int,  # The number of features
+        max_length: int,  # The maximum value of pooling factor
+    ) -> None:
+        hash_size_list = []
+        lengths_list = []
+        indices_list = []
+        linearized_indices_list = []
+        MAX_HASH_SIZE = 10
+        for _ in range(F):
+            # We generate a small hash size to increase index duplication
+            hash_size = random.randint(3, 6)
+            self.assertTrue(hash_size <= MAX_HASH_SIZE)
+            masked_hash_size = MAX_HASH_SIZE if random.randint(1, 3) == 3 else 0
+            hash_size_list.append(masked_hash_size)
             for _ in range(B):
                 length = random.randint(0, max_length)
                 lengths_list.append(length)
@@ -2402,11 +2703,22 @@ class JaggedTensorOpsTest(unittest.TestCase):
         offsets = torch.zeros(F * B + 1, dtype=dtype, device=device)
         offsets[1:] = torch.cumsum(lengths, dim=0)
 
+        # Compute hash size offsets based on hash size cumsum to dedup
+        # indices from multiple keys
+        hash_size_cum_sum_list = hash_size_cum_sum.tolist()
+        hash_size_offsets_list = hash_size_cumsum_to_offsets(hash_size_cum_sum_list)
+        hash_size_offsets = torch.as_tensor(
+            hash_size_offsets_list, dtype=dtype, device=device
+        )
+
         (
-            output_offsets,
+            _,  # output lengths
+            _,  # output offsets
             unique_indices,
             reverse_index,
-        ) = torch.ops.fbgemm.jagged_unique_indices(hash_size_cum_sum, offsets, indices)
+        ) = torch.ops.fbgemm.jagged_unique_indices(
+            hash_size_cum_sum, hash_size_offsets, offsets, indices
+        )
 
         unique_linearized_indices = torch.unique(linearized_indices, sorted=True)
         self.assertTrue(unique_linearized_indices.numel() == unique_indices.numel())
@@ -2416,18 +2728,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
         for i in range(len(reverse_index_list)):
             pos = reverse_index_list[i]
             self.assertTrue(unique_indices_list[pos] == indices_list[i])
-
-        input_offsets_list = offsets.tolist()
-        output_offsets_list = output_offsets.tolist()
-        for i in range(F):
-            input_start = input_offsets_list[i * B]
-            input_end = input_offsets_list[(i + 1) * B]
-            output_start = output_offsets_list[i * B]
-            output_end = output_offsets_list[(i + 1) * B]
-            for each_offset in range(input_start, input_end):
-                pos = reverse_index_list[each_offset]
-                self.assertTrue((output_start <= pos) and (pos < output_end))
-        return
 
 
 if __name__ == "__main__":

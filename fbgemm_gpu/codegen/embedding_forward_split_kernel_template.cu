@@ -22,6 +22,94 @@
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
 
+{#-/*
+    This code chunk describes the weights load + accumulate step in the
+    forward kernel, containing 3 steps:
+
+    1. Set up the WeightRow
+    1. Load the quantization params
+    1. Load and accumulate the slices of values from the row
+
+    The main difference is in whether the slices are loaded from the embedding
+    table or cache.
+
+    NOTE: The decision was made to define this code chunk as a Jinja macro
+    instead of inline C++ function, since the compiler might not be able to
+    inline the code.
+
+    In-code variables that are defined outside:
+        emb_t, cache_t, cache_t
+        idx_j
+        D_emb
+        lxu_cache_weights
+        cache_idx_j
+        idx_weight_j
+        VEC_WIDTH
+        D
+        kThreadGroupSize
+        output_j
+*/#}
+{%- macro load_and_accumulate(from_cache) %}
+    {#-/* Set the weights row */#}
+    const auto weights_row = WeightRow<emb_t, cache_t, cache_t>(
+        const_cast<emb_t*>(&weights[idx_j * D_emb]),
+        {%- if from_cache %}
+        // Load from the cache
+        const_cast<cache_t*>(&lxu_cache_weights[cache_idx_j][0]),
+        {%- else %}
+        // Load from the embedding table
+        nullptr,
+        {%- endif %}
+        D,
+        nullptr);
+
+    {#-/* Set the quantization params */#}
+    {%- if from_cache %}
+    // Assume cache is FP16/FP32, which doesn't require quantization params
+    const auto qparams = make_float2(0.0f, 0.0f);
+    {%- else %}
+    // Load the quantization params from the embedding table row if emb_t == uint8_t
+    const auto qparams = weights_row.load_qparams();
+    {%- endif %}
+
+    {%- if not nobag %}
+    // Iterate over the row in the weights table, in 4-element strides
+    #pragma unroll kMaxVecsPerThread
+    for (int32_t i = 0;
+        i < kMaxVecsPerThread && (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH < D;
+        ++i) {
+        // Load the slice of the weights
+        const int32_t d = (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH;
+        const auto weights_slice = weights_row.load(d, qparams);
+
+        {%- if weighted %}
+        // Accumulate the weights * positional weight
+        accumulators[i].fma_(weights_slice, idx_weight_j);
+        {%- else %}
+        // Accumulate the weights
+        accumulators[i].add_(weights_slice);
+        {%- endif %}
+    }
+
+    {%- else %}
+    for (int32_t i = 0; i < D; i += kThreadGroupSize * VEC_WIDTH) {
+        const int32_t d = i + threadIdx.x * VEC_WIDTH;
+        if (d < D) {
+            // Since there is no pooling, simply copy the weights to output
+            const auto weights_slice = weights_row.load(d, qparams);
+            {%- if is_index_select %}
+            // output is 1D (because the stride can be irregular)
+            weights_slice.store(&output[output_offset + output_j * output_stride + d]);
+            {%- else %}
+            // output is 2D
+            weights_slice.store(&output[output_j][d]);
+            {%- endif %}
+        }
+    }
+    {%- endif %}
+{%- endmacro %}
+
+
 template <
     typename emb_t,
     typename cache_t,
@@ -34,8 +122,12 @@ template <
     size_t kMaxVecsPerThread,
     {%- endif %}
     size_t kThreadGroupSize >
-__launch_bounds__(kForwardMaxThreads) __global__
-void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}{{ vbe_desc }}_kernel(
+__launch_bounds__(kForwardMaxThreads) __global__ void
+{%- if is_index_select %}
+batch_index_select_dim0_codegen_forward_kernel(
+{%- else %}
+{{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}{{ vbe_desc }}_kernel(
+{%- endif %}
     const pta::PackedTensorAccessor64<emb_t, 1, at::RestrictPtrTraits> dev_weights,
     {%- if not dense %}
     const pta::PackedTensorAccessor64<emb_t, 1, at::RestrictPtrTraits> uvm_weights,
@@ -43,13 +135,13 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
     {%- endif %}
     const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> weights_offsets,
-    {%- if not nobag %}
+    {%- if not nobag or is_index_select %}
     const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> D_offsets,
     {%- else %}
     int64_t D,
-    {%- endif %}
+    {%- endif %} // if nobag
     {%- if vbe %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> row_output_offsets,
     const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
     const int32_t info_B_num_bits,
     const uint32_t info_B_mask,
@@ -57,7 +149,9 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     FixedDivisor fd_B,
     {%- endif %}
     const pta::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits> indices,
+    {%- if not is_index_select %}
     const pta::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits> offsets,
+    {%- endif %}
     {%- if not nobag %}
     int64_t pooling_mode,
     {%- endif %}
@@ -67,7 +161,14 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     {%- if not dense %}
     const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> lxu_cache_locations,
     {%- endif %}
-    pta::PackedTensorAccessor64<output_t, 2, at::RestrictPtrTraits> output // [B][total_D]
+    {%- if is_index_select %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> total_L_offsets,
+    const int32_t fixed_L_per_warp,
+    const bool permute_output_dim_0_1,
+    {%- endif %}
+    // If 2D, shape is [B][total_D]
+    pta::PackedTensorAccessor64<output_t, {{ "1" if is_index_select else "2" }}, at::RestrictPtrTraits> output
     ) {
 
 // shfl_sync_mask is implicitly used by SHFL_SYNC
@@ -84,9 +185,11 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
 
     // Determine the linearized warp ID, and exit early if needed
     int32_t b_t = blockIdx.x * blockDim.y + threadIdx.y;
+    {%- if not is_index_select %}
     if (b_t >= offsets.size(0) - 1) {
         return;
     }
+    {%- endif %}
 
     // Determine the Table and Training Example IDs
     int32_t t;  // Table ID
@@ -99,10 +202,48 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     fd_B.DivMod(b_t, &t, &b);
     {%- endif %}
 
+    // Get total number of tables
+    int32_t T = weights_offsets.size(0);
+
+    {%- if is_index_select %}
+    index_t indices_start;
+    int32_t L;
+    int32_t L_start;
+    if (t >= T) {
+        return;
+    }
+    const auto total_L_start = total_L_offsets[t];
+    const auto total_L = total_L_offsets[t + 1] - total_L_start;
+    L_start = b * fixed_L_per_warp;
+    if (L_start >= total_L) {
+        return;
+    }
+    indices_start = total_L_start + L_start;
+    L = (total_L - L_start >= fixed_L_per_warp) ? fixed_L_per_warp : (total_L - L_start);
+    {%- else %}
+    // Determine the number of indices (pooling factor) to look up within the bag
+    index_t indices_start = offsets[b_t];
+    int32_t L = offsets[b_t + 1] - indices_start;
+    {%- endif %}
+
+    // Get the offsets of the embedding dimensions of the tables and determine D
+    {%- if not nobag or is_index_select %}
+    const auto D_start = D_offsets[t];
+    const auto D_end = D_offsets[t + 1];
+    const auto D = D_end - D_start;
+    {%- endif %}
+
+    {%- if is_index_select %}
+    // Check D in the kernel to avoid iterating through the list on host
+    CUDA_KERNEL_ASSERT(D % 4 == 0 && "The column size must be multiple of 4");
+    const auto output_offset = permute_output_dim_0_1 ? D_start : output_offsets[t];
+    const auto output_stride = permute_output_dim_0_1 ? D_offsets[T] : D;
+    {%- endif %}
+
     // From the Table ID, fetch its weight tensor offset, locate that position
     // in the input weights tensor, and set the weights table pointer
-    const emb_t* __restrict__ weights;
     int64_t weights_offset = weights_offsets[t];
+    const emb_t* __restrict__ weights;
     {%- if not dense %}
     const auto placement = static_cast<PlacementType>(weights_placements[t]);
     if (placement == PlacementType::DEVICE) {
@@ -112,21 +253,6 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     }
     {%- else %}
     weights = &dev_weights[weights_offset];
-    {%- endif %}
-
-    // Get total number of tables
-    int32_t T = weights_offsets.size(0);
-
-    // Determine the number of indices (pooling factor) to look up within the bag
-    index_t indices_start = offsets[b_t];
-    index_t indices_end = offsets[b_t + 1];
-    int32_t L = indices_end - indices_start;
-
-    // Get the offsets of the embedding dimensions of the tables and determine D
-    {%- if not nobag %}
-    int32_t D_start = D_offsets[t];
-    int32_t D_end = D_offsets[t + 1];
-    int32_t D = D_end - D_start;
     {%- endif %}
 
     // D is computed in the bag case or provided as function arg in the nobag case
@@ -156,7 +282,7 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
 
         {%- if not dense %}
         // Cooperatively load the cache's indices
-        int32_t cache_idx = (use_lxu_cache && placement == PlacementType::MANAGED_CACHING && l < L) ? lxu_cache_locations[indices_start + l] : 0;
+        [[maybe_unused]] int32_t cache_idx = (use_lxu_cache && placement == PlacementType::MANAGED_CACHING && l < L) ? lxu_cache_locations[indices_start + l] : 0;
         {%- endif %}
 
         {%- if weighted %}
@@ -169,13 +295,15 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
             // Load index from thread j in the group
             int64_t idx_j = SHFL_SYNC(idx, j);
 
-            {%- if nobag %}
+            {%- if is_index_select %}
+            int64_t output_j = L_start + l_start + j;
+            {%- elif nobag %}
             int64_t output_j = indices_start + l_start + j;
             {%- endif %}
 
             {%- if not dense %}
             // Load cache's index from thread j in the group
-            int32_t cache_idx_j = use_lxu_cache ? SHFL_SYNC(cache_idx, j) : 0;
+            [[maybe_unused]] int32_t cache_idx_j = use_lxu_cache ? SHFL_SYNC(cache_idx, j) : 0;
             {%- endif %}
 
             {%- if weighted %}
@@ -183,95 +311,34 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
             at::acc_type<cache_t, true> idx_weight_j = SHFL_SYNC(idx_weight, j);
             {%- endif %}
 
-            {%- if not dense %}
-            // use_lxu_cache is a compile time condition
-            if (use_lxu_cache && placement == PlacementType::MANAGED_CACHING && cache_idx_j != kCacheLocationMissing) {
-                // Load the embedding table row from cache to the buffer
-                auto weight_row_cache = WeightRow<emb_t, cache_t, cache_t>(
-                    const_cast<emb_t*>(&weights[idx_j * D_emb]),
-                    const_cast<cache_t*>(&lxu_cache_weights[cache_idx_j][0]),
-                    D,
-                    nullptr);
 
-                // Assume cache is fp16/fp32 which doesn't require qparams
-                float2 qparams_cache = make_float2(0.0f, 0.0f);
+            {#/**************************************************************/#}
+            {#-/*
+                This is the main switch that determines how we are to load and accumulate
+                weights, and is determined by Jinja-time, compile-time, and run-time
+                variables.
+            */#}
 
-                {%- if not nobag %}
-                #pragma unroll kMaxVecsPerThread
-                for (int32_t i = 0;
-                    i < kMaxVecsPerThread && (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH < D;
-                    ++i) {
-                    // Load Vec4 from cache
-                    int32_t d = (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH;
-                    Vec4T<cache_t> weight = weight_row_cache.load(d, qparams_cache);
+            {%- if dense %}     {#-/* If it's dense, cache is not supported, so load from the embedding table */#}
+                {{- load_and_accumulate(false) }}
 
-                    {%- if weighted %}
-                    // Accumulate the weight * positional weight
-                    accumulators[i].fma_(weight, idx_weight_j);
-                    {%- else %}
-                    // Accumulate the weight
-                    accumulators[i].add_(weight);
-                    {%- endif %}
+            {%- else %}         {#-/* Else, cache is supported, so now defer to compile-time selection */#}
+            if constexpr (use_lxu_cache) {
+                {#-/* If the row is available in the cache, fetch from the cache */#}
+                if (placement == PlacementType::MANAGED_CACHING && cache_idx_j != kCacheLocationMissing) {
+                    {{ load_and_accumulate(true) }}
+
+                {#-/* Else fetch from the embedding table */#}
+                } else {
+                    {{ load_and_accumulate(false) }}
                 }
-                {%- else %}
-                for (int32_t i = 0; i < D; i += kThreadGroupSize * VEC_WIDTH) {
-                    int32_t d = i + threadIdx.x * VEC_WIDTH;
-                    if (d < D) {
-                        // Since there is no pooling, simply copy the weight to output
-                        Vec4T<cache_t> weight = weight_row_cache.load(d, qparams_cache);
-                        weight.store(&output[output_j][d]);
-                    }
-                }
-                {%- endif %}
 
-            } else { // else row is not in cache
+            } else {
+                {#-/* If we're not using the LXU cache, fetch from the embedding table */#}
+                {{- load_and_accumulate(false) }}
+            }
             {%- endif %}
-                // Load the embedding table row from memory to the buffer
-                auto weight_row_emb = WeightRow<emb_t, cache_t, cache_t>(
-                    const_cast<emb_t*>(&weights[idx_j * D_emb]),
-                    nullptr,
-                    D,
-                    nullptr);
-
-                // Load the two quantization params (scale and bias) from the end of the embedding table row (2 floats)
-                [[maybe_unused]] float2 qparams_emb;
-                if (std::is_same<emb_t, uint8_t>::value) {
-                    qparams_emb = weight_row_emb.load_qparams();
-                }
-
-                {%- if not nobag %}
-                // Iterate over the row of elements in the weights table, in 4-element strides between adjacent threads
-                #pragma unroll kMaxVecsPerThread
-                for (int32_t i = 0;
-                    i < kMaxVecsPerThread && (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH < D;
-                    ++i) {
-                    // Figure out the position in the embedding table row to load
-                    int32_t d = (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH;
-
-                    // Fused load-and-dequantize from the buffer
-                    Vec4T<cache_t> weight = weight_row_emb.load(d, qparams_emb);
-
-                    {%- if weighted %}
-                    // Accumulate the weight * positional weight
-                    accumulators[i].fma_(weight, idx_weight_j);
-                    {%- else %}
-                    // Accumulate the weight
-                    accumulators[i].add_(weight);
-                    {%- endif %}
-                }
-                {%- else %}
-                for (int32_t i = 0; i < D; i += kThreadGroupSize * VEC_WIDTH) {
-                    int32_t d = i + threadIdx.x * VEC_WIDTH;
-                    if (d < D) {
-                        // Since there is no pooling, simply copy the weight to output
-                        Vec4T<cache_t> weight = weight_row_emb.load(d, qparams_emb);
-                        weight.store(&output[output_j][d]);
-                    }
-                }
-                {%- endif %}
-            {%- if not dense %}
-            } // else row is not in cache
-            {%- endif %}
+            {#/**************************************************************/#}
         }
     }
 
@@ -279,7 +346,7 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     // If weight type is FP32/16
     if constexpr (!std::is_same_v<output_t, uint8_t>) {
         {%- if vbe %}
-        output_t* output_ = &output[0][output_offsets[b_t]];
+        output_t* output_ = &output[0][row_output_offsets[b_t]];
         {%- else %}
         output_t* output_ = &output[b][D_start];
         {%- endif %}
@@ -335,15 +402,88 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
 }
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Explicit Template Instantiations
+////////////////////////////////////////////////////////////////////////////////
+
 /*
     Explicitly instantiate the kernel function template.  The instantiations are
     based on the types enumerated by DISPATCH_EMB_CACHE_TYPES macro used in
     embedding_forward_split_template.cu
 */
 
-{%- for output_type in ['uint8_t', 'at::Half', 'float'] %}
-{%- for emb_type in ['uint8_t', 'float', 'at::Half'] %}
-{%- for cache_type in ['float', 'at::Half'] %}
+{%- macro template_instantiation(emb_type, cache_type, output_type, use_cache, kMaxVecsPerThread, kThreadGroupSize) %}
+template __launch_bounds__(kForwardMaxThreads) __global__ void
+{%- if is_index_select %}
+batch_index_select_dim0_codegen_forward_kernel
+{%- else %}
+{{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}{{ vbe_desc }}_kernel
+{%- endif %}
+<
+    {{ emb_type }},
+    {{ cache_type }},
+    {{ output_type }},
+    {%- if not dense %}
+    {{ use_cache }},
+    {%- endif %}
+    int64_t,
+    {%- if not nobag %}
+    {{- kMaxVecsPerThread }},
+    {%- endif %}
+    {{ kThreadGroupSize }}
+> (
+    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> dev_weights,
+    {%- if not dense %}
+    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> uvm_weights,
+    const pta::PackedTensorAccessor64<{{ cache_type }}, 2, at::RestrictPtrTraits> lxu_cache_weights,
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
+    {%- endif %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> weights_offsets,
+    {%- if not nobag or is_index_select %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> D_offsets,
+    {%- else %}
+    int64_t D,
+    {%- endif %}
+    {%- if vbe %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
+    const int32_t info_B_num_bits,
+    const uint32_t info_B_mask,
+    {%- else %}
+    FixedDivisor fd_B,
+    {%- endif %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> indices,
+    {%- if not is_index_select %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> offsets,
+    {%- endif %}
+    {%- if not nobag %}
+    int64_t pooling_mode,
+    {%- endif %}
+    {%- if weighted %}
+    pta::PackedTensorAccessor32<at::acc_type<{{ cache_type }}, true>, 1, at::RestrictPtrTraits> indice_weights,
+    {%- endif %}
+    {%- if not dense %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> lxu_cache_locations,
+    {%- endif %}
+    {%- if is_index_select %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> total_L_offsets,
+    const int32_t fixed_L_per_warp,
+    const bool permute_output_dim_0_1,
+    {%- endif %}
+    pta::PackedTensorAccessor64<{{ output_type }}, {{ "1" if is_index_select else "2" }}, at::RestrictPtrTraits> output);
+{%- endmacro %}
+
+{%- macro bulk_template_instantiations(use_cache, kMaxVecsPerThread, kThreadGroupSize) %}
+    {%- for emb_type in ['uint8_t', 'float', 'at::Half'] %}
+    {%- for cache_type in ['float', 'at::Half'] %}
+    {%- for output_type in ['uint8_t', 'at::Half', 'float'] %}
+        {{ template_instantiation(emb_type, cache_type, output_type, use_cache, kMaxVecsPerThread, kThreadGroupSize) }}
+    {%- endfor %}
+    {%- endfor %}
+    {%- endfor %}
+{%- endmacro %}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 #ifdef FBGEMM_USE_SUBWARP_SHUFFLE
@@ -419,55 +559,7 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     (NULL,·NULL,·(kWarpSize·/·1))
 */ #}
 {%- for (use_cache, kMaxVecsPerThread, kThreadGroupSize) in tuples | unique %}
-
-template __launch_bounds__(kForwardMaxThreads) __global__
-void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}{{ vbe_desc }}_kernel
-<
-    {{ emb_type }},
-    {{ cache_type }},
-    {{ output_type }},
-    {%- if not dense %}
-    {{ use_cache }},
-    {%- endif %}
-    int64_t,
-    {%- if not nobag %}
-    {{- kMaxVecsPerThread }},
-    {%- endif %}
-    {{ kThreadGroupSize }}
-> (
-    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> dev_weights,
-    {%- if not dense %}
-    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> uvm_weights,
-    const pta::PackedTensorAccessor64<{{ cache_type }}, 2, at::RestrictPtrTraits> lxu_cache_weights,
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
-    {%- endif %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> weights_offsets,
-    {%- if not nobag %}
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> D_offsets,
-    {%- else %}
-    int64_t D,
-    {%- endif %}
-    {%- if vbe %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
-    const int32_t info_B_num_bits,
-    const uint32_t info_B_mask,
-    {%- else %}
-    FixedDivisor fd_B,
-    {%- endif %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> indices,
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> offsets,
-    {%- if not nobag %}
-    int64_t pooling_mode,
-    {%- endif %}
-    {%- if weighted %}
-    pta::PackedTensorAccessor32<at::acc_type<{{ cache_type }}, true>, 1, at::RestrictPtrTraits> indice_weights,
-    {%- endif %}
-    {%- if not dense %}
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> lxu_cache_locations,
-    {%- endif %}
-    pta::PackedTensorAccessor64<{{ output_type }}, 2, at::RestrictPtrTraits> output);
-
+    {{ bulk_template_instantiations(use_cache, kMaxVecsPerThread, kThreadGroupSize) }}
 {%- endfor %}
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -528,61 +620,9 @@ void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }
     (NULL,·NULL,·kWarpSize)
 */ #}
 {%- for (use_cache, kMaxVecsPerThread, kThreadGroupSize) in tuples | unique %}
-
-template __launch_bounds__(kForwardMaxThreads) __global__
-void {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}{{ vbe_desc }}_kernel
-<
-    {{ emb_type }},
-    {{ cache_type }},
-    {{ output_type }},
-    {%- if not dense %}
-    {{ use_cache }},
-    {%- endif %}
-    int64_t,
-    {%- if not nobag %}
-    {{- kMaxVecsPerThread }},
-    {%- endif %}
-    {{ kThreadGroupSize }}
-> (
-    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> dev_weights,
-    {%- if not dense %}
-    const pta::PackedTensorAccessor64<{{ emb_type }}, 1, at::RestrictPtrTraits> uvm_weights,
-    const pta::PackedTensorAccessor64<{{ cache_type }}, 2, at::RestrictPtrTraits> lxu_cache_weights,
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
-    {%- endif %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> weights_offsets,
-    {%- if not nobag %}
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> D_offsets,
-    {%- else %}
-    int64_t D,
-    {%- endif %}
-    {%- if vbe %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> output_offsets,
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
-    const int32_t info_B_num_bits,
-    const uint32_t info_B_mask,
-    {%- else %}
-    FixedDivisor fd_B,
-    {%- endif %}
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> indices,
-    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> offsets,
-    {%- if not nobag %}
-    int64_t pooling_mode,
-    {%- endif %}
-    {%- if weighted %}
-    pta::PackedTensorAccessor32<at::acc_type<{{ cache_type }}, true>, 1, at::RestrictPtrTraits> indice_weights,
-    {%- endif %}
-    {%- if not dense %}
-    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> lxu_cache_locations,
-    {%- endif %}
-    pta::PackedTensorAccessor64<{{ output_type }}, 2, at::RestrictPtrTraits> output);
-
+    {{ bulk_template_instantiations(use_cache, kMaxVecsPerThread, kThreadGroupSize) }}
 {%- endfor %}
 
 ////////////////////////////////////////////////////////////////////////////////
 #endif
 ////////////////////////////////////////////////////////////////////////////////
-
-{%- endfor %}
-{%- endfor %}
-{%- endfor %}

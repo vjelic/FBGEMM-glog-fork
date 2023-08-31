@@ -42,6 +42,9 @@ at::Tensor asynchronous_complete_cumsum_cpu(const at::Tensor& t_in);
 at::Tensor asynchronous_inclusive_cumsum_cpu(const at::Tensor& t_in);
 
 ///@ingroup sparse-data-cuda
+at::Tensor asynchronous_complete_cumsum_meta(const at::Tensor& t_in);
+
+///@ingroup sparse-data-cuda
 at::Tensor offsets_range_cuda(const at::Tensor& offsets, int64_t range_size);
 
 ///@ingroup sparse-data-cpu
@@ -217,7 +220,8 @@ at::Tensor _float_or_half_to_fused8bitrowwise_gpu(const at::Tensor& input);
 at::Tensor _fused8bitrowwise_to_float_gpu(const at::Tensor& input);
 at::Tensor _FP8rowwise_to_float_gpu(
     const at::Tensor& input,
-    const bool forward = true);
+    const bool forward = true,
+    const int64_t output_dtype = 0);
 at::Tensor _paddedFP8rowwise_to_float_gpu(
     const at::Tensor& input,
     const bool forward = true,
@@ -236,7 +240,8 @@ at::Tensor float_or_half_to_fused8bitrowwise_cpu(const at::Tensor& input);
 at::Tensor fused8bitrowwise_to_float_cpu(const at::Tensor& input);
 at::Tensor FP8rowwise_to_float_cpu(
     const at::Tensor& input,
-    const bool forward = true);
+    const bool forward = true,
+    const int64_t output_dtype = 0);
 at::Tensor fused8bitrowwise_to_half_cpu(const at::Tensor& input);
 at::Tensor fused8bitrowwise_to_float_or_half_cpu(
     const at::Tensor& input,
@@ -349,7 +354,16 @@ at::Tensor reorder_batched_ad_indices_cpu(
     const int64_t num_ads_in_batch,
     const bool broadcast_indices = false,
     const int64_t num_indices_after_broadcast = -1);
-
+///@ingroup sparse-data-cpu
+at::Tensor cat_reorder_batched_ad_indices_cpu(
+    const at::Tensor& cat_ad_offsets,
+    const std::vector<at::Tensor>& cat_ad_indices,
+    const at::Tensor& reordered_cat_ad_offsets,
+    const at::Tensor& batch_offsets,
+    const int64_t num_ads_in_batch,
+    const bool broadcast_indices,
+    const int64_t num_indices_after_broadcast,
+    const bool pinned_memory = false);
 at::Tensor recat_embedding_grad_output_cuda(
     at::Tensor grad_output, // [B_local][T_global][D]
     const std::vector<int64_t>& num_features_per_rank);
@@ -393,7 +407,7 @@ std::vector<at::Tensor> stacked_jagged_2d_to_dense_cpu(
 at::Tensor jagged_to_padded_dense(
     const at::Tensor& values,
     const std::vector<at::Tensor>& offsets,
-    const std::vector<std::int64_t>& max_lengths,
+    const c10::SymIntArrayRef max_lengths,
     const double padding_value);
 
 at::Tensor jagged_dense_elementwise_add(
@@ -404,13 +418,18 @@ at::Tensor jagged_dense_elementwise_add(
 at::Tensor jagged_1d_to_dense(
     at::Tensor values,
     at::Tensor offsets,
-    int64_t max_L,
+    c10::SymInt max_L,
     int64_t padding_value);
 
 at::Tensor jagged_2d_to_dense(
     at::Tensor values,
     at::Tensor offsets,
-    int64_t max_sequence_length);
+    c10::SymInt max_sequence_length);
+
+at::Tensor jagged_2d_to_dense_meta(
+    at::Tensor values,
+    at::Tensor offsets,
+    c10::SymInt max_sequence_length);
 
 std::tuple<at::Tensor, std::vector<at::Tensor>>
 jagged_dense_dense_elementwise_add_jagged_output(
@@ -475,20 +494,26 @@ std::tuple<at::Tensor, at::Tensor> jagged_dense_bmm(
     const at::Tensor& y,
     const int64_t max_L);
 
+std::tuple<at::Tensor, at::Tensor> masked_select_jagged_1d(
+    const at::Tensor& values,
+    const at::Tensor& lengths,
+    const at::Tensor& mask);
+
 #endif
 
 ///@ingroup sparse-data-cpu
 /// Divide the prediction range (e.g., [0, 1]) into B bins. In each bin, use
-/// two parameters to store the number of positive examples and the number of
-/// examples that fall into this bucket. So we basically have a histogram for
-/// the model prediction. As a result, for each bin, we have a statistical
-/// value for the real CTR (`num_pos / num_example`). We use this statistical
-/// value as the final calibrated prediction if the pre-cali prediction falls
-/// into the corresponding bin. In this way, the predictions within each bin
-/// should be well-calibrated if we have sufficient examples. That is, we have
-/// a fine-grained calibrated model by this calibration module. Theoretically,
-/// this calibration layer can fix any uncalibrated model or prediction if we
-/// have sufficient bins and examples.
+/// two parameters to store the number of positive examples and the number
+/// of examples that fall into this bucket. So we basically have a histogram
+/// for the model prediction. As a result, for each bin, we have a
+/// statistical value for the real CTR (`num_pos / num_example`). We use
+/// this statistical value as the final calibrated prediction if the
+/// pre-cali prediction falls into the corresponding bin. In this way, the
+/// predictions within each bin should be well-calibrated if we have
+/// sufficient examples. That is, we have a fine-grained calibrated model by
+/// this calibration module. Theoretically, this calibration layer can fix
+/// any uncalibrated model or prediction if we have sufficient bins and
+/// examples.
 ///@return `[calibrated_prediction, bin_ids]`
 ///@param logit is input tensor before applying Sigmoid.
 /// Assumes positive weight calibration is used for calibartion target, and
@@ -498,8 +523,8 @@ std::tuple<at::Tensor, at::Tensor> jagged_dense_bmm(
 ///@param lower/upper_bound Bounds of the bins.
 ///@param bin_ctr_in_use_after We will use the calibration_target for the
 /// final calibrated prediction if we don't have sufficient examples. Only
-/// use the statistical value of bin CTR after we observe `bin_ctr_in_use_after`
-/// examples that fall in this bin. Default value: 0.
+/// use the statistical value of bin CTR after we observe
+/// `bin_ctr_in_use_after` examples that fall in this bin. Default value: 0.
 ///@param bin_ctr_weight_value Weight for statistical value of bin CTR.
 /// When this is specified, we perform a weighted sum for the statisctical
 /// bin CTR and the calibration_target:
@@ -747,7 +772,6 @@ void group_index_select_or_add_cuda(
     const c10::ScalarType& input_scalar_type,
     const c10::ScalarType& indices_scalar_type,
     const c10::DeviceIndex& device,
-    const int max_indices,
     const int num_work_rows,
     const int64_t total_num_warps,
     const int group_size,

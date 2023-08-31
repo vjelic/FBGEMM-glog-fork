@@ -138,6 +138,62 @@ __global__ __launch_bounds__(kMaxThreads) void linearize_index_kernel(
   }
 }
 
+template <typename index_t, typename info_acc_t>
+__global__
+__launch_bounds__(kMaxThreads) void linearize_index_index_select_kernel(
+    const at::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits>
+        hash_size_cumsum,
+    const at::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits> indices,
+    const at::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits>
+        total_L_offsets,
+    at::PackedTensorAccessor32<info_acc_t, 1, at::RestrictPtrTraits> infos,
+    at::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits>
+        linear_indices,
+    FixedDivisor fd,
+    int32_t fixed_L_per_warp) {
+  const int32_t T = hash_size_cumsum.size(0) - 1;
+  auto b_t = blockIdx.x * blockDim.x + threadIdx.x;
+  int32_t b;
+  int32_t t;
+
+  fd.DivMod(b_t, &t, &b);
+
+  const int32_t lane_id = threadIdx.x % fbgemm_gpu::kWarpSize;
+
+  index_t hash_offset = -1;
+  index_t indices_start = -1;
+  int32_t L = 0;
+  int32_t L_start = 0;
+  if (t < T) {
+    const auto total_L_start = total_L_offsets[t];
+    const auto total_L = total_L_offsets[t + 1] - total_L_start;
+    L_start = b * fixed_L_per_warp;
+    if (L_start < total_L) {
+      hash_offset = hash_size_cumsum[t];
+      indices_start = total_L_start + L_start;
+      L = (total_L - L_start >= fixed_L_per_warp) ? fixed_L_per_warp
+                                                  : (total_L - L_start);
+    }
+  }
+
+  // Compile-time conditional
+  for (int32_t j = 0; j < fbgemm_gpu::kWarpSize; ++j) {
+    const index_t indices_start_warp = fbgemm_gpu::shfl_sync(indices_start, j);
+    const auto t_warp = fbgemm_gpu::shfl_sync(t, j);
+    const auto L_warp = fbgemm_gpu::shfl_sync(L, j);
+    const auto L_start_warp = fbgemm_gpu::shfl_sync(L_start, j);
+    const index_t hash_offset_warp = fbgemm_gpu::shfl_sync(hash_offset, j);
+    for (int32_t i = lane_id; i < L_warp; i += fbgemm_gpu::kWarpSize) {
+      const index_t idx = __ldg(&indices[indices_start_warp + i]);
+      // l is the relative l in the feature (i.e., the first l in the feature
+      // is 0)
+      const int64_t l_t = (L_start_warp + i) * T + t_warp;
+      infos[indices_start_warp + i] = l_t;
+      linear_indices[indices_start_warp + i] = hash_offset_warp + idx;
+    }
+  }
+}
+
 DLL_PUBLIC std::tuple<
     Tensor /*linear_indices*/,
     Tensor /*linear_indices_sorted*/,
@@ -155,16 +211,30 @@ transpose_embedding_input(
     const c10::optional<Tensor>& vbe_b_t_map,
     const int64_t info_B_num_bits,
     const int64_t info_B_mask,
-    const int64_t total_unique_indices) {
+    const int64_t total_unique_indices,
+    const bool is_index_select,
+    const c10::optional<Tensor>& total_L_offsets,
+    const int64_t fixed_L_per_warp,
+    const int64_t num_warps_per_feature) {
   const bool vbe = vbe_b_t_map.has_value();
   TORCH_CHECK(nobag || !vbe || info_B_num_bits > 0);
   TORCH_CHECK(!vbe || info_B_mask > 0);
+  TORCH_CHECK(
+      !is_index_select || (fixed_L_per_warp > 0 && num_warps_per_feature > 0));
 
-  const auto total_B = offsets.size(0) - 1;
   const auto T = hash_size_cumsum.size(0) - 1;
+  const auto total_B =
+      !is_index_select ? (offsets.size(0) - 1) : (num_warps_per_feature * T);
+
+  TORCH_CHECK(
+      !is_index_select ||
+      (total_L_offsets.has_value() &&
+       total_L_offsets.value().numel() == T + 1));
 
   auto infos = at::empty_like(
-      indices, indices.options().dtype(nobag ? at::kLong : at::kInt));
+      indices,
+      indices.options().dtype(
+          (nobag || is_index_select) ? at::kLong : at::kInt));
   auto infos_sorted = at::empty_like(infos);
   auto linear_indices = at::empty_like(indices);
   auto linear_indices_sorted = at::empty_like(indices);
@@ -203,10 +273,31 @@ transpose_embedding_input(
         using info_t = index_t;
         AT_DISPATCH_INDEX_TYPES(
             indices.scalar_type(), "transpose_embedding_input2", [&] {
-              if (!nobag) {
-                INVOKE_LINEARIZE_INDEX_KERNEL(int32_t, false);
+              if (!is_index_select) {
+                if (!nobag) {
+                  INVOKE_LINEARIZE_INDEX_KERNEL(int32_t, false);
+                } else {
+                  INVOKE_LINEARIZE_INDEX_KERNEL(int64_t, true);
+                }
               } else {
-                INVOKE_LINEARIZE_INDEX_KERNEL(int64_t, true);
+                // index_select is a special case of TBE (dense, nobag, with
+                // fixed_L_per_warp)
+                linearize_index_index_select_kernel<<<
+                    div_round_up(total_B, kMaxThreads),
+                    kMaxThreads,
+                    0,
+                    at::cuda::getCurrentCUDAStream()>>>(
+                    hash_size_cumsum
+                        .packed_accessor32<index_t, 1, RestrictPtrTraits>(),
+                    indices.packed_accessor32<index_t, 1, RestrictPtrTraits>(),
+                    total_L_offsets.value()
+                        .packed_accessor32<index_t, 1, RestrictPtrTraits>(),
+                    infos.packed_accessor32<int64_t, 1, RestrictPtrTraits>(),
+                    linear_indices
+                        .packed_accessor32<index_t, 1, RestrictPtrTraits>(),
+                    FixedDivisor(total_B / T),
+                    fixed_L_per_warp);
+                C10_CUDA_KERNEL_LAUNCH_CHECK();
               }
               {
                 size_t temp_storage_bytes = 0;
@@ -384,9 +475,9 @@ DEF_RADIX_SORT_PAIRS_FN(int64_t, int64_t);
 DEF_RADIX_SORT_PAIRS_FN(int64_t, int32_t);
 
 __global__
-__launch_bounds__(kMaxThreads) void populate_vbe_metadata_foreach_sample_inplace_kernel(
+__launch_bounds__(kMaxThreads) void generate_vbe_metadata_foreach_sample_kernel(
     at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits>
-        output_offsets,
+        row_output_offsets,
     at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
     const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
         B_offsets,
@@ -430,7 +521,7 @@ __launch_bounds__(kMaxThreads) void populate_vbe_metadata_foreach_sample_inplace
   // Update b_t
   b_t = B_start_t + B_start_r_t + b;
   const auto D_ = nobag ? D : D_offsets[t + 1] - D_offsets[t];
-  output_offsets[b_t] = output_offsets_feature_rank[r * T + t] + b * D_;
+  row_output_offsets[b_t] = output_offsets_feature_rank[r * T + t] + b * D_;
 
   // Relative sample ID in the table
   const auto b_ = B_start_r_t + b;
@@ -440,77 +531,78 @@ __launch_bounds__(kMaxThreads) void populate_vbe_metadata_foreach_sample_inplace
       reinterpret_cast<const uint32_t*>(&b_)[0];
 }
 
-/// Popopulate VBE metadata namely output_offsets and b_t_map in the
-/// VBEMetadata struct.
+/// Generate VBE metadata namely output_offsets and b_t_map
 ///
-/// output_offsets A 1D tensor that contains the output offset of each b
-///                (sample) and t (feature/table) pair. The output serializes
-///                O_r_t where O_r_t is the local output of rank r and
-///                feature/table t (t is the fastest moving index).
-/// b_t_map        A 1D tensor that contains the b and t information of the
-///                linearized b and t (b is the fastest moving index).
+/// row_output_offsets A 1D tensor that contains the output offset of each b
+///                    (sample) and t (feature/table) pair. The output
+///                    serializes O_r_t where O_r_t is the local output of rank
+///                    r and feature/table t (t is the fastest moving index).
+/// b_t_map            A 1D tensor that contains the b and t information of the
+///                    linearized b and t (b is the fastest moving index).
 ///
-/// @param vbe_metadata     The VBEMetadata struct that contains metadata
-///                         requires for VBE.
-/// @param D_offsets        Embedding dimension offsets. Required if nobag is
-///                         false.
-/// @param D                The embedding dimension. Required if nobag is true.
-/// @param nobag            A boolean to indicate if TBE is pooled (false) or
-///                         sequence (true).
-/// @param info_B_num_bits  The number of bits used to encode a sample ID.
-///                         (Used for populating b_t_map).
-/// @param total_B          The total number of samples (i.e., the total number
-///                         of b and t pairs).
-DLL_PUBLIC void populate_vbe_metadata_foreach_sample_inplace(
-    VBEMetadata& vbe_metadata,
+/// @param B_offsets                   Batch size offsets for all features.
+/// @param B_offsets_rank_per_feature  Batch size offsets for all ranks (GPUs)
+///                                    for each feature.
+/// @param output_offsets_feature_rank Output offsets for all features and ranks
+///                                    and features.
+/// @param D_offsets                   Embedding dimension offsets. Required if
+///                                    nobag is false.
+/// @param D                           The embedding dimension. Required if
+///                                    nobag is true.
+/// @param nobag                       A boolean to indicate if TBE is pooled
+///                                    (false) or sequence (true).
+/// @param info_B_num_bits             The number of bits used to encode a
+///                                    sample ID. (Used for populating b_t_map).
+/// @param total_B                     The total number of samples (i.e., the
+///                                    total number of b and t pairs).
+DLL_PUBLIC std::tuple<Tensor /*row_output_offsets*/, Tensor /*b_t_map*/>
+generate_vbe_metadata(
+    const Tensor& B_offsets,
+    const Tensor& B_offsets_rank_per_feature,
+    const Tensor& output_offsets_feature_rank,
     const Tensor& D_offsets,
-    const int32_t D,
+    const int64_t D,
     const bool nobag,
-    const int32_t info_B_num_bits,
+    const int64_t max_B_feature_rank,
+    const int64_t info_B_num_bits,
     const int64_t total_B) {
   TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
-      vbe_metadata.B_offsets,
-      vbe_metadata.B_offsets_rank_per_feature,
-      vbe_metadata.output_offsets_feature_rank);
+      B_offsets, B_offsets_rank_per_feature, output_offsets_feature_rank);
 
-  TENSOR_NDIM_EQUALS(vbe_metadata.B_offsets, 1);
-  TENSOR_NDIM_EQUALS(vbe_metadata.B_offsets_rank_per_feature, 2);
-  TENSOR_NDIM_EQUALS(vbe_metadata.output_offsets_feature_rank, 1);
+  TENSOR_NDIM_EQUALS(B_offsets, 1);
+  TENSOR_NDIM_EQUALS(B_offsets_rank_per_feature, 2);
+  TENSOR_NDIM_EQUALS(output_offsets_feature_rank, 1);
 
-  const int32_t T = vbe_metadata.B_offsets.numel() - 1;
+  const int32_t T = B_offsets.numel() - 1;
   if (!nobag) {
     TENSOR_ON_CUDA_GPU(D_offsets);
-    TENSORS_ON_SAME_DEVICE(vbe_metadata.B_offsets, D_offsets);
+    TENSORS_ON_SAME_DEVICE(B_offsets, D_offsets);
     TORCH_CHECK(D_offsets.numel() == T + 1)
   }
 
-  const auto num_ranks = vbe_metadata.B_offsets_rank_per_feature.size(1) - 1;
-  TORCH_CHECK(vbe_metadata.B_offsets_rank_per_feature.size(0) == T);
-  TORCH_CHECK(
-      vbe_metadata.output_offsets_feature_rank.numel() == num_ranks * T + 1);
+  const auto num_ranks = B_offsets_rank_per_feature.size(1) - 1;
+  TORCH_CHECK(B_offsets_rank_per_feature.size(0) == T);
+  TORCH_CHECK(output_offsets_feature_rank.numel() == num_ranks * T + 1);
 
   at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(vbe_metadata.B_offsets.get_device());
+  device_guard.set_index(B_offsets.get_device());
 
-  Tensor output_offsets =
-      at::empty({total_B}, vbe_metadata.output_offsets_feature_rank.options());
-  Tensor b_t_map = at::empty({total_B}, vbe_metadata.B_offsets.options());
-
-  const auto max_B_feature_rank = vbe_metadata.max_B_feature_rank;
+  Tensor row_output_offsets =
+      at::empty({total_B}, output_offsets_feature_rank.options());
+  Tensor b_t_map = at::empty({total_B}, B_offsets.options());
 
   // Over allocate total number of threads to avoid using binary search
-  populate_vbe_metadata_foreach_sample_inplace_kernel<<<
+  generate_vbe_metadata_foreach_sample_kernel<<<
       div_round_up(max_B_feature_rank * T * num_ranks, kMaxThreads),
       kMaxThreads,
       0,
       at::cuda::getCurrentCUDAStream()>>>(
-      output_offsets.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>(),
+      row_output_offsets.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>(),
       b_t_map.packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
-      vbe_metadata.B_offsets
-          .packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
-      vbe_metadata.B_offsets_rank_per_feature
+      B_offsets.packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
+      B_offsets_rank_per_feature
           .packed_accessor32<int32_t, 2, at::RestrictPtrTraits>(),
-      vbe_metadata.output_offsets_feature_rank
+      output_offsets_feature_rank
           .packed_accessor32<int64_t, 1, at::RestrictPtrTraits>(),
       D_offsets.packed_accessor32<int32_t, 1, at::RestrictPtrTraits>(),
       D,
@@ -520,6 +612,5 @@ DLL_PUBLIC void populate_vbe_metadata_foreach_sample_inplace(
       info_B_num_bits);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  vbe_metadata.output_offsets = std::move(output_offsets);
-  vbe_metadata.b_t_map = std::move(b_t_map);
+  return {row_output_offsets, b_t_map};
 }

@@ -1774,23 +1774,20 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             )
         )
         if optimizer is None:
-            assert type(gos) == list
+            assert type(gos) is list
             if do_pooling:
                 goc = torch.cat([go.view(B, -1) for go in gos], dim=1)
             else:
                 goc = torch.cat(gos, dim=0)
         else:
-            assert type(gos) == Tensor
+            assert type(gos) is Tensor
             goc = gos.clone()
         fc2.backward(goc)
 
         if optimizer is not None:
-            # pyre-ignore[6]
             params = SplitEmbeddingOptimizerParams(weights_dev=cc.weights_dev)
             embedding_args = SplitEmbeddingArgs(
-                # pyre-ignore[6]
                 weights_placements=cc.weights_placements,
-                # pyre-ignore[6]
                 weights_offsets=cc.weights_offsets,
                 max_D=cc.max_D,
             )
@@ -1821,7 +1818,6 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                 ref_grad.half() if weights_precision == SparseType.FP16 else ref_grad
             )
         else:
-            # pyre-ignore[16]
             indices = cc.weights_dev.grad._indices().flatten()
             # Select only the part in the table that is updated
             test_tensor = torch.index_select(cc.weights_dev.view(-1, D), 0, indices)
@@ -2110,6 +2106,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         weights_precision=st.sampled_from([SparseType.FP16, SparseType.FP32]),
         weighted=st.booleans(),
         mixed=st.booleans(),
+        mixed_B=st.booleans(),
         use_cache=st.booleans(),
         cache_algorithm=st.sampled_from(CacheAlgorithm),
         long_segments=st.booleans(),
@@ -2142,6 +2139,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         weights_precision: SparseType,
         weighted: bool,
         mixed: bool,
+        mixed_B: bool,
         use_cache: bool,
         cache_algorithm: CacheAlgorithm,
         long_segments: bool,
@@ -2157,7 +2155,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             weights_precision,
             weighted,
             mixed,
-            False,  # mixed_B
+            mixed_B if not use_cpu else False,
             use_cache,
             cache_algorithm,
             long_segments,
@@ -2175,6 +2173,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         L=st.integers(min_value=1, max_value=4),
         weighted=st.booleans(),
         mixed=st.booleans(),
+        mixed_B=st.booleans(),
         use_cache=st.booleans(),
         cache_algorithm=st.sampled_from(CacheAlgorithm),
     )
@@ -2192,6 +2191,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         L: int,
         weighted: bool,
         mixed: bool,
+        mixed_B: bool,
         use_cache: bool,
         cache_algorithm: CacheAlgorithm,
     ) -> None:
@@ -2204,7 +2204,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             SparseType.FP32,  # weights_precision
             weighted,
             mixed,
-            False,  # mixed_B
+            mixed_B,
             use_cache,
             cache_algorithm,
             True,  # long_segments
@@ -3015,18 +3015,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             output_dtype,
         )
 
-    @unittest.skipIf(*gpu_unavailable)
-    @given(
-        T=st.integers(min_value=1, max_value=5),
-        D=st.integers(min_value=2, max_value=256),
-        B=st.integers(min_value=1, max_value=128),
-        log_E=st.integers(min_value=3, max_value=5),
-        L=st.integers(min_value=1, max_value=20),
-        mixed=st.booleans(),
-        cache_algorithm=st.sampled_from(CacheAlgorithm),
-    )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
-    def test_cache_pipeline(
+    def _generate_cache_tbes(
         self,
         T: int,
         D: int,
@@ -3034,9 +3023,16 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         log_E: int,
         L: int,
         mixed: bool,
-        cache_algorithm: CacheAlgorithm,
-    ) -> None:
-        iters = 3
+        cache_algorithm: CacheAlgorithm = CacheAlgorithm.LRU,
+        prefetch_pipeline: bool = False,
+        use_int_weight: bool = False,
+    ) -> Tuple[
+        SplitTableBatchedEmbeddingBagsCodegen,
+        SplitTableBatchedEmbeddingBagsCodegen,
+        int,
+        int,
+    ]:
+        lr = 1.0 if use_int_weight else 0.02
         E = int(10**log_E)
         D = D * 4
         if not mixed:
@@ -3065,11 +3061,30 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                 )
                 for (E, D) in zip(Es, Ds)
             ],
+            stochastic_rounding=False,
+            prefetch_pipeline=False,
+            learning_rate=lr,
         )
         cc = SplitTableBatchedEmbeddingBagsCodegen(
             [(E, D, M, ComputeDevice.CUDA) for (E, D, M) in zip(Es, Ds, managed)],
             cache_algorithm=cache_algorithm,
+            stochastic_rounding=False,
+            prefetch_pipeline=prefetch_pipeline,
+            learning_rate=lr,
         )
+
+        if use_int_weight:
+            min_val = -20
+            max_val = +20
+            for param in cc_ref.split_embedding_weights():
+                p = torch.randint(
+                    int(min_val),
+                    int(max_val) + 1,
+                    size=param.shape,
+                    device=param.device,
+                )
+                param.data.copy_(p)
+
         for t in range(T):
             self.assertEqual(
                 cc.split_embedding_weights()[t].size(),
@@ -3079,8 +3094,35 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                 cc_ref.split_embedding_weights()[t]
             )
 
-        requests = generate_requests(iters, B, T, L, min(Es), reuse=0.1)
-        grad_output = torch.randn(B, sum(Ds)).cuda()
+        return (cc, cc_ref, min(Es), sum(Ds))
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=1, max_value=20),
+        mixed=st.booleans(),
+        cache_algorithm=st.sampled_from(CacheAlgorithm),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_cache_pipeline(
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        mixed: bool,
+        cache_algorithm: CacheAlgorithm,
+    ) -> None:
+        cc, cc_ref, min_Es, sum_Ds = self._generate_cache_tbes(
+            T, D, B, log_E, L, mixed, cache_algorithm
+        )
+        iters = 3
+        requests = generate_requests(iters, B, T, L, min_Es, reuse=0.1)
+        grad_output = torch.randn(B, sum_Ds).cuda()
 
         for indices, offsets, _ in requests:
             output = cc(indices, offsets)
@@ -3093,6 +3135,184 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             torch.testing.assert_close(
                 cc.split_embedding_weights()[t], cc_ref.split_embedding_weights()[t]
             )
+
+    def _test_cache_prefetch_pipeline(  # noqa C901
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        mixed: bool,
+        prefetch_location: str,
+        prefetch_stream: Optional[torch.cuda.Stream],
+    ) -> None:
+        """
+        test cache prefetch pipeline with prefetch_pipeline=True.
+        prefetch_location can be "before_fwd" or "between_fwd_bwd",
+        where the TBE prefetch(batch_{i+1}) is called before forward(batch_i)
+        or in between of forward(batch_i) and backward(batch_i), respectively.
+        If prefetch_stream is not None, the TBE prefetch function will use this stream.
+        In addition, we make the TBE weights initialized as integer values, learning_rate
+        as integer value, and gradients as integer values so that the test is more stable.
+        """
+
+        assert prefetch_location in ["before_fwd", "between_fwd_bwd"]
+        cc, cc_ref, min_Es, sum_Ds = self._generate_cache_tbes(
+            T, D, B, log_E, L, mixed, CacheAlgorithm.LRU, True, True
+        )
+        iters = 5
+        requests = generate_requests(iters, B, T, L, min_Es, reuse=0.1)
+        grad_output = (
+            torch.randint(
+                low=-10,
+                high=10,
+                size=(B, sum_Ds),
+            )
+            .float()
+            .cuda()
+        )
+        torch.cuda.synchronize()  # make sure TBEs and inputs are ready
+        self.assertTrue(torch.all(cc.lxu_cache_locking_counter == 0))
+
+        cur_stream: torch.cuda.Stream = torch.cuda.current_stream()
+
+        req_iter = iter(requests)
+        batch_i = next(req_iter)
+        batch_ip1 = None
+        output, output_ref = None, None
+
+        def _prefetch(
+            cc: SplitTableBatchedEmbeddingBagsCodegen,
+            batch: Optional[Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]],
+        ) -> None:
+            if not batch:
+                return
+            context_stream = prefetch_stream if prefetch_stream else cur_stream
+            stream = cur_stream if prefetch_stream else None
+            indices, offsets, _ = batch
+            with torch.cuda.stream(context_stream):
+                cc.prefetch(indices, offsets, stream)
+
+        _prefetch(cc, batch_i)
+        while batch_i:
+            indices, offsets, _ = batch_i
+            batch_ip1 = next(req_iter, None)
+            if prefetch_stream:
+                cur_stream.wait_stream(prefetch_stream)
+            if prefetch_location == "before_fwd":
+                _prefetch(cc, batch_ip1)
+            output = cc(indices, offsets)
+            if prefetch_location == "between_fwd_bwd":
+                _prefetch(cc, batch_ip1)
+            output.backward(grad_output)
+            batch_i = batch_ip1
+            batch_ip1 = None
+        cc.flush()
+
+        for indices, offsets, _ in requests:
+            output_ref = cc_ref(indices, offsets)
+            output_ref.backward(grad_output)
+
+        for t in range(T):
+            torch.testing.assert_close(
+                cc.split_embedding_weights()[t], cc_ref.split_embedding_weights()[t]
+            )
+
+        torch.testing.assert_close(output, output_ref)
+        self.assertTrue(torch.all(cc.lxu_cache_locking_counter == 0))
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=1, max_value=20),
+        mixed=st.booleans(),
+        prefetch_location=st.sampled_from(["before_fwd", "between_fwd_bwd"]),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_cache_prefetch_pipeline(
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        mixed: bool,
+        prefetch_location: str,
+    ) -> None:
+        self._test_cache_prefetch_pipeline(
+            T,
+            D,
+            B,
+            log_E,
+            L,
+            mixed,
+            prefetch_location,
+            prefetch_stream=None,
+        )
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=1, max_value=20),
+        mixed=st.booleans(),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_cache_prefetch_pipeline_stream_1(
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        mixed: bool,
+    ) -> None:
+        self._test_cache_prefetch_pipeline(
+            T,
+            D,
+            B,
+            log_E,
+            L,
+            mixed,
+            prefetch_location="before_fwd",
+            prefetch_stream=torch.cuda.Stream(),
+        )
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        T=st.integers(min_value=1, max_value=5),
+        D=st.integers(min_value=2, max_value=256),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=1, max_value=20),
+        mixed=st.booleans(),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_cache_prefetch_pipeline_stream_2(
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+        mixed: bool,
+    ) -> None:
+        self._test_cache_prefetch_pipeline(
+            T,
+            D,
+            B,
+            log_E,
+            L,
+            mixed,
+            prefetch_location="between_fwd_bwd",
+            prefetch_stream=torch.cuda.Stream(),
+        )
 
     def execute_backward_optimizers_(  # noqa C901
         self,
@@ -4620,13 +4840,9 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             # cache status; we use the exact same logic, but still assigning ways in a associative cache can be
             # arbitrary. We compare sum along ways in each set, instead of expecting exact tensor match.
             cache_weights_ref = torch.reshape(
-                # pyre-fixme[6]: For 1st param expected `Tensor` but got
-                #  `Union[Tensor, Module]`.
                 cc_ref.lxu_cache_weights,
                 [-1, associativity],
             )
-            # pyre-fixme[6]: For 1st param expected `Tensor` but got `Union[Tensor,
-            #  Module]`.
             cache_weights = torch.reshape(cc.lxu_cache_weights, [-1, associativity])
             torch.testing.assert_close(
                 torch.sum(cache_weights_ref, 1),
@@ -4634,26 +4850,16 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                 equal_nan=True,
             )
             torch.testing.assert_close(
-                # pyre-fixme[6]: For 1st param expected `Tensor` but got
-                #  `Union[Tensor, Module]`.
                 torch.sum(cc.lxu_cache_state, 1),
-                # pyre-fixme[6]: For 1st param expected `Tensor` but got
-                #  `Union[Tensor, Module]`.
                 torch.sum(cc_ref.lxu_cache_state, 1),
                 equal_nan=True,
             )
             # lxu_state can be different as time_stamp values can be different.
             # we check the entries with max value.
-            # pyre-fixme[6]: For 1st param expected `Tensor` but got `Union[Tensor,
-            #  Module]`.
             max_timestamp_ref = torch.max(cc_ref.lxu_state)
-            # pyre-fixme[6]: For 1st param expected `Tensor` but got `Union[Tensor,
-            #  Module]`.
             max_timestamp_uvm_caching = torch.max(cc.lxu_state)
             x = cc_ref.lxu_state == max_timestamp_ref
             y = cc.lxu_state == max_timestamp_uvm_caching
-            # pyre-fixme[6]: For 1st param expected `Tensor` but got `Union[bool,
-            #  Tensor]`.
             torch.testing.assert_close(torch.sum(x, 1), torch.sum(y, 1))
 
             # int_nbit_split_embedding_uvm_caching_codegen_lookup_function for UVM.
@@ -5833,6 +6039,46 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             lxu_locations.cpu(),
             expected_result,
         )
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        cache_sets=st.integers(min_value=10, max_value=300),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_lxu_cache_locking_counter_decrement(
+        self,
+        cache_sets: int,
+    ) -> None:
+        warp_size = DEFAULT_ASSOC
+        N = cache_sets * warp_size
+        lxu_cache_locking_counter = torch.randint(
+            low=1,
+            high=3,
+            size=[cache_sets, warp_size],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        counter_ref = lxu_cache_locking_counter.tolist()
+        lxu_cache_locations_list = []
+        lxu_cache_locations_set = set()
+        for _ in range(3 * N):
+            location = random.randrange(-1, N)
+            lxu_cache_locations_list.append(location)
+            lxu_cache_locations_set.add(location)
+
+        for idx in lxu_cache_locations_set:
+            if idx >= 0:
+                q, r = idx // warp_size, idx % warp_size
+                counter_ref[q][r] -= 1
+
+        counter_ref = torch.tensor(counter_ref, device="cuda", dtype=torch.int32)
+        lxu_cache_locations = torch.tensor(
+            lxu_cache_locations_list, device="cuda", dtype=torch.int32
+        )
+        torch.ops.fbgemm.lxu_cache_locking_counter_decrement(
+            lxu_cache_locking_counter, lxu_cache_locations
+        )
+        self.assertTrue(torch.equal(lxu_cache_locking_counter, counter_ref))
 
     @unittest.skipIf(*gpu_unavailable)
     @given(
