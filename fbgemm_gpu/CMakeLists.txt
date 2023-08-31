@@ -202,7 +202,9 @@ set(CPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${CPU_ONLY_OPTIMIZERS})
 set(GPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${GPU_ONLY_OPTIMIZERS})
 
 # Optimizers with the VBE support
-set(VBE_OPTIMIZERS rowwise_adagrad)
+set(VBE_OPTIMIZERS
+    rowwise_adagrad
+    sgd)
 
 # Individual optimizers (not fused with SplitTBE backward)
 set(DEFUSED_OPTIMIZERS rowwise_adagrad)
@@ -217,9 +219,16 @@ set(gen_gpu_kernel_source_files
     "gen_embedding_forward_split_unweighted_codegen_cuda.cu"
     "gen_embedding_backward_dense_indice_weights_codegen_cuda.cu"
     "gen_embedding_backward_split_indice_weights_codegen_cuda.cu"
-    "gen_embedding_backward_split_grad.cu"
     "gen_embedding_forward_split_weighted_vbe_codegen_cuda.cu"
-    "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu")
+    "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_forward_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_forward_kernel.cu"
+    "gen_batch_index_select_dim0_forward_kernel_small.cu"
+    "gen_batch_index_select_dim0_backward_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_backward_kernel_cta.cu"
+    "gen_batch_index_select_dim0_backward_kernel_warp.cu"
+    "gen_embedding_backward_split_grad.cu"
+)
 
 if(NOT USE_ROCM)
   list(APPEND gen_gpu_kernel_source_files
@@ -344,6 +353,7 @@ set(embedding_codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_kernel_nobag_small_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_split_template.cu
     ${CMAKE_CODEGEN_DIR}/embedding_forward_template_helpers.cuh
+    ${CMAKE_CODEGEN_DIR}/embedding_op_registration.h
     ${CMAKE_CODEGEN_DIR}/__init__.template
     ${CMAKE_CODEGEN_DIR}/lookup_args.py
     ${CMAKE_CODEGEN_DIR}/split_embedding_codegen_lookup_invoker.template
@@ -514,6 +524,8 @@ if(NOT USE_ROCM AND CXX_AVX512_FOUND)
     ${fbgemm_sources}
     ${fbgemm_sources_avx2}
     ${fbgemm_sources_avx512})
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNO_AVX512=1")
 endif()
 
 set(fbgemm_sources_include_directories
@@ -556,9 +568,11 @@ set(fbgemm_gpu_sources_static_cpu
     src/input_combine_cpu.cpp
     src/layout_transform_ops_cpu.cpp
     src/quantize_ops/quantize_ops_cpu.cpp
+    src/quantize_ops/quantize_ops_meta.cpp
     src/sparse_ops/sparse_ops_cpu.cpp
     src/sparse_ops/sparse_ops_meta.cpp
-    src/embedding_inplace_update_cpu.cpp)
+    src/embedding_inplace_update_cpu.cpp
+    codegen/batch_index_select_dim0_cpu_host.cpp)
 
 if(NOT FBGEMM_CPU_ONLY)
   list(APPEND fbgemm_gpu_sources_static_cpu
@@ -575,7 +589,8 @@ if(NOT FBGEMM_CPU_ONLY)
     src/split_table_batched_embeddings.cpp
     src/metric_ops_host.cpp
     src/embedding_inplace_update_gpu.cpp
-    src/input_combine_gpu.cpp)
+    src/input_combine_gpu.cpp
+    codegen/batch_index_select_dim0_host.cpp)
 
   if(NVML_LIB_PATH)
     message(STATUS "Found NVML_LIB_PATH: ${NVML_LIB_PATH}")

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+import os
 import random
 import unittest
 from ctypes import c_float, c_int32, cast, POINTER, pointer
@@ -13,7 +15,7 @@ import hypothesis.strategies as st
 import numpy as np
 import torch
 from fbgemm_gpu.split_embedding_configs import SparseType
-from hypothesis import assume, given, HealthCheck, settings
+from hypothesis import assume, given, HealthCheck, settings, Verbosity
 from torch import Tensor
 
 
@@ -30,7 +32,7 @@ try:
         fused_rowwise_nbit_quantize_reference,
         gpu_available,
         gpu_unavailable,
-        skipIfRocm,
+        symint_vector_unsupported,
     )
 except Exception:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
@@ -43,6 +45,7 @@ except Exception:
         fused_rowwise_nbit_quantize_reference,
         gpu_available,
         gpu_unavailable,
+        symint_vector_unsupported,
     )
 
 no_long_tests: bool = False
@@ -967,6 +970,105 @@ class TestBfloat16QuantizationConversion(unittest.TestCase):
             )
             # compare quantized data
             torch.testing.assert_close(dequantized_data_gpu.cpu(), dequantized_data)
+
+
+class TestFP8RowwiseQuantizationConversion(unittest.TestCase):
+    enable_logging: bool = False
+
+    def setUp(self) -> None:
+        self.enable_logging = bool(os.getenv("FBGEMM_GPU_ENABLE_LOGGING", 0))
+        if self.enable_logging:
+            logging.info("Enabled logging for TestFP8RowwiseQuantizationConversion")
+
+    @unittest.skipIf(*gpu_unavailable)
+    # pyre-fixme[56]:
+    @given(
+        batched=st.booleans(),
+        bs=st.integers(min_value=1, max_value=100),
+        m=st.integers(min_value=0, max_value=100),
+        n=st.integers(min_value=0, max_value=100),
+        forward=st.booleans(),
+        given_last_dim=st.booleans(),
+        dtype=st.sampled_from(
+            [
+                torch.float,
+                torch.half,
+                torch.bfloat16,
+            ],
+        ),
+        # if before PT 2.1, we don't support symint_vector, so turn it off
+        test_compile=st.booleans() if symint_vector_unsupported() else st.just(False),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=10, deadline=None)
+    def test_quantize_and_dequantize_op_fp8_rowwise(
+        self,
+        batched: bool,
+        bs: int,
+        m: int,
+        n: int,
+        forward: bool,
+        given_last_dim: bool,
+        dtype: torch.dtype,
+        test_compile: bool,
+    ) -> None:
+        n = n * 4  # need (n % 4 == 0)
+        input_data = (
+            torch.rand(bs, m, n, dtype=dtype)
+            if batched
+            else torch.rand(bs * m, n, dtype=dtype)
+        )
+
+        input_data_gpu = input_data.cuda()
+        quantized_data_gpu = torch.ops.fbgemm.FloatToFP8RowwiseQuantized(
+            input_data_gpu, forward=forward
+        )
+        quantize_func = (
+            torch.compile(
+                torch.ops.fbgemm.FP8RowwiseQuantizedToFloat,
+                dynamic=True,
+                fullgraph=True,
+            )
+            if test_compile
+            else torch.ops.fbgemm.FP8RowwiseQuantizedToFloat
+        )
+
+        if test_compile:
+            torch._dynamo.mark_dynamic(quantized_data_gpu, 0)
+            torch._dynamo.mark_dynamic(quantized_data_gpu, 1)
+
+        dequantized_data_gpu = quantize_func(
+            quantized_data_gpu,
+            forward=forward,
+            output_dtype=SparseType.FP32.as_int()
+            if dtype == torch.float
+            else (
+                SparseType.FP16.as_int()
+                if dtype == torch.half
+                else SparseType.BF16.as_int()
+            ),
+        )
+
+        if m == 0 or n == 0:
+            assert dequantized_data_gpu.numel() == 0
+            return
+
+        assert (
+            dequantized_data_gpu.dtype == dtype
+        ), "result is {dequantized_data_gpu.dtype} type, but expected {dtype}"
+        qref = input_data_gpu.float()
+        dq = dequantized_data_gpu.float()
+
+        if self.enable_logging:
+            # Logging quantization errors
+            errors = (qref - dq) / (qref + 1e-5)
+            logging.info(f"max relative error {errors.abs().max()}")
+            val, idx = torch.topk(errors.flatten().abs(), k=min(10, errors.shape[-1]))
+            logging.info(f"top-10 errors {val}")
+            logging.info(f"ref data {input_data_gpu.flatten()}")
+            logging.info(f"dequantized data {dequantized_data_gpu.flatten()}")
+            logging.info(f"max relative error {errors.flatten()[idx]}")
+
+        torch.testing.assert_close(qref.cpu(), dq.cpu(), rtol=0.1, atol=0.05)
 
 
 if __name__ == "__main__":

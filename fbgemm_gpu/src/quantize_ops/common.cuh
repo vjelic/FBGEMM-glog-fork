@@ -18,6 +18,7 @@
 #include <ATen/core/TensorAccessor.h>
 #include <ATen/native/TensorIterator.h>
 #include <ATen/native/cuda/Loops.cuh>
+#include "fbgemm_gpu/dispatch_macros.h"
 #include "fbgemm_gpu/embedding_common.h"
 #include "fbgemm_gpu/fbgemm_cuda_utils.cuh"
 #include "fbgemm_gpu/ops_utils.h"
@@ -30,21 +31,3 @@
 #define QUANTIZE_OPS_MIN(a, b) ((a) < (b) ? (a) : (b))
 
 using Tensor = at::Tensor;
-
-namespace fbgemm_gpu {
-
-namespace {
-
-template <typename T>
-__device__ inline __attribute__((always_inline)) T
-quantize_ops_shfl_xor(const T val, int laneMask, int width) {
-#if defined(__HIP_PLATFORM_HCC__) || CUDA_VERSION < 9000
-  return __shfl_xor(val, laneMask, width);
-#else
-  return __shfl_xor_sync(0xffffffff, val, laneMask, width);
-#endif
-}
-
-} // namespace
-
-} // namespace fbgemm_gpu

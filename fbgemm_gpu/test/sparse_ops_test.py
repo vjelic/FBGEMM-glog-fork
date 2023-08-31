@@ -8,7 +8,9 @@
 # pyre-ignore-all-errors[56]
 
 import contextlib
+import functools
 import itertools
+import logging
 import random
 import unittest
 from itertools import accumulate
@@ -28,6 +30,7 @@ try:
 except Exception:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_cpu")
+    torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu/codegen:index_select_ops")
     from fbgemm_gpu.test.test_utils import gpu_available, gpu_unavailable, skipIfRocm
 
 
@@ -95,6 +98,12 @@ class SparseOpsTest(unittest.TestCase):
         is_1D: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         T = lengths.size(0)
+        B = lengths.size(1)
+        if T == 0 or B == 0:
+            if is_1D:
+                lengths = lengths.view(-1)
+            return lengths, indices, weights
+
         if is_1D:
             permuted_lengths = torch.index_select(lengths.view(-1), 0, permute).view(-1)
             original_segment_lengths = lengths.view(-1)
@@ -141,8 +150,8 @@ class SparseOpsTest(unittest.TestCase):
         return permuted_lengths, permuted_indices, permuted_weights
 
     @given(
-        B=st.integers(min_value=1, max_value=20),
-        T=st.integers(min_value=1, max_value=20),
+        B=st.integers(min_value=0, max_value=20),
+        T=st.integers(min_value=0, max_value=20),
         L=st.integers(min_value=2, max_value=20),
         long_index=st.booleans(),
         has_weight=st.booleans(),
@@ -163,7 +172,10 @@ class SparseOpsTest(unittest.TestCase):
         index_dtype = torch.int64 if long_index else torch.int32
         length_splits: Optional[List[torch.Tensor]] = None
         if is_1D:
-            batch_sizes = [random.randint(a=1, b=B) for i in range(W)]
+            if B == 0:
+                batch_sizes = [0] * W
+            else:
+                batch_sizes = [random.randint(a=1, b=B) for i in range(W)]
             length_splits = [
                 torch.randint(low=1, high=L, size=(T, batch_sizes[i])).type(index_dtype)
                 for i in range(W)
@@ -582,6 +594,15 @@ class SparseOpsTest(unittest.TestCase):
             ),
             zc.cpu(),
         )
+
+        # meta tests
+        mx = torch.randint(low=0, high=100, size=(n,)).type(index_dtype).to("meta")
+        # mze = torch.ops.fbgemm.asynchronous_exclusive_cumsum(mx)
+        # mzi = torch.ops.fbgemm.asynchronous_inclusive_cumsum(mx)
+        mzc = torch.ops.fbgemm.asynchronous_complete_cumsum(mx)
+        # self.assertEqual(ze.size(), mze.size())
+        # self.assertEqual(zi.size(), mzi.size())
+        self.assertEqual(zc.size(), mzc.size())
 
         if gpu_available:
             x = x.cuda()
@@ -1061,6 +1082,93 @@ class SparseOpsTest(unittest.TestCase):
         reordered_cat_ad_indices = torch.ops.fbgemm.reorder_batched_ad_indices(
             cat_ad_offsets,
             cat_ad_indices,
+            reordered_cat_ad_offsets,
+            batch_offsets,
+            num_ads_in_batch,
+            broadcast_indices,
+            B * T * A * L,
+        )
+        torch.testing.assert_close(
+            reordered_cat_ad_indices.view(T, B, A, L).permute(1, 0, 2, 3),
+            cat_ad_indices.view(B, T, 1, L).tile([1, 1, A, 1])
+            if broadcast_indices
+            else cat_ad_indices.view(B, T, A, L),
+        )
+
+    @given(
+        B=st.integers(min_value=1, max_value=20),
+        T=st.integers(min_value=1, max_value=20),
+        L=st.integers(min_value=2, max_value=20),
+        A=st.integers(min_value=1, max_value=20),
+        Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
+        Itype=st.sampled_from([torch.int32, torch.int64]),
+        broadcast_indices=st.booleans(),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
+    def test_cat_reorder_batched_ad_indices_cpu(
+        self,
+        B: int,
+        T: int,
+        L: int,
+        A: int,
+        Dtype: torch.dtype,
+        Itype: torch.dtype,
+        broadcast_indices: bool,
+    ) -> None:
+        if broadcast_indices:
+            ad_indices = [
+                (
+                    torch.randint(
+                        low=0,
+                        high=100,
+                        size=(T * L,),
+                    )
+                    .int()
+                    .to(Dtype)
+                )
+                for _ in range(B)
+            ]
+            cat_ad_lengths = torch.cat(
+                [torch.tensor([L for _ in range(T)]) for _ in range(B)],
+                0,
+            ).int()
+            cat_ad_lengths_broadcasted = cat_ad_lengths.tile([A])
+            cat_ad_indices = torch.cat(ad_indices, 0)
+        else:
+            ad_indices = [
+                (
+                    torch.randint(
+                        low=0,
+                        high=100,
+                        size=(T * A * L,),
+                    )
+                    .int()
+                    .to(Dtype)
+                )
+                for _ in range(B)
+            ]
+            cat_ad_lengths = torch.cat(
+                [torch.tensor([L for _ in range(T * A)]) for _ in range(B)],
+                0,
+            ).int()
+            cat_ad_lengths_broadcasted = cat_ad_lengths
+            cat_ad_indices = torch.cat(ad_indices, 0)
+        batch_offsets = torch.tensor([A * b for b in range(B + 1)]).int()
+        num_ads_in_batch = B * A
+        reordered_cat_ad_lengths = torch.ops.fbgemm.reorder_batched_ad_lengths(
+            cat_ad_lengths, batch_offsets, num_ads_in_batch, broadcast_indices
+        )
+        torch.testing.assert_close(cat_ad_lengths_broadcasted, reordered_cat_ad_lengths)
+
+        cat_ad_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
+            cat_ad_lengths
+        ).to(Itype)
+        reordered_cat_ad_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
+            reordered_cat_ad_lengths
+        ).to(Itype)
+        reordered_cat_ad_indices = torch.ops.fbgemm.cat_reorder_batched_ad_indices(
+            cat_ad_offsets,
+            ad_indices,
             reordered_cat_ad_offsets,
             batch_offsets,
             num_ads_in_batch,
@@ -1822,23 +1930,31 @@ class SparseOpsTest(unittest.TestCase):
 
     @given(
         num_indices=st.integers(1, 32),
-        num_input_rows=st.integers(1, 32),
+        max_num_input_rows=st.integers(1, 32),
         shape=st.lists(st.integers(1, 32), min_size=1, max_size=2),
         dtype=st.sampled_from([torch.float, torch.half, torch.double]),
         use_cpu=st.booleans() if gpu_available else st.just(True),
         num_groups=st.integers(1, 32),
         use_var_cols=st.booleans(),
+        use_var_num_input_rows=st.booleans(),
+        check_non_contiguous=st.booleans(),
     )
-    @settings(max_examples=20, deadline=None)
+    @settings(
+        verbosity=Verbosity.verbose,
+        max_examples=20,
+        deadline=None,
+    )
     def test_group_index_select_dim0(
         self,
         num_indices: int,
-        num_input_rows: int,
+        max_num_input_rows: int,
         shape: List[int],
         dtype: torch.dtype,
         use_cpu: bool,
         num_groups: int,
         use_var_cols: bool,
+        use_var_num_input_rows: bool,
+        check_non_contiguous: bool,
     ) -> None:
         device = torch.device("cpu" if use_cpu else "cuda")
 
@@ -1847,6 +1963,14 @@ class SparseOpsTest(unittest.TestCase):
         indices_group: List[torch.Tensor] = []
         grad_group: List[torch.Tensor] = []
         for _ in range(num_groups):
+            if use_var_num_input_rows:
+                num_input_rows = (
+                    random.randint(1, max_num_input_rows)
+                    if max_num_input_rows > 1
+                    else 1
+                )
+            else:
+                num_input_rows = max_num_input_rows
             indices = torch.randint(num_input_rows, (num_indices,), device=device)
             assert indices.max() < num_input_rows
 
@@ -1882,8 +2006,31 @@ class SparseOpsTest(unittest.TestCase):
         for out, grad in zip(output_ref_group, grad_group):
             out.backward(grad)
 
-        cat_output = torch.concat([output.flatten() for output in output_group])
-        cat_grad = torch.concat([grad.flatten() for grad in grad_group])
+        cat_output = torch.concat(
+            [
+                (
+                    # Transpose is likely going to make the tensor
+                    # noncontiguous
+                    output.transpose(1, 0).flatten()
+                    if check_non_contiguous
+                    else output.flatten()
+                )
+                for output in output_group
+            ]
+        )
+
+        cat_grad = torch.concat(
+            [
+                (
+                    # Transpose is likely going to make the tensor
+                    # noncontiguous
+                    grad.transpose(1, 0).flatten()
+                    if check_non_contiguous
+                    else grad.flatten()
+                )
+                for grad in grad_group
+            ]
+        )
         cat_output.backward(cat_grad)
 
         def compare_tensor_groups(
@@ -1950,6 +2097,157 @@ class SparseOpsTest(unittest.TestCase):
             all_indices[index_tuple][:L] = sorted(r)
         all_indices_deduped_ref = torch.as_tensor(all_indices[:, :, :L])
         torch.testing.assert_close(all_indices_deduped, all_indices_deduped_ref)
+
+    @given(
+        num_inputs=st.integers(0, 100),
+        max_input_rows=st.integers(2, 32),
+        max_cols_factor=st.integers(2, 256),
+        max_output_rows=st.integers(2, 32),
+        permute_output_dim_0_1=st.booleans(),
+        dtype=st.sampled_from([torch.float, torch.half]),
+        use_cpu=st.booleans() if gpu_available else st.just(True),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
+    def test_batch_index_select_dim0(
+        self,
+        num_inputs: int,
+        max_input_rows: int,
+        max_cols_factor: int,
+        max_output_rows: int,
+        permute_output_dim_0_1: bool,
+        dtype: torch.dtype,
+        use_cpu: bool,
+    ) -> None:
+        device = "cpu" if use_cpu else "cuda"
+        input_rows = torch.randint(
+            low=1, high=max_input_rows, size=(num_inputs,)
+        ).tolist()
+        input_columns = (
+            torch.randint(low=1, high=max_cols_factor, size=(num_inputs,)) * 4
+        ).tolist()
+        if permute_output_dim_0_1:
+            # All num_indices must be the same if permute_output_dim_0_1 is
+            # True
+            num_indices = torch.randint(low=1, high=max_output_rows, size=(1,)).item()
+            input_num_indices = [num_indices] * num_inputs
+        else:
+            input_num_indices = torch.randint(
+                low=1, high=max_output_rows, size=(num_inputs,)
+            ).tolist()
+
+        def validate(
+            test_list: List[torch.Tensor],
+            ref_list: List[torch.Tensor],
+            rows: List[int],
+            val_fn: Callable[[torch.Tensor, torch.Tensor], bool],
+            name: str,
+        ) -> None:
+            test_passed_all = True
+            error_msg = ""
+            for i, (test, ref) in enumerate(zip(test_list, ref_list)):
+                test = test.float()
+                ref = ref.float()
+                test_passed = val_fn(test, ref)
+                test_passed_all = test_passed & test_passed_all
+                if not test_passed:
+                    test = test.reshape(rows[i], -1)
+                    ref = ref.reshape(rows[i], -1)
+                    for r in range(rows[i]):
+                        test_row = test[r]
+                        ref_row = ref[r]
+                        if not val_fn(test_row, ref_row):
+                            error_msg += f"ERROR: {name} {i} row {r} are different, test {test_row}, ref {ref_row}\n"
+            assert test_passed_all, error_msg
+            logging.info(f"{name} test passed")
+
+        if num_inputs == 0:
+            inputs = [torch.empty(0, dtype=dtype, device=device)]
+            indices = [torch.empty(0, dtype=torch.long, device=device)]
+        else:
+            inputs = [
+                torch.rand(rows, cols, dtype=dtype, device=device)
+                for rows, cols in zip(input_rows, input_columns)
+            ]
+            indices = [
+                torch.randint(
+                    low=0, high=rows, size=(num,), dtype=torch.long, device=device
+                )
+                for num, rows in zip(input_num_indices, input_rows)
+            ]
+
+        for i in range(len(inputs)):
+            inputs[i].requires_grad = True
+
+        output_ref = [
+            input.index_select(dim=0, index=index).flatten()
+            for input, index in zip(inputs, indices)
+        ]
+
+        concat_inputs = torch.concat(
+            [input.flatten().clone().detach() for input in inputs]
+        )
+        concat_indices = torch.concat(indices)
+
+        concat_inputs.requires_grad = True
+
+        output_test = torch.ops.fbgemm.batch_index_select_dim0(
+            concat_inputs,
+            concat_indices,
+            input_num_indices,
+            input_rows,
+            input_columns,
+            permute_output_dim_0_1,
+        )
+
+        if permute_output_dim_0_1 and num_inputs > 0:
+            output_list = output_test.view(input_num_indices[0], -1).split(
+                input_columns,
+                dim=1,
+            )
+            output_list = [out.flatten() for out in output_list]
+        else:
+            output_list = output_test.split(
+                [rows * cols for rows, cols in zip(input_num_indices, input_columns)]
+            )
+
+        validate(output_list, output_ref, input_num_indices, torch.equal, "output")
+
+        if num_inputs == 0:
+            grads = [torch.empty(0, dtype=dtype, device=device)]
+        else:
+            grads = [torch.rand_like(output) for output in output_ref]
+        for out_ref, grad in zip(output_ref, grads):
+            out_ref.backward(grad)
+
+        if permute_output_dim_0_1 and num_inputs > 0:
+            concat_grads = torch.concat(
+                [grad.view(input_num_indices[0], -1) for grad in grads], dim=1
+            ).flatten()
+        else:
+            concat_grads = torch.concat(grads)
+
+        assert concat_grads.shape == output_test.shape
+        output_test.backward(concat_grads)
+
+        assert concat_inputs.grad is not None
+        grad_list = concat_inputs.grad.split(
+            [rows * cols for rows, cols in zip(input_rows, input_columns)]
+        )
+
+        grad_ref = []
+        for input in inputs:
+            assert input.grad is not None
+            grad_ref.append(input.grad.flatten())
+
+        tol = 1.0e-4 if dtype == torch.float else 1.0e-2
+
+        validate(
+            grad_list,
+            grad_ref,
+            input_rows,
+            functools.partial(torch.allclose, atol=tol, rtol=tol),
+            "grad",
+        )
 
 
 if __name__ == "__main__":

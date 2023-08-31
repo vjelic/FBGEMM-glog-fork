@@ -912,6 +912,8 @@ Tensor jagged_1d_to_truncated_values_cpu(
   return truncated_values;
 }
 
+} // namespace
+
 std::tuple<Tensor, Tensor> masked_select_jagged_1d(
     const Tensor& values,
     const Tensor& lengths,
@@ -965,8 +967,6 @@ std::tuple<Tensor, Tensor> masked_select_jagged_1d(
 
   return {masked_values, masked_lengths};
 }
-
-} // namespace
 
 Tensor
 jagged_2d_to_dense_forward_cpu(Tensor values, Tensor offsets, int64_t max_L) {
@@ -1608,9 +1608,9 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "dense_to_jagged_forward(Tensor dense, Tensor[] x_offsets, SymInt? total_L=None) -> Tensor");
   m.def(
-      "jagged_2d_to_dense(Tensor values, Tensor offsets, int max_sequence_length) -> Tensor");
+      "jagged_2d_to_dense(Tensor values, Tensor offsets, SymInt max_sequence_length) -> Tensor");
   m.def(
-      "jagged_1d_to_dense(Tensor values, Tensor offsets, int max_sequence_length, int padding_value) -> Tensor");
+      "jagged_1d_to_dense(Tensor values, Tensor offsets, SymInt max_sequence_length, int padding_value) -> Tensor");
   m.def(
       "stacked_jagged_2d_to_dense_forward(Tensor values, Tensor lengths, int[] offset_per_key, int[] max_lengths_per_key, int padding_value = 0) -> (Tensor[], Tensor[])");
   m.def(
@@ -1620,7 +1620,7 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "stacked_jagged_2d_to_dense(Tensor values, Tensor lengths, int[] offset_per_key, int[] max_lengths_per_key, int padding_value = 0) -> Tensor[]");
   m.def(
-      "jagged_to_padded_dense(Tensor values, Tensor[] offsets, int[] max_lengths, float padding_value = 0) -> Tensor");
+      "jagged_to_padded_dense(Tensor values, Tensor[] offsets, SymInt[] max_lengths, float padding_value = 0) -> Tensor");
   m.def(
       "jagged_to_padded_dense_forward(Tensor values, Tensor[] offsets, SymInt[] max_lengths, float padding_value = 0) -> Tensor");
   m.def(
@@ -1679,7 +1679,9 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "jagged_slice_forward(Tensor x_values, Tensor x_lengths, Tensor src_start, Tensor output_lengths, Tensor tgt_start, int num_output_rows, int slice_length, bool fill_zeros) -> Tensor");
   m.def(
-      "jagged_unique_indices(Tensor hash_size_cumsum, Tensor offsets, Tensor indices) -> (Tensor, Tensor, Tensor)");
+      "jagged_unique_indices(Tensor hash_size_cumsum, Tensor hash_size_offsets, Tensor offsets, Tensor indices) -> (Tensor, Tensor, Tensor, Tensor)");
+  m.def(
+      "jagged_hash_size_cumsum(Tensor offsets, Tensor indices, int batch_size) -> (Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(fbgemm, CPU, m) {
@@ -1730,6 +1732,7 @@ TORCH_LIBRARY_IMPL(fbgemm, CPU, m) {
   DISPATCH_TO_CPU(
       "jagged_index_select_2d_forward",
       fbgemm_gpu::jagged_index_select_2d_forward_cpu);
+  DISPATCH_TO_CPU("jagged_index_select", fbgemm_gpu::jagged_index_select_2d);
   DISPATCH_TO_CPU(
       "jagged_index_add_2d_forward",
       fbgemm_gpu::jagged_index_add_2d_forward_cpu);
