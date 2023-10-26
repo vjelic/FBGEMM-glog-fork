@@ -18,4 +18,9 @@ except Exception as e:
 # Use existence to check if fbgemm_gpu_py.so has already been loaded
 open_source: bool = True
 
-from . import _fbgemm_gpu_docs  # noqa: F401, E402
+# Re-export docs
+# Trigger meta registrations
+from . import _fbgemm_gpu_docs, sparse_operators  # noqa: F401, E402  # noqa: F401, E402
+
+# Re-export the version string from the auto-generated version file
+from ._fbgemm_gpu_version import __version__  # noqa: F401, E402

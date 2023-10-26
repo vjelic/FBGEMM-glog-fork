@@ -459,7 +459,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
 
     // V100: 96 KB; A100: 160 KB; H100: 228 KB.
     int max_shared_bytes = 0;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
     cudaDeviceGetAttribute(&max_shared_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev_weights.get_device());
 #else
     // MI100 has 64 KB local memory (shared memory) per workgroup
@@ -468,7 +468,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     int shared_kb = max_shared_bytes >> 10;
     // V100: 64 KB; A100: 96 KB; H100: 144 KB
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
     // Use 2/3 of the available GPU shared mem; leave rooms for L1$.
     int used_shared_kb = round_down(shared_kb * 2 / 3, 16);
     TORCH_CHECK_GT(used_shared_kb, 0);
@@ -524,8 +524,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
             linear_indices.numel(),
             0,
             total_hash_size_bits,
-            at::cuda::getCurrentCUDAStream(),
-            false));
+            at::cuda::getCurrentCUDAStream()));
         auto temp_storage = at::empty(
             {static_cast<int64_t>(temp_storage_bytes)},
             indices.options().dtype(at::kByte));
@@ -539,8 +538,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
             linear_indices.numel(),
             0,
             total_hash_size_bits,
-            at::cuda::getCurrentCUDAStream(),
-            false));
+            at::cuda::getCurrentCUDAStream()));
     }
     {%- endif %}
 
@@ -568,8 +566,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                 linear_indices.numel(),
                 0,
                 total_hash_size_bits,
-                at::cuda::getCurrentCUDAStream(),
-                false));
+                at::cuda::getCurrentCUDAStream()));
             auto temp_storage = at::empty(
                 {static_cast<int64_t>(temp_storage_bytes)},
                 indices.options().dtype(at::kByte));
@@ -583,8 +580,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                 linear_indices.numel(),
                 0,
                 total_hash_size_bits,
-                at::cuda::getCurrentCUDAStream(),
-                false));
+                at::cuda::getCurrentCUDAStream()));
             }
             {%- endif %}
 
@@ -744,7 +740,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                          kMaxVecsPerThread,
                          kThreadGroupSize>;
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
                 cudaFuncSetAttribute(
                     backward_cta_per_row_kernel,
                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -855,7 +851,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                 if (std::is_same<emb_t, uint8_t>::value) {
                     shmem_bytes = BT_block_size * sizeof(
                         at::acc_type<cache_t, true>) * 4 * kWarpSize * kMaxVecsPerThread;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
                     cudaFuncSetAttribute(
                         backward_warp_per_row_kernel,
                         cudaFuncAttributeMaxDynamicSharedMemorySize,
