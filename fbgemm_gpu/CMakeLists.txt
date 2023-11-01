@@ -561,6 +561,8 @@ set(fbgemm_gpu_sources_static_cpu
     codegen/embedding_forward_quantized_host_cpu.cpp
     codegen/embedding_backward_dense_host_cpu.cpp
     codegen/embedding_bounds_check_host_cpu.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_function.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_cpu.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split_cpu.cpp
     src/jagged_tensor_ops/jagged_tensor_ops_autograd.cpp
     src/jagged_tensor_ops/jagged_tensor_ops_meta.cpp
@@ -572,6 +574,11 @@ set(fbgemm_gpu_sources_static_cpu
     src/sparse_ops/sparse_ops_cpu.cpp
     src/sparse_ops/sparse_ops_meta.cpp
     src/embedding_inplace_update_cpu.cpp
+    src/split_embeddings_cache/linearize_cache_indices.cpp
+    src/split_embeddings_cache/lfu_cache_populate_byte.cpp
+    src/split_embeddings_cache/lru_cache_populate_byte.cpp
+    src/split_embeddings_cache/lxu_cache.cpp
+    src/split_embeddings_cache/split_embeddings_cache_ops.cpp
     codegen/batch_index_select_dim0_cpu_host.cpp)
 
 if(NOT FBGEMM_CPU_ONLY)
@@ -586,7 +593,7 @@ if(NOT FBGEMM_CPU_ONLY)
     src/quantize_ops/quantize_ops_gpu.cpp
     src/sparse_ops/sparse_ops_gpu.cpp
     src/split_embeddings_utils.cpp
-    src/split_table_batched_embeddings.cpp
+    src/split_embeddings_cache/split_embeddings_cache_ops.cu
     src/metric_ops_host.cpp
     src/embedding_inplace_update_gpu.cpp
     src/input_combine_gpu.cpp
@@ -673,7 +680,15 @@ if(NOT FBGEMM_CPU_ONLY)
       src/sparse_ops/sparse_reorder_batched_ad.cu
       src/sparse_ops/sparse_segment_sum_csr.cu
       src/sparse_ops/sparse_zipf.cu
-      src/split_embeddings_cache_cuda.cu
+      src/split_embeddings_cache/lfu_cache_find.cu
+      src/split_embeddings_cache/lfu_cache_populate.cu
+      src/split_embeddings_cache/lfu_cache_populate_byte.cu
+      src/split_embeddings_cache/lru_cache_find.cu
+      src/split_embeddings_cache/lru_cache_populate.cu
+      src/split_embeddings_cache/lru_cache_populate_byte.cu
+      src/split_embeddings_cache/lxu_cache.cu
+      src/split_embeddings_cache/linearize_cache_indices.cu
+      src/split_embeddings_cache/reset_weight_momentum.cu
       src/split_embeddings_utils.cu)
 
   set_source_files_properties(${fbgemm_gpu_sources_static_gpu}

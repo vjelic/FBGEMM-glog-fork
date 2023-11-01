@@ -13,6 +13,19 @@
 ///@defgroup table-batched-embed-cuda CUDA Operators
 /// The following are CUDA Operators
 
+namespace fbgemm_gpu {
+
+enum uvm_cache_stats_index {
+  num_calls = 0,
+  num_requested_indices = 1,
+  num_unique_indices = 2,
+  num_unique_misses = 3,
+  num_conflict_unique_misses = 4,
+  num_conflict_misses = 5,
+};
+
+} // namespace fbgemm_gpu
+
 ///@ingroup table-batched-embed-cuda
 /// Deduplicate indices.
 std::tuple<at::Tensor, at::Tensor, c10::optional<at::Tensor>>
@@ -114,7 +127,9 @@ void direct_mapped_lru_cache_populate_byte_cuda(
     int64_t time_stamp,
     at::Tensor lru_state,
     at::Tensor lxu_cache_miss_timestamp,
-    int64_t row_alignment);
+    int64_t row_alignment,
+    bool gather_cache_stats,
+    c10::optional<at::Tensor> uvm_cache_stats);
 
 ///@ingroup table-batched-embed-cuda
 /// LFU cache: fetch the rows corresponding to `linear_cache_indices` from
@@ -174,7 +189,9 @@ at::Tensor emulate_cache_miss(
 at::Tensor direct_mapped_lxu_cache_lookup_cuda(
     at::Tensor linear_cache_indices,
     at::Tensor lxu_cache_state,
-    int64_t invalid_index);
+    int64_t invalid_index,
+    bool gather_cache_stats,
+    c10::optional<at::Tensor> uvm_cache_stats);
 
 //////@ingroup table-batched-embed-cuda
 /// Flush the cache: store the weights from the cache to the backing storage.

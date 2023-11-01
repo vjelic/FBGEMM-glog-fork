@@ -24,6 +24,7 @@
 #include "fbgemm_gpu/cub_namespace_postfix.cuh"
 // clang-format on
 
+#include "fbgemm_gpu/dispatch_macros.h"
 #include "fbgemm_gpu/fbgemm_cuda_utils.cuh"
 #include "fbgemm_gpu/fbgemm_tensor_accessor.h"
 #include "fbgemm_gpu/ops_utils.h"
@@ -660,7 +661,7 @@ inline bool jagged_dense_dense_elementwise_jagged_output_matches_opt(
   matches &= (y_0_reshaped.size(1) < INT_MAX);
 
   int max_shared_bytes;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
   C10_CUDA_CHECK(cudaDeviceGetAttribute(
       &max_shared_bytes,
       cudaDevAttrMaxSharedMemoryPerBlockOptin,
@@ -670,7 +671,7 @@ inline bool jagged_dense_dense_elementwise_jagged_output_matches_opt(
   max_shared_bytes = 64 << 10;
 #endif
   int shared_kb = max_shared_bytes >> 10;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
   // Use 2/3 of the available GPU shared mem; leave rooms for L1$.
   int used_shared_kb = round_down(shared_kb * 2 / 3, 16);
   TORCH_CHECK(used_shared_kb > 0);
@@ -778,7 +779,7 @@ void jagged_dense_elementwise_jagged_output_opt_(
               at::cuda::getCurrentDeviceProperties()->sharedMemPerBlock;
           if (dynamic_smem_size > cur_max_shared_bytes) {
             int max_shared_bytes;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             C10_CUDA_CHECK(cudaDeviceGetAttribute(
                 &max_shared_bytes,
                 cudaDevAttrMaxSharedMemoryPerBlockOptin,
@@ -788,7 +789,7 @@ void jagged_dense_elementwise_jagged_output_opt_(
             max_shared_bytes = 64 << 10;
 #endif
             int shared_kb = max_shared_bytes >> 10;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             // Use 2/3 of the available GPU shared mem; leave rooms for L1$.
             int used_shared_kb = round_down(shared_kb * 2 / 3, 16);
             TORCH_CHECK(used_shared_kb > 0);
@@ -797,7 +798,7 @@ void jagged_dense_elementwise_jagged_output_opt_(
             int used_shared_kb = shared_kb;
 #endif
             int used_shared_bytes = used_shared_kb << 10;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             C10_CUDA_CHECK(cudaFuncSetAttribute(
                 jagged_dense_dense_elementwise_jagged_output_opt_search_kernel_<
                     index_t>,
