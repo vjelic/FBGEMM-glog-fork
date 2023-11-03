@@ -17,6 +17,8 @@ import unittest
 from itertools import accumulate
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
+import fbgemm_gpu
+
 import hypothesis.strategies as st
 import numpy as np
 import torch
@@ -2415,16 +2417,14 @@ additional_decorators: Dict[str, List[Callable]] = {
     "test_faketensor__test_index_select_dim0": [unittest.skip("hangs")],
     "test_autograd_registration__test_index_select_dim0": [unittest.skip("hangs")],
     "test_schema__test_index_select_dim0": [unittest.skip("hangs")],
-    "test_aot_dispatch_static__test_group_index_select_dim0": [
-        unittest.skip("CUDA memory error")
-    ],
-    "test_aot_dispatch_dynamic__test_group_index_select_dim0": [
-        unittest.skip("CUDA memory error")
-    ],
 }
 
 # only generate tests on nightly pytorch (current release version is 2.1)
-if torch.__version__ >= "2.2.*":
+if (
+    torch.__version__ >= "2.2.*"
+    and hasattr(torch.library, "impl_abstract")
+    and not hasattr(fbgemm_gpu, "open_source")
+):
     generate_opcheck_tests(
         SparseOpsTest,
         ["fb", "fbgemm"],
