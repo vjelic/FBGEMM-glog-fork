@@ -13,6 +13,8 @@ import unittest
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import fbgemm_gpu
+
 import hypothesis.strategies as st
 import numpy as np
 import torch
@@ -204,7 +206,11 @@ def cpu_and_maybe_gpu() -> st.SearchStrategy[List[torch.device]]:
 
 
 def has_optests() -> bool:
-    return torch.__version__ >= "2.2.*"
+    return (
+        torch.__version__ >= "2.2.*"
+        and hasattr(torch.library, "impl_abstract")
+        and not hasattr(fbgemm_gpu, "open_source")
+    )
 
 
 class optests:
@@ -251,7 +257,6 @@ class optests:
             if not fast:
                 tests_to_run.extend(
                     [
-                        "test_aot_dispatch_static",
                         "test_aot_dispatch_dynamic",
                     ]
                 )
