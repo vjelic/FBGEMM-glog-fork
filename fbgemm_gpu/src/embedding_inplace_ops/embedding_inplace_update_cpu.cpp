@@ -62,9 +62,7 @@ void embedding_inplace_update_cpu_kernel(
 
     const uint8_t* __restrict__ update_weight_row =
         &update_weights[update_weight_offset];
-    for (const auto d : c10::irange(D_bytes)) {
-      weight_row[d] = update_weight_row[d];
-    }
+    memcpy(weight_row, update_weight_row, D_bytes);
   }
 }
 
@@ -167,19 +165,11 @@ Tensor pruned_array_lookup_from_row_idx_cpu(
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "emb_inplace_update(Tensor(a!) dev_weights, Tensor(b!) uvm_weights, Tensor weights_placements, Tensor weights_offsets, Tensor weights_tys, Tensor D_offsets, Tensor update_weights, Tensor update_table_indices, Tensor update_row_indices, Tensor update_offsets, int row_alignment=1, Tensor(c!)? lxu_cache_weights=None, Tensor? lxu_cache_locations=None) -> ()");
-}
-
-TORCH_LIBRARY_IMPL(fbgemm, CPU, m) {
-  DISPATCH_TO_CPU(
-      "emb_inplace_update", fbgemm_gpu::embedding_inplace_update_cpu);
-}
-
-TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "pruned_array_lookup_from_row_idx(Tensor update_row_indices, Tensor update_table_indices, Tensor index_remappings, Tensor index_remappings_offsets) -> Tensor");
-}
 
-TORCH_LIBRARY_IMPL(fbgemm, CPU, m) {
+  DISPATCH_TO_CPU(
+      "emb_inplace_update", fbgemm_gpu::embedding_inplace_update_cpu);
   DISPATCH_TO_CPU(
       "pruned_array_lookup_from_row_idx",
       fbgemm_gpu::pruned_array_lookup_from_row_idx_cpu);

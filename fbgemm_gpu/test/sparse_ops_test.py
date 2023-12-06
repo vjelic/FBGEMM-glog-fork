@@ -15,7 +15,7 @@ import os
 import random
 import unittest
 from itertools import accumulate
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Type, Union
 
 import fbgemm_gpu
 
@@ -38,7 +38,7 @@ except Exception:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_cpu")
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu/codegen:index_select_ops")
-    import fbgemm_gpu.sparse_operators  # noqa: F401, E402
+    import fbgemm_gpu.sparse_ops  # noqa: F401, E402
     from fbgemm_gpu.test.test_utils import gpu_available, gpu_unavailable, skipIfRocm
 
 suppressed_list: List[HealthCheck] = (
@@ -946,6 +946,149 @@ class SparseOpsTest(unittest.TestCase):
         index_type=st.sampled_from([torch.int, torch.long]),
         has_weight=st.booleans(),
         bucketize_pos=st.booleans(),
+        sequence=st.booleans(),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=16, deadline=None)
+    def test_block_bucketize_sparse_features_with_block_bucketize_pos(
+        self,
+        index_type: Optional[torch.dtype],
+        has_weight: bool,
+        bucketize_pos: bool,
+        sequence: bool,
+    ) -> None:
+        """
+        Test variable bucket size for block bucketize_sparse features for RW sharding.
+        E.g. Given bucket_sizes_pos as [[0,5,15], [0,10,13]]
+        For batch 0, indices in [0,5) will be assigned to bucket 0, indices in [5,15) will be assigned to bucket 1.
+        For batch 1, indices in [0,10) will be assigned to bucket 0, indices in [10,13) will be assigned to bucket 1.
+        The new index will be original index - bucket_sizes_pos[new_bucket_id-1]
+        i.e. for batch = 0, index = 12, it will be assigned to bucket 1 and the new index is 12 - 5 = 7.
+        """
+        # For the following test case, we have
+        # batch 0: 2 (1,7), 1 (2), 1 (6)
+        # 1: bucket 0, new_idx 1
+        # 7: bucket 1, new_idx 5
+        # 2: bucket 1, new_idx 0
+        # 6: bucket 1, new_idx 4
+
+        # batch 1: 2 (7,8)
+        # 7: bucket 1, new_idx 2
+        # 8: bucket 1, new_idx 3
+
+        # batch 2: 0, 2 (8,4)
+        # 8: bucket 1, new_idx 1
+        # 4: bucket 0, new_idx 4
+
+        # new_lengths for 0: 1, 0, 0, 0, 0, 1
+        # new_indices for 0: 1|  |  |  |  | 4
+        # new_lengths for 1: 1, 1, 1, 2,   0, 1
+        # new_indices for 1: 5| 0| 4| 2,3|   |1
+        lengths = torch.tensor([2, 1, 1, 2, 0, 2], dtype=index_type)
+        indices = torch.tensor(
+            [1, 7, 2, 6, 7, 8, 8, 4],
+            dtype=index_type,
+        )
+        batch_sizes = torch.tensor([3, 1, 2], dtype=index_type)
+        weights = (
+            torch.tensor(
+                [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+                dtype=torch.float,
+            )
+            if has_weight
+            else None
+        )
+
+        block_sizes = torch.tensor([5, 10, 8], dtype=index_type)
+        my_size = 2
+        max_B = batch_sizes.max().item()  # unused
+
+        block_bucketize_pos = [
+            torch.tensor([0, 2, 8], dtype=index_type),
+            torch.tensor([0, 5, 10], dtype=index_type),
+            torch.tensor([0, 7, 12], dtype=index_type),
+        ]
+
+        new_lengths_ref = torch.tensor(
+            [1, 0, 0, 0, 0, 1, 1, 1, 1, 2, 0, 1],
+            dtype=index_type,
+        )
+        new_indices_ref = torch.tensor(
+            [1, 4, 5, 0, 4, 2, 3, 1],
+            dtype=index_type,
+        )
+        new_weights_ref = torch.tensor(
+            [
+                1.0,
+                8.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+            ],
+            dtype=torch.float,
+        )
+        (
+            new_lengths_cpu,
+            new_indices_cpu,
+            new_weights_cpu,
+            new_pos_cpu,
+            unbucketize_permute,
+        ) = torch.ops.fbgemm.block_bucketize_sparse_features(
+            lengths,
+            indices,
+            bucketize_pos,
+            sequence,
+            block_sizes,
+            my_size,
+            weights,
+            batch_sizes,
+            max_B,
+            block_bucketize_pos,
+        )
+        torch.testing.assert_close(new_lengths_cpu, new_lengths_ref, rtol=0, atol=0)
+        torch.testing.assert_close(new_indices_cpu, new_indices_ref, rtol=0, atol=0)
+        if has_weight:
+            torch.testing.assert_close(new_weights_cpu, new_weights_ref)
+
+        if gpu_available:
+            block_bucketize_pos = [
+                torch.tensor([0, 2, 8], dtype=index_type, device="cuda"),
+                torch.tensor([0, 5, 10], dtype=index_type, device="cuda"),
+                torch.tensor([0, 7, 12], dtype=index_type, device="cuda"),
+            ]
+            (
+                new_lengths_gpu,
+                new_indices_gpu,
+                new_weights_gpu,
+                new_pos_gpu,
+                unbucketize_permute,
+            ) = torch.ops.fbgemm.block_bucketize_sparse_features(
+                lengths.cuda(),
+                indices.cuda(),
+                bucketize_pos,
+                sequence,
+                block_sizes.cuda(),
+                my_size,
+                weights.cuda() if weights is not None else None,
+                batch_sizes.cuda(),
+                max_B,
+                block_bucketize_pos,
+            )
+            torch.testing.assert_close(
+                new_lengths_gpu.cpu(), new_lengths_ref, rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                new_indices_gpu.cpu(), new_indices_ref, rtol=0, atol=0
+            )
+            if has_weight:
+                torch.testing.assert_close(new_weights_gpu.cpu(), new_weights_ref)
+
+    @given(
+        index_type=st.sampled_from([torch.int, torch.long]),
+        has_weight=st.booleans(),
+        bucketize_pos=st.booleans(),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=2, deadline=None)
     def test_bucketize_sparse_features(
@@ -1114,7 +1257,7 @@ class SparseOpsTest(unittest.TestCase):
         T=st.integers(min_value=1, max_value=20),
         L=st.integers(min_value=2, max_value=20),
         A=st.integers(min_value=1, max_value=20),
-        Dtype=st.sampled_from([torch.int32, torch.float, torch.int64]),
+        Dtype=st.sampled_from([torch.int32, torch.float, torch.int64, torch.bfloat16]),
         Itype=st.sampled_from([torch.int32, torch.int64]),
         broadcast_indices=st.booleans(),
     )
@@ -2402,6 +2545,167 @@ class SparseOpsTest(unittest.TestCase):
             "grad",
         )
 
+    def permute_sparse_features_ref_(
+        self,
+        lengths: torch.Tensor,
+        indices: torch.Tensor,
+        weights: Optional[torch.Tensor],
+        permute: torch.LongTensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        T = lengths.size(0)
+        B = lengths.size(1)
+        permuted_lengths = torch.index_select(lengths.view(T, B), 0, permute)
+
+        original_segment_lengths = lengths.view(T, B).sum(dim=1, dtype=torch.int32)
+        original_segment_start = torch.ops.fbgemm.asynchronous_exclusive_cumsum(
+            original_segment_lengths.view(-1)
+        )
+
+        permuted_indices = []
+        permuted_weights = []
+        for i in range(permute.size(0)):
+            start = original_segment_start[permute[i]]
+            end = start + original_segment_lengths[permute[i]]
+            permuted_indices.append(indices[start:end])
+            if weights is not None:
+                permuted_weights.append(weights[start:end])
+
+        permuted_indices = torch.cat(permuted_indices, dim=0).flatten()
+
+        if weights is None:
+            permuted_weights = None
+        else:
+            permuted_weights = torch.cat(permuted_weights, dim=0).flatten()
+
+        return permuted_lengths, permuted_indices, permuted_weights
+
+    @given(
+        B=st.integers(min_value=1, max_value=20),
+        T=st.integers(min_value=1, max_value=20),
+        L=st.integers(min_value=2, max_value=20),
+        long_index=st.booleans(),
+        has_weight=st.booleans(),
+    )
+    @settings(max_examples=20, deadline=None)
+    def test_permute_sparse_features(
+        self, B: int, T: int, L: int, long_index: bool, has_weight: bool
+    ) -> None:
+        index_dtype = torch.int64 if long_index else torch.int32
+        lengths = torch.randint(low=1, high=L, size=(T, B)).type(index_dtype)
+        weights = torch.rand(int(lengths.sum().item())).float() if has_weight else None
+        indices = torch.randint(
+            low=1,
+            high=int(1e5),
+            size=cast(Tuple[int, ...], (lengths.sum().item(),)),
+        ).type(index_dtype)
+        permute_list = list(range(T))
+        random.shuffle(permute_list)
+        permute = torch.IntTensor(permute_list)
+
+        (
+            permuted_lengths_cpu,
+            permuted_indices_cpu,
+            permuted_weights_cpu,
+        ) = torch.ops.fbgemm.permute_sparse_features(permute, lengths, indices, weights)
+        (
+            permuted_lengths_ref,
+            permuted_indices_ref,
+            permuted_weights_ref,
+            # pyre-fixme[6]: For 4th param expected `LongTensor` but got `Tensor`.
+        ) = self.permute_indices_ref_(lengths, indices, weights, permute.long())
+        torch.testing.assert_close(permuted_indices_cpu, permuted_indices_ref)
+        torch.testing.assert_close(permuted_lengths_cpu, permuted_lengths_ref)
+        if has_weight:
+            torch.testing.assert_close(permuted_weights_cpu, permuted_weights_ref)
+        else:
+            assert permuted_weights_cpu is None and permuted_weights_ref is None
+
+        if gpu_available:
+            (
+                permuted_lengths_gpu,
+                permuted_indices_gpu,
+                permuted_weights_gpu,
+            ) = torch.ops.fbgemm.permute_sparse_features(
+                permute.cuda(),
+                lengths.cuda(),
+                indices.cuda(),
+                weights.cuda() if has_weight and weights is not None else None,
+            )
+            torch.testing.assert_close(permuted_indices_gpu.cpu(), permuted_indices_cpu)
+            torch.testing.assert_close(permuted_lengths_gpu.cpu(), permuted_lengths_cpu)
+            if has_weight:
+                torch.testing.assert_close(
+                    permuted_weights_gpu.cpu(), permuted_weights_cpu
+                )
+            else:
+                assert permuted_weights_gpu is None
+
+    @given(
+        B=st.integers(min_value=1, max_value=20),
+        T=st.integers(min_value=1, max_value=20),
+        L=st.integers(min_value=2, max_value=20),
+        long_index=st.booleans(),
+        has_weight=st.booleans(),
+    )
+    @settings(max_examples=20, deadline=None)
+    def test_permute_sparse_features_with_repeats(
+        self, B: int, T: int, L: int, long_index: bool, has_weight: bool
+    ) -> None:
+        index_dtype = torch.int64 if long_index else torch.int32
+        lengths = torch.randint(low=1, high=L, size=(T, B)).type(index_dtype)
+        weights = torch.rand(int(lengths.sum().item())).float() if has_weight else None
+        indices = torch.randint(
+            low=1,
+            high=int(1e5),
+            size=cast(Tuple[int, ...], (lengths.sum().item(),)),
+        ).type(index_dtype)
+        permute_list = list(range(T))
+
+        num_repeats = random.randint(0, T)
+        for _ in range(num_repeats):
+            permute_list.append(random.randint(0, T - 1))
+
+        random.shuffle(permute_list)
+        permute = torch.IntTensor(permute_list)
+
+        (
+            permuted_lengths_cpu,
+            permuted_indices_cpu,
+            permuted_weights_cpu,
+        ) = torch.ops.fbgemm.permute_sparse_features(permute, lengths, indices, weights)
+        (
+            permuted_lengths_ref,
+            permuted_indices_ref,
+            permuted_weights_ref,
+            # pyre-fixme[6]: For 4th param expected `LongTensor` but got `Tensor`.
+        ) = self.permute_indices_ref_(lengths, indices, weights, permute.long())
+        torch.testing.assert_close(permuted_indices_cpu, permuted_indices_ref)
+        torch.testing.assert_close(permuted_lengths_cpu, permuted_lengths_ref)
+        if has_weight:
+            torch.testing.assert_close(permuted_weights_cpu, permuted_weights_ref)
+        else:
+            assert permuted_weights_cpu is None and permuted_weights_ref is None
+
+        if gpu_available:
+            (
+                permuted_lengths_gpu,
+                permuted_indices_gpu,
+                permuted_weights_gpu,
+            ) = torch.ops.fbgemm.permute_sparse_features(
+                permute.cuda(),
+                lengths.cuda(),
+                indices.cuda(),
+                weights.cuda() if has_weight and weights is not None else None,
+            )
+            torch.testing.assert_close(permuted_indices_gpu.cpu(), permuted_indices_cpu)
+            torch.testing.assert_close(permuted_lengths_gpu.cpu(), permuted_lengths_cpu)
+            if has_weight:
+                torch.testing.assert_close(
+                    permuted_weights_gpu.cpu(), permuted_weights_cpu
+                )
+            else:
+                assert permuted_weights_cpu is None
+
 
 failures_dict_path: str = get_file_path_2(
     "", os.path.dirname(__file__), "failures_dict.json"
@@ -2417,6 +2721,18 @@ additional_decorators: Dict[str, List[Callable]] = {
     "test_faketensor__test_index_select_dim0": [unittest.skip("hangs")],
     "test_autograd_registration__test_index_select_dim0": [unittest.skip("hangs")],
     "test_schema__test_index_select_dim0": [unittest.skip("hangs")],
+    "test_pt2_compliant_tag_fbgemm_dense_to_jagged": [
+        # This operator has been grandfathered in. We need to fix this test failure.
+        unittest.expectedFailure,
+    ],
+    "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add": [
+        # This operator has been grandfathered in. We need to fix this test failure.
+        unittest.expectedFailure,
+    ],
+    "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add_jagged_output": [
+        # This operator has been grandfathered in. We need to fix this test failure.
+        unittest.expectedFailure,
+    ],
 }
 
 # only generate tests on nightly pytorch (current release version is 2.1)
@@ -2436,7 +2752,6 @@ if (
             "test_schema",
             "test_autograd_registration",
             "test_faketensor",
-            "test_aot_dispatch_static",
             "test_aot_dispatch_dynamic",
         ],
     )
