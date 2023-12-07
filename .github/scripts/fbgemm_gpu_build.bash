@@ -446,7 +446,7 @@ build_fbgemm_gpu_develop () {
   echo "[BUILD] Building (develop) FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
   # shellcheck disable=SC2086
   print_exec conda run --no-capture-output ${env_prefix} \
-    python setup.py build develop "${build_args[@]}"
+    python setup.py "${build_args[@]}" build develop
 
   # Run checks on the built libraries
   (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
