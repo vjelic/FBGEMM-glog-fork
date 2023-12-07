@@ -432,10 +432,22 @@ else()
     DEPENDS "${optimizer_codegen_dependencies}")
 endif()
 
+set(AVX2_FLAGS "-mavx2;-mf16c;-mfma;-fopenmp")
+if(NOT FBGEMM_CPU_ONLY AND WSL_MODE)
+  # NVCC in WSL complains about unknown -mavx options
+  # https://github.com/pytorch/FBGEMM/issues/2135
+  set(AVX2_FLAGS "-Xcompiler;-mavx;-Xcompiler;-mavx2;-Xcompiler;-mf16c;-Xcompiler;-mfma;-fopenmp")
+endif()
+
+set(AVX512_FLAGS "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl;-fopenmp")
+if(NOT FBGEMM_CPU_ONLY AND WSL_MODE)
+  set(AVX512_FLAGS "-Xcompiler;-mavx2;-Xcompiler;-mf16c;-Xcompiler;-mfma;-Xcompiler;-mavx512f;-Xcompiler;-mavx512bw;-Xcompiler;-mavx512dq;-Xcompiler;-mavx512vl;-fopenmp")
+endif()
+
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${gen_cpu_source_files}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma;-fopenmp")
+    "${AVX2_FLAGS}")
 else()
   set_source_files_properties(${gen_cpu_source_files}
     PROPERTIES COMPILE_OPTIONS
@@ -504,13 +516,13 @@ set(fbgemm_sources_avx512
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${fbgemm_sources_avx2}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma")
+    "${AVX2_FLAGS}")
 endif()
 
 if(CXX_AVX512_FOUND)
   set_source_files_properties(${fbgemm_sources_avx512}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
+    "${AVX512_FLAGS}")
 endif()
 
 set(fbgemm_sources ${fbgemm_sources_normal})
@@ -561,19 +573,20 @@ set(fbgemm_gpu_sources_static_cpu
     codegen/embedding_forward_quantized_host_cpu.cpp
     codegen/embedding_backward_dense_host_cpu.cpp
     codegen/embedding_bounds_check_host_cpu.cpp
+    src/merge_pooled_embedding_ops/merge_pooled_embedding_ops_cpu.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_function.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_cpu.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split_cpu.cpp
     src/jagged_tensor_ops/jagged_tensor_ops_autograd.cpp
     src/jagged_tensor_ops/jagged_tensor_ops_meta.cpp
     src/jagged_tensor_ops/jagged_tensor_ops_cpu.cpp
-    src/input_combine_cpu.cpp
-    src/layout_transform_ops_cpu.cpp
+    src/input_combine_ops/input_combine_cpu.cpp
+    src/layout_transform_ops/layout_transform_ops_cpu.cpp
     src/quantize_ops/quantize_ops_cpu.cpp
     src/quantize_ops/quantize_ops_meta.cpp
     src/sparse_ops/sparse_ops_cpu.cpp
     src/sparse_ops/sparse_ops_meta.cpp
-    src/embedding_inplace_update_cpu.cpp
+    src/embedding_inplace_ops/embedding_inplace_update_cpu.cpp
     src/split_embeddings_cache/linearize_cache_indices.cpp
     src/split_embeddings_cache/lfu_cache_populate_byte.cpp
     src/split_embeddings_cache/lru_cache_populate_byte.cpp
@@ -588,16 +601,16 @@ if(NOT FBGEMM_CPU_ONLY)
     codegen/embedding_bounds_check_host.cpp
     src/memory_utils/memory_utils.cpp
     src/memory_utils/memory_utils_ops.cpp
-    src/layout_transform_ops_gpu.cpp
+    src/layout_transform_ops/layout_transform_ops_gpu.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_gpu.cpp
     src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split_gpu.cpp
     src/quantize_ops/quantize_ops_gpu.cpp
     src/sparse_ops/sparse_ops_gpu.cpp
-    src/split_embeddings_utils.cpp
+    src/split_embeddings_utils/split_embeddings_utils.cpp
     src/split_embeddings_cache/split_embeddings_cache_ops.cu
-    src/metric_ops_host.cpp
-    src/embedding_inplace_update_gpu.cpp
-    src/input_combine_gpu.cpp
+    src/metric_ops/metric_ops_host.cpp
+    src/embedding_inplace_ops/embedding_inplace_update_gpu.cpp
+    src/input_combine_ops/input_combine_gpu.cpp
     codegen/batch_index_select_dim0_host.cpp)
 
   if(NVML_LIB_PATH)
@@ -607,8 +620,7 @@ if(NOT FBGEMM_CPU_ONLY)
   if(NVML_LIB_PATH OR USE_ROCM)
     message(STATUS "Adding merge_pooled_embeddings sources")
     list(APPEND fbgemm_gpu_sources_static_cpu
-      src/merge_pooled_embeddings_cpu.cpp
-      src/merge_pooled_embeddings_gpu.cpp
+      src/merge_pooled_embedding_ops/merge_pooled_embedding_ops_gpu.cpp
       src/topology_utils.cpp)
   else()
     message(STATUS "Skipping merge_pooled_embeddings sources")
@@ -618,7 +630,7 @@ endif()
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx;-mf16c;-mfma;-mavx2;-fopenmp")
+    "${AVX2_FLAGS}")
 else()
   set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
     PROPERTIES COMPILE_OPTIONS
@@ -631,9 +643,9 @@ if(NOT FBGEMM_CPU_ONLY)
       codegen/embedding_forward_quantized_split_lookup.cu
       src/memory_utils/memory_utils.cu
       src/memory_utils/memory_utils_ops.cu
-      src/embedding_inplace_update.cu
+      src/embedding_inplace_ops/embedding_inplace_update.cu
       src/histogram_binning_calibration_ops.cu
-      src/input_combine.cu
+      src/input_combine_ops/input_combine.cu
       src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_backward.cu
       src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_forward.cu
       src/jagged_tensor_ops/dense_to_jagged_forward.cu
@@ -651,8 +663,8 @@ if(NOT FBGEMM_CPU_ONLY)
       src/jagged_tensor_ops/jagged_to_padded_dense_forward.cu
       src/jagged_tensor_ops/jagged_unique_indices.cu
       src/jagged_tensor_ops/keyed_jagged_index_select_dim1.cu
-      src/layout_transform_ops.cu
-      src/metric_ops.cu
+      src/layout_transform_ops/layout_transform_ops.cu
+      src/metric_ops/metric_ops.cu
       src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split.cu
       src/permute_pooled_embedding_ops/permute_pooled_embedding_ops.cu
       src/quantize_ops/quantize_bfloat16.cu
@@ -691,7 +703,10 @@ if(NOT FBGEMM_CPU_ONLY)
       src/split_embeddings_cache/lxu_cache.cu
       src/split_embeddings_cache/linearize_cache_indices.cu
       src/split_embeddings_cache/reset_weight_momentum.cu
-      src/split_embeddings_utils.cu)
+      src/split_embeddings_utils/generate_vbe_metadata.cu
+      src/split_embeddings_utils/get_infos_metadata.cu
+      src/split_embeddings_utils/radix_sort_pairs.cu
+      src/split_embeddings_utils/transpose_embedding_input.cu)
 
   set_source_files_properties(${fbgemm_gpu_sources_static_gpu}
     PROPERTIES COMPILE_OPTIONS
