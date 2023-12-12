@@ -18,6 +18,12 @@ else()
   set(HIP_ROOT_DIR $ENV{ROCM_PATH})
 endif()
 
+if(NOT DEFINED ENV{HIP_DIR})
+  set(HIP_DIR /opt/rocm/hip)
+else()
+  set(HIP_DIR $ENV{ROCM_PATH})
+endif()
+
 macro(torch_hip_get_arch_list store_var)
   if(DEFINED ENV{PYTORCH_ROCM_ARCH})
     set(_TMP $ENV{PYTORCH_ROCM_ARCH})
