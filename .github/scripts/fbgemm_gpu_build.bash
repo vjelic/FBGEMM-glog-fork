@@ -94,6 +94,21 @@ __configure_fbgemm_gpu_build_rocm () {
     --package_variant=rocm
     -DTORCH_USE_HIP_DSA=1
   )
+
+   new_path="$PATH:/opt/rocm/llvm/bin:\
+/opt/rocm/opencl/bin:\
+/opt/rocm/hip/bin:\
+/opt/rocm/hcc/bin:\
+/opt/rocm/bin:\
+/opt/conda/bin:\
+/usr/local/sbin:\
+/usr/local/bin:\
+/usr/sbin:\
+/usr/bin:\
+/sbin:\
+/bin"
+    echo $new_path
+    print_exec conda env config vars set ${env_prefix} PATH="$new_path"
 }
 
 __configure_fbgemm_gpu_build_cuda () {
