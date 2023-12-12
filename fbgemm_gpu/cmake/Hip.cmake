@@ -24,6 +24,12 @@ else()
   set(hip_DIR $ENV{ROCM_PATH})
 endif()
 
+if(NOT DEFINED ENV{AMDDeviceLibs_DIR})
+  set(AMDDeviceLibs_DIR ${ROCM_PATH}/lib/cmake/AMDDeviceLibs)
+else()
+  set(AMDDeviceLibs_DIR $ENV{ROCM_PATH})
+endif()
+
 macro(torch_hip_get_arch_list store_var)
   if(DEFINED ENV{PYTORCH_ROCM_ARCH})
     set(_TMP $ENV{PYTORCH_ROCM_ARCH})
