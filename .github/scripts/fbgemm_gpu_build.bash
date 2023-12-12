@@ -102,13 +102,7 @@ __configure_fbgemm_gpu_build_rocm () {
 /opt/rocm/hip/bin:\
 /opt/rocm/hcc/bin:\
 /opt/rocm/bin:\
-/opt/conda/bin:\
-/usr/local/sbin:\
-/usr/local/bin:\
-/usr/sbin:\
-/usr/bin:\
-/sbin:\
-/bin"
+"
     echo "==============new path"
     echo $new_path
     print_exec conda env config vars set ${env_prefix} PATH="$new_path"
