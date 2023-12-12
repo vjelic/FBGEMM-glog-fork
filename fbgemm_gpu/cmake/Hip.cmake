@@ -36,6 +36,12 @@ else()
   set(amd_comgr_DIR $ENV{ROCM_PATH})
 endif()
 
+if(NOT DEFINED ENV{hsa-runtime64_DIR})
+  set(hsa-runtime64_DIR ${ROCM_PATH}/lib/cmake/hsa-runtime64)
+else()
+  set(hsa-runtime64_DIR $ENV{ROCM_PATH})
+endif()
+
 macro(torch_hip_get_arch_list store_var)
   if(DEFINED ENV{PYTORCH_ROCM_ARCH})
     set(_TMP $ENV{PYTORCH_ROCM_ARCH})
