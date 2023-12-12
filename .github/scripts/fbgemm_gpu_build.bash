@@ -43,17 +43,17 @@ prepare_fbgemm_gpu_build () {
   # shellcheck disable=SC2155
   local env_prefix=$(env_name_or_prefix "${env_name}")
 
-#   echo "==============old path"
-#   echo $PATH
-#   new_path="$PATH:/opt/rocm/llvm/bin:\
-# /opt/rocm/opencl/bin:\
-# /opt/rocm/hip/bin:\
-# /opt/rocm/hcc/bin:\
-# /opt/rocm/bin
-# "
-#   echo "==============new path"
-#   echo $new_path
-  # print_exec conda env config vars set ${env_prefix} PATH="$new_path"
+  echo "==============old path"
+  echo $PATH
+  new_path="$PATH:/opt/rocm/llvm/bin:\
+/opt/rocm/opencl/bin:\
+/opt/rocm/hip/bin:\
+/opt/rocm/hcc/bin:\
+/opt/rocm/bin
+"
+  echo "==============new path"
+  echo $new_path
+  print_exec conda env config vars set ${env_prefix} PATH="$new_path"
 
   echo "[BUILD] Installing other build dependencies ..."
   # shellcheck disable=SC2086
