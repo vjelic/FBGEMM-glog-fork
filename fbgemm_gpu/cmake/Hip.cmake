@@ -18,10 +18,10 @@ else()
   set(HIP_ROOT_DIR $ENV{ROCM_PATH})
 endif()
 
-if(NOT DEFINED ENV{HIP_DIR})
-  set(HIP_DIR /opt/rocm/hip)
+if(NOT DEFINED ENV{hip_DIR})
+  set(hip_DIR ${ROCM_PATH}/lib/cmake/hip)
 else()
-  set(HIP_DIR $ENV{ROCM_PATH})
+  set(hip_DIR $ENV{ROCM_PATH})
 endif()
 
 macro(torch_hip_get_arch_list store_var)
