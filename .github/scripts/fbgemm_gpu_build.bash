@@ -95,7 +95,9 @@ __configure_fbgemm_gpu_build_rocm () {
     -DTORCH_USE_HIP_DSA=1
   )
 
-   new_path="$PATH:/opt/rocm/llvm/bin:\
+  echo "==============old path"
+  echo $PATH
+  new_path="$PATH:/opt/rocm/llvm/bin:\
 /opt/rocm/opencl/bin:\
 /opt/rocm/hip/bin:\
 /opt/rocm/hcc/bin:\
@@ -107,6 +109,7 @@ __configure_fbgemm_gpu_build_rocm () {
 /usr/bin:\
 /sbin:\
 /bin"
+    echo "==============new path"
     echo $new_path
     print_exec conda env config vars set ${env_prefix} PATH="$new_path"
 }
