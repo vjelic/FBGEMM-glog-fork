@@ -53,7 +53,7 @@ prepare_fbgemm_gpu_build () {
 # "
 #   echo "==============new path"
 #   echo $new_path
-  print_exec conda env config vars set ${env_prefix} PATH="$new_path"
+  # print_exec conda env config vars set ${env_prefix} PATH="$new_path"
 
   echo "[BUILD] Installing other build dependencies ..."
   # shellcheck disable=SC2086
