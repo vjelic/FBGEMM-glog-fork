@@ -97,11 +97,12 @@ __configure_fbgemm_gpu_build_rocm () {
 
   echo "==============old path"
   echo $PATH
-  new_path="$PATH:/opt/rocm/llvm/bin:\
+  new_path="/opt/rocm/llvm/bin:\
 /opt/rocm/opencl/bin:\
 /opt/rocm/hip/bin:\
 /opt/rocm/hcc/bin:\
 /opt/rocm/bin:\
+/github/home/miniconda:/github/home/miniconda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 "
     echo "==============new path"
     echo $new_path
