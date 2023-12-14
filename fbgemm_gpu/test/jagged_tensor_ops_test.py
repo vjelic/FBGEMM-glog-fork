@@ -9,8 +9,9 @@
 
 import itertools
 import random
+import sys
 import unittest
-from typing import List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 import hypothesis.strategies as st
 import numpy as np
@@ -27,7 +28,6 @@ try:
         gpu_available,
         gpu_unavailable,
         gradcheck,
-        on_arm_platform,
         optests,
         symint_vector_unsupported,
         TEST_WITH_ROCM,
@@ -35,12 +35,11 @@ try:
 except Exception:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_cpu")
-    import fbgemm_gpu.sparse_operators  # noqa: F401, E402
+    import fbgemm_gpu.sparse_ops  # noqa: F401, E402
     from fbgemm_gpu.test.test_utils import (
         gpu_available,
         gpu_unavailable,
         gradcheck,
-        on_arm_platform,
         optests,
         symint_vector_unsupported,
         TEST_WITH_ROCM,
@@ -127,7 +126,32 @@ def hash_size_cumsum_to_offsets(hash_size_cum_sum_list: List[int]) -> List[int]:
     return hash_size_offsets_list
 
 
-@optests.generate_opcheck_tests
+# pyre-fixme[2]
+# pyre-fixme[24]
+def torch_compiled(model: Callable, **kwargs) -> Callable:
+    if sys.version_info < (3, 12, 0):
+        return torch.compile(model, **kwargs)
+    else:
+        return model
+
+
+# e.g. "test_faketensor__test_cumsum": [unittest.expectedFailure]
+# Please avoid putting tests here, you should put operator-specific
+# skips and failures in deeplearning/fbgemm/fbgemm_gpu/test/failures_dict.json
+# pyre-ignore[24]: Generic type `Callable` expects 2 type parameters.
+additional_decorators: Dict[str, List[Callable]] = {
+    "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add": [
+        # This operator has been grandfathered in. We need to fix this test failure.
+        unittest.expectedFailure,
+    ],
+    "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add_jagged_output": [
+        # This operator has been grandfathered in. We need to fix this test failure.
+        unittest.expectedFailure,
+    ],
+}
+
+
+@optests.generate_opcheck_tests(additional_decorators=additional_decorators)
 class JaggedTensorOpsTest(unittest.TestCase):
     def setUp(self) -> None:
         if symint_vector_unsupported()[0]:
@@ -361,7 +385,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         values = ref_values.clone().to(dtype).detach().requires_grad_(True)
         offsets = offsets.to(device_type)
         ref_output_values = ref_output_values.to(device_type)
-        output_values = torch.compile(
+        output_values = torch_compiled(
             torch.ops.fbgemm.jagged_2d_to_dense, dynamic=True, fullgraph=True
         )(
             values=values,
@@ -577,7 +601,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         values = ref_values.clone().detach().requires_grad_(False)
         offsets = offsets.to(device_type)
         ref_output_values = ref_output_values.to(device_type)
-        output_values = torch.compile(
+        output_values = torch_compiled(
             torch.ops.fbgemm.jagged_1d_to_dense, dynamic=True, fullgraph=True
         )(
             values=values,
@@ -957,9 +981,10 @@ class JaggedTensorOpsTest(unittest.TestCase):
         )
         values_2d = values_2d.clone().detach().requires_grad_(True)
 
-        @torch.compile(fullgraph=True, dynamic=True)
         def jagged_to_dense(
-            values: torch.Tensor, offsets: torch.Tensor, max_lengths: List[int]
+            values: torch.Tensor,
+            offsets: List[torch.LongTensor],
+            max_lengths: List[int],
         ) -> torch.Tensor:
             return torch.ops.fbgemm.jagged_to_padded_dense(values, offsets, max_lengths)
 
@@ -973,15 +998,13 @@ class JaggedTensorOpsTest(unittest.TestCase):
         torch._dynamo.mark_dynamic(dense, 0)
         torch._dynamo.mark_dynamic(dense, -1)
 
-        @torch.compile(fullgraph=True, dynamic=True)
         def dense_to_jagged_withL(
-            dense: torch.Tensor, offsets: torch.Tensor, total_L: List[int]
+            dense: torch.Tensor, offsets: List[torch.LongTensor], total_L: List[int]
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             return torch.ops.fbgemm.dense_to_jagged(dense, offsets, total_L)
 
-        @torch.compile(fullgraph=False, dynamic=True)
         def dense_to_jagged_noL(
-            dense: torch.Tensor, offsets: torch.Tensor
+            dense: torch.Tensor, offsets: List[torch.LongTensor]
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             return torch.ops.fbgemm.dense_to_jagged(dense, offsets)
 
@@ -1305,24 +1328,21 @@ class JaggedTensorOpsTest(unittest.TestCase):
 
         x_padded = self._to_padded_dense(x_values, x_offsets, max_lengths)
 
-        @torch.compile(fullgraph=True, dynamic=True)
         def jagged_dense_elementwise_add(
-            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
+            x_values: torch.Tensor, x_offsets: List[torch.LongTensor], y: torch.Tensor
         ) -> torch.Tensor:
             return torch.ops.fbgemm.jagged_dense_elementwise_add(x_values, x_offsets, y)
 
-        @torch.compile(fullgraph=True, dynamic=True)
         def jagged_dense_elementwise_add_jagged_output(
-            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            x_values: torch.Tensor, x_offsets: List[torch.LongTensor], y: torch.Tensor
+        ) -> Tuple[torch.Tensor, List[torch.LongTensor]]:
             return torch.ops.fbgemm.jagged_dense_elementwise_add_jagged_output(
                 x_values, x_offsets, y
             )
 
-        @torch.compile(fullgraph=True, dynamic=True)
         def jagged_dense_elementwise_mul(
-            x_values: torch.Tensor, x_offsets: torch.Tensor, y: torch.Tensor
-        ) -> Tuple[torch.Tensor, torch.Tensor]:
+            x_values: torch.Tensor, x_offsets: List[torch.LongTensor], y: torch.Tensor
+        ) -> Tuple[torch.Tensor, List[torch.LongTensor]]:
             return torch.ops.fbgemm.jagged_dense_elementwise_mul(x_values, x_offsets, y)
 
         if operation == "add":
@@ -1594,7 +1614,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         )
         output_ref = x_padded + y_0 + y_1
         x_values.to(device_type)
-        (output, output_offsets) = torch.compile(
+        (output, output_offsets) = torch_compiled(
             torch.ops.fbgemm.jagged_dense_dense_elementwise_add_jagged_output,
             fullgraph=True,
             dynamic=True,
@@ -1805,7 +1825,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         torch._dynamo.mark_dynamic(values, 1)
         torch._dynamo.mark_dynamic(offsets, 0)
 
-        output = torch.compile(
+        output = torch_compiled(
             torch.ops.fbgemm.batched_dense_vec_jagged_2d_mul,
             fullgraph=True,
             dynamic=True,
@@ -2343,7 +2363,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
         if gpu_available
         else st.just("cpu"),
     )
-    @unittest.skipIf(*on_arm_platform)
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_jagged_jagged_bmm(
         self,
@@ -2409,7 +2428,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
         if gpu_available
         else st.just("cpu"),
     )
-    @unittest.skipIf(*on_arm_platform)
     @settings(verbosity=Verbosity.verbose, max_examples=2, deadline=None)
     def test_jagged_dense_bmm(
         self,
@@ -2472,7 +2490,6 @@ class JaggedTensorOpsTest(unittest.TestCase):
         dtype=st.sampled_from([torch.float, torch.double]),
         device_type=st.just("cpu"),
     )
-    @unittest.skipIf(*on_arm_platform)
     @settings(verbosity=Verbosity.verbose, max_examples=20, deadline=None)
     def test_jagged_dense_bmm_dynamic_shape(
         self,
@@ -2501,7 +2518,7 @@ class JaggedTensorOpsTest(unittest.TestCase):
         torch._dynamo.mark_dynamic(x_values, 1)
         torch._dynamo.mark_dynamic(lengths, 0)  # offsets = lengths + 1
 
-        output, _ = torch.compile(
+        output, _ = torch_compiled(
             torch.ops.fbgemm.jagged_dense_bmm, fullgraph=True, dynamic=True
         )(
             x_values,

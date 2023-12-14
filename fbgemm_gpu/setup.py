@@ -27,6 +27,11 @@ from tabulate import tabulate
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="fbgemm_gpu setup")
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print verbose logs during the build.",
+    )
+    parser.add_argument(
         "--package_variant",
         type=str,
         choices=["cpu", "cuda", "rocm"],
@@ -133,8 +138,6 @@ def set_cuda_environment_variables() -> None:
 def cmake_environment_variables(args) -> None:
     def _get_cxx11_abi():
         try:
-            import torch
-
             value = int(torch._C._GLIBCXX_USE_CXX11_ABI)
         except ImportError:
             value = 0
@@ -143,11 +146,22 @@ def cmake_environment_variables(args) -> None:
     torch_root = os.path.dirname(torch.__file__)
     os.environ["CMAKE_BUILD_PARALLEL_LEVEL"] = str(os.cpu_count() // 2)
 
-    cmake_args = [f"-DCMAKE_PREFIX_PATH={torch_root}", _get_cxx11_abi()]
+    cmake_args = [
+        f"-DCMAKE_PREFIX_PATH={torch_root}",
+        _get_cxx11_abi(),
+    ]
+
+    if args.verbose:
+        print("[SETUP.PY] Building in VERBOSE mode ...")
+        cmake_args.append("-DCMAKE_VERBOSE_MAKEFILE=1")
+
     if args.package_variant == "cpu":
+        print("[SETUP.PY] Building the CPU-ONLY variant of FBGEMM_GPU ...")
         cmake_args.append("-DFBGEMM_CPU_ONLY=ON")
+
     if args.nvml_lib_path:
         cmake_args.append(f"-DNVML_LIB_PATH={args.nvml_lib_path}")
+
     return cmake_args
 
 
@@ -183,6 +197,7 @@ class FbgemmGpuInstaller(PipInstall):
 
         if variant == "cpu":
             variant_version = "+cpu"
+
         elif variant == "cuda":
             set_cuda_environment_variables()
             if torch.version.cuda is not None:
@@ -192,6 +207,7 @@ class FbgemmGpuInstaller(PipInstall):
                 sys.exit(
                     "[SETUP.PY] Installed PyTorch variant is not CUDA; cannot determine the CUDA version!"
                 )
+
         elif variant == "rocm":
             if torch.version.hip is not None:
                 rocm_version = torch.version.hip.split(".")
@@ -377,18 +393,17 @@ def main(argv: List[str]) -> None:
         cmdclass={
             "install": FbgemmGpuInstaller,
         },
-        # PyPI package information.
+        # PyPI package information
         classifiers=[
             "Development Status :: 4 - Beta",
             "Intended Audience :: Developers",
             "Intended Audience :: Science/Research",
             "License :: OSI Approved :: BSD License",
-            "Programming Language :: Python :: 3",
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: 3.10",
-            "Programming Language :: Python :: 3.11",
             "Topic :: Scientific/Engineering :: Artificial Intelligence",
+        ]
+        + [
+            f"Programming Language :: Python :: {x}"
+            for x in ["3", "3.8", "3.9", "3.10", "3.11", "3.12"]
         ],
     )
 

@@ -297,6 +297,7 @@ def device(  # noqa C901
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
         bwd_only=True,
         grad=grad_output,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"Backward, B: {B}, E: {E}, T: {T}, D: {D}, L: {L}, "
@@ -313,6 +314,7 @@ def device(  # noqa C901
 @click.option("--weights-precision", type=SparseType, default=SparseType.FP32)
 @click.option("--stoc", is_flag=True, default=False)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
@@ -336,6 +338,7 @@ def uvm(
     weights_precision: SparseType,
     stoc: bool,
     iters: int,
+    warmup_runs: int,
     mixed: bool,
     num_embeddings: int,
     num_tables: int,
@@ -486,6 +489,7 @@ def uvm(
             per_sample_weights,
         ),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"UVM Forward, B: {B}, "
@@ -521,6 +525,7 @@ def uvm(
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+            num_warmups=warmup_runs,
         )
         read_write_bytes_hbm = (
             output_size_multiplier * B * sum(Ds[T_uvm:])
@@ -541,6 +546,7 @@ def uvm(
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+            num_warmups=warmup_runs,
         )
         read_write_bytes_total = read_write_bytes_uvm + read_write_bytes_hbm
         logging.info(
@@ -562,6 +568,7 @@ def uvm(
 @click.option("--stoc", is_flag=True, default=False)
 @click.option("--long-index", is_flag=True, default=False)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
@@ -580,6 +587,7 @@ def cache(  # noqa C901
     weights_precision: SparseType,
     stoc: bool,
     iters: int,
+    warmup_runs: int,
     long_index: bool,
     mixed: bool,
     num_embeddings: int,
@@ -678,6 +686,7 @@ def cache(  # noqa C901
             indices.long(), offsets.long(), per_sample_weights
         ).backward(grad_output),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"ForwardBackward (UVM), B: {B}, E: {E}, T: {T}, D: {D}, L: {L}, "
@@ -713,6 +722,7 @@ def cache(  # noqa C901
     emb.reset_cache_states()
     for indices, offsets, _ in warmup_requests:
         emb.forward(indices, offsets)
+    # TODO: Add warmup_runs
     prefetch_time, forward_backward_time = benchmark_pipelined_requests(
         requests,
         lambda indices, offsets, indices_weights: emb.prefetch(indices, offsets),
@@ -738,8 +748,13 @@ def cache(  # noqa C901
 def benchmark_cpu_requests(
     requests: List[Tuple[torch.IntTensor, torch.IntTensor, Optional[torch.Tensor]]],
     func: Callable[[Tensor, Tensor, Optional[Tensor]], Tensor],
+    num_warmups: int = 0,
 ) -> float:
     import time
+
+    if num_warmups > 0:
+        for _ in range(num_warmups):
+            func(*requests[0])
 
     start_time = time.perf_counter()
     for indices, offsets, weights in requests:
@@ -756,6 +771,7 @@ def benchmark_cpu_requests(
 @click.option("--weights-precision", type=SparseType, default=SparseType.INT4)
 @click.option("--stoc", is_flag=True, default=False)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--managed", default="device")
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
@@ -769,6 +785,7 @@ def benchmark_cpu_requests(
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP16)
 @click.option("--fp8-exponent-bits", type=int, default=None)
 @click.option("--fp8-exponent-bias", type=int, default=None)
+@click.option("--pooling", type=str, default="sum")
 def nbit_cpu(  # noqa C901
     alpha: float,
     bag_size: int,
@@ -777,6 +794,7 @@ def nbit_cpu(  # noqa C901
     weights_precision: SparseType,
     stoc: bool,
     iters: int,
+    warmup_runs: int,
     managed: str,
     mixed: bool,
     num_embeddings: int,
@@ -790,6 +808,7 @@ def nbit_cpu(  # noqa C901
     output_dtype: SparseType,
     fp8_exponent_bits: Optional[int],
     fp8_exponent_bias: Optional[int],
+    pooling: str,
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -808,11 +827,23 @@ def nbit_cpu(  # noqa C901
     else:
         Ds = [D] * T
 
+    if pooling is None or pooling == "sum":
+        pooling = "sum"
+        pooling_mode = PoolingMode.SUM
+        do_pooling = True
+    elif pooling == "mean":
+        pooling_mode = PoolingMode.MEAN
+        do_pooling = True
+    else:  # "none"
+        pooling_mode = PoolingMode.NONE
+        do_pooling = False
+
     emb = IntNBitTableBatchedEmbeddingBagsCodegen(
         [("", E, d, weights_precision, EmbeddingLocation.HOST) for d in Ds],
         device="cpu",
         index_remapping=[torch.arange(E) for _ in Ds] if index_remapping else None,
         output_dtype=output_dtype,
+        pooling_mode=pooling_mode,
         fp8_exponent_bits=fp8_exponent_bits,
         fp8_exponent_bias=fp8_exponent_bias,
     ).cpu()
@@ -822,9 +853,16 @@ def nbit_cpu(  # noqa C901
     nparams_byte = sum(w.numel() for (w, _) in emb.split_embedding_weights())
     param_size_multiplier = weights_precision.bit_rate() / 8.0
     output_size_multiplier = output_dtype.bit_rate() / 8.0
-    read_write_bytes = (
-        output_size_multiplier * B * T * D + param_size_multiplier * B * T * L * D
-    )
+    if do_pooling:
+        read_write_bytes = (
+            output_size_multiplier * B * T * D + param_size_multiplier * B * T * L * D
+        )
+    else:
+        read_write_bytes = (
+            output_size_multiplier * B * T * L * D
+            + param_size_multiplier * B * T * L * D
+        )
+
     logging.info(
         f"{weights_precision} Embedding tables: {E * T} rows, {nparams_byte / param_size_multiplier / 1.0e9: .2f} GParam, "
         f"{nparams_byte / 1.0e9: .2f} GB"  # IntN TBE use byte for storage
@@ -860,6 +898,7 @@ def nbit_cpu(  # noqa C901
             offsets,
             per_sample_weights,
         ),
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -1425,6 +1464,7 @@ def nbit_device_with_spec(  # noqa C901
 @click.option("--embedding-dim", default=128)
 @click.option("--weights-precision", type=SparseType, default=SparseType.INT4)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
@@ -1448,6 +1488,7 @@ def nbit_uvm(
     embedding_dim: int,
     weights_precision: SparseType,
     iters: int,
+    warmup_runs: int,
     mixed: bool,
     num_embeddings: int,
     num_tables: int,
@@ -1613,6 +1654,7 @@ def nbit_uvm(
             per_sample_weights,
         ),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"UVM NBit Forward, {weights_precision}, B: {B}, "
@@ -1670,6 +1712,7 @@ def nbit_uvm(
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+            num_warmups=warmup_runs,
         )
         read_write_bytes_total = read_write_bytes_uvm + read_write_bytes_hbm
         logging.info(
@@ -1683,6 +1726,7 @@ def nbit_uvm(
         emb_mixed.reset_cache_states()
         for indices, offsets, _ in requests:
             emb_mixed.forward(indices, offsets)
+        # TODO: Add warmup runs
         prefetch_time, forward_time = benchmark_pipelined_requests(
             requests,
             lambda indices, offsets, indices_weights: emb_mixed.prefetch(
@@ -1717,7 +1761,7 @@ def nbit_uvm(
 @click.option("--embedding-dim", default=128)
 @click.option("--weights-precision", type=SparseType, default=SparseType.INT4)
 @click.option("--iters", default=100)
-@click.option("--warmup", default=10)
+@click.option("--warmup_runs", default=10)
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
@@ -1744,7 +1788,7 @@ def nbit_uvm_compare_direct_mapped(
     embedding_dim: int,
     weights_precision: SparseType,
     iters: int,
-    warmup: int,
+    warmup_runs: int,
     mixed: bool,
     num_embeddings: int,
     num_tables: int,
@@ -1866,7 +1910,7 @@ def nbit_uvm_compare_direct_mapped(
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
-            num_warmups=warmup,
+            num_warmups=warmup_runs,
             nvtx_range=nvtx_range,
             callback_after_warmup=callback_after_warmup,
         )
@@ -1949,6 +1993,7 @@ def nbit_uvm_compare_direct_mapped(
 @click.option("--embedding-dim", default=128)
 @click.option("--weights-precision", type=SparseType, default=SparseType.INT4)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--mixed", is_flag=True, default=False)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
@@ -1972,6 +2017,7 @@ def nbit_cache(  # noqa C901
     embedding_dim: int,
     weights_precision: SparseType,
     iters: int,
+    warmup_runs: int,
     mixed: bool,
     num_embeddings: int,
     num_tables: int,
@@ -2078,6 +2124,7 @@ def nbit_cache(  # noqa C901
             indices.int(), offsets.int(), per_sample_weights
         ),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"Forward (UVM) {weights_precision}, B: {B}, E: {E}, T: {T}, D: {D}, L: {L}, "
@@ -2156,6 +2203,7 @@ def nbit_cache(  # noqa C901
 
     torch.cuda.cudart().cudaProfilerStart()
     torch.cuda.nvtx.range_push("pipeline")
+    # TODO: Add warmup_runs
     prefetch_time, forward_time = benchmark_pipelined_requests(
         requests,
         lambda indices, offsets, indices_weights: emb.prefetch(
@@ -2189,6 +2237,7 @@ def nbit_cache(  # noqa C901
 @click.option("--bag-size", default=20)
 @click.option("--batch-size", default=2048)
 @click.option("--iters", default=10)
+@click.option("--warmup-runs", default=0)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=100)
 @click.option("--pruning-hash-load-factor", default=0.75)
@@ -2200,6 +2249,7 @@ def hashtable(  # noqa C901
     bag_size: int,
     batch_size: int,
     iters: int,
+    warmup_runs: int,
     num_embeddings: int,
     num_tables: int,
     pruning_hash_load_factor: float,
@@ -2278,6 +2328,7 @@ def hashtable(  # noqa C901
         lambda indices, offsets, _: torch.ops.fbgemm.pruned_hashmap_lookup(
             indices, offsets, hash_table, hash_table_offsets
         ),
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -2292,6 +2343,7 @@ def hashtable(  # noqa C901
         time_per_iter = benchmark_requests(
             requests,
             lambda indices, offsets, _: ht.lookup(indices, offsets),
+            num_warmups=warmup_runs,
         )
 
         logging.info(
@@ -2304,6 +2356,7 @@ def hashtable(  # noqa C901
 @click.option("--bag-size", default=20)
 @click.option("--batch-size", default=2048)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=100)
 @click.option("--pruning-ratio", default=0.9)
@@ -2314,6 +2367,7 @@ def pruned_array(  # noqa C901
     bag_size: int,
     batch_size: int,
     iters: int,
+    warmup_runs: int,
     num_embeddings: int,
     num_tables: int,
     pruning_ratio: float,
@@ -2362,6 +2416,7 @@ def pruned_array(  # noqa C901
             index_remappings,
             index_remappings_offsets,
         ),
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -2374,6 +2429,7 @@ def pruned_array(  # noqa C901
 @click.option("--bag-size", default=20)
 @click.option("--batch-size", default=512)
 @click.option("--iters", default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--num-embeddings", default=int(1e5))
 @click.option("--num-tables", default=32)
 @click.option("--bounds-check-mode", type=int, default=BoundsCheckMode.WARNING.value)
@@ -2383,6 +2439,7 @@ def bounds_check_indices(  # noqa C901
     bag_size: int,
     batch_size: int,
     iters: int,
+    warmup_runs: int,
     num_embeddings: int,
     num_tables: int,
     bounds_check_mode: int,
@@ -2414,11 +2471,12 @@ def bounds_check_indices(  # noqa C901
         requests,
         lambda indices, offsets, _: torch.ops.fbgemm.bounds_check_indices(
             rows_per_table,
-            indices,
-            offsets,
+            indices.long(),
+            offsets.long(),
             BoundsCheckMode(bounds_check_mode),
             warning,
         ),
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -2437,6 +2495,7 @@ def bounds_check_indices(  # noqa C901
 @click.option("--weights-precision", type=SparseType, default=SparseType.INT4)
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP16)
 @click.option("--iters", type=int, default=100)
+@click.option("--warmup-runs", default=0)
 @click.option("--fp8-exponent-bits", type=int, default=None)
 @click.option("--fp8-exponent-bias", type=int, default=None)
 def emb_inplace_update(  # noqa C901
@@ -2447,6 +2506,7 @@ def emb_inplace_update(  # noqa C901
     weights_precision: SparseType,
     output_dtype: SparseType,
     iters: int,
+    warmup_runs: int,
     fp8_exponent_bits: Optional[int],
     fp8_exponent_bias: Optional[int],
 ) -> None:
@@ -2548,6 +2608,7 @@ def emb_inplace_update(  # noqa C901
         op.embedding_inplace_update_internal,
         (update_table_idx, update_row_idx, update_weights),
         iters=iters,
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -2601,6 +2662,7 @@ def emb_inplace_update(  # noqa C901
             16,  # row_alignment
         ),
         iters=iters,
+        num_warmups=warmup_runs,
     )
 
     logging.info(
@@ -2865,6 +2927,7 @@ def device_with_spec(  # noqa C901
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
         bwd_only=True,
         grad=grad_output,
+        num_warmups=warmup_runs,
     )
     logging.info(
         f"Backward, B: {B}, Es: {Es}, T: {T}, Ds: {Ds}, Ls: {Ls_str}, "
@@ -2896,6 +2959,7 @@ def vbe(
     compressed_tables: int,
     iters: int,
 ) -> None:
+    # TODO: Add warmup_runs
     torch.manual_seed(42)
     B = batch_size
     cB = compressed_batch_size

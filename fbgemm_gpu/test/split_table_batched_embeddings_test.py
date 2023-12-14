@@ -12,6 +12,7 @@ import math
 import pickle
 import random
 import unittest
+
 from itertools import accumulate
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -96,6 +97,9 @@ MAX_EXAMPLES = 40
 MAX_EXAMPLES_LONG_RUNNING = 15
 
 
+VERBOSITY: Verbosity = Verbosity.verbose
+
+
 settings.register_profile("derandomize", derandomize=True)
 settings.load_profile("derandomize")
 
@@ -167,19 +171,22 @@ additional_decorators: Dict[str, List[Callable]] = {
     "test_autograd_registration__test_backward_none_with_rowwise_adagrad": [
         unittest.skip("Cannot access data pointer of Tensor that doesn't have storage")
     ],
-    "test_faketensor__test_cache_prefetch_pipeline_stream_2": [unittest.skip("OOM")],
-    "test_faketensor__test_cache_prefetch_pipeline": [unittest.skip("OOM")],
-    "test_faketensor__test_cache_prefetch_pipeline_stream_1": [
-        unittest.skip("IMA on exit")
+    "test_faketensor__test_nbit_forward_uvm_cache": [
+        unittest.skip("CUDA Assert"),
     ],
-    "test_faketensor__test_cache_pipeline": [
-        unittest.skip("OOM when run serially"),
+    "test_faketensor__test_nbit_uvm_cache_stats": [
+        unittest.skip("very slow"),
+    ],
+    "test_faketensor__test_nbit_direct_mapped_uvm_cache_stats": [
+        unittest.skip("very slow"),
     ],
 }
 
 
 @optests.generate_opcheck_tests(fast=True, additional_decorators=additional_decorators)
 class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
+    _do_cuda_memory_leak_check = True
+
     def execute_forward_(  # noqa C901
         self,
         T: int,
@@ -557,7 +564,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         use_experimental_tbe=st.booleans() if not TEST_WITH_ROCM else st.just(False),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -620,7 +627,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         use_experimental_tbe=st.booleans() if not TEST_WITH_ROCM else st.just(False),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -683,7 +690,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         cache_algorithm=st.sampled_from(CacheAlgorithm),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -748,7 +755,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         use_experimental_tbe=st.booleans() if not TEST_WITH_ROCM else st.just(False),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -814,7 +821,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         use_experimental_tbe=st.booleans() if not TEST_WITH_ROCM else st.just(False),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -884,7 +891,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP16, SparseType.INT8]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much],
@@ -1019,7 +1026,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         ),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much],
@@ -1192,7 +1199,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         ),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much],
@@ -1305,7 +1312,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -1555,7 +1562,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -1582,7 +1589,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2150,7 +2157,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else st.just(True),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2204,7 +2211,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         cache_algorithm=st.sampled_from(CacheAlgorithm),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2648,7 +2655,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2718,7 +2725,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2787,7 +2794,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2853,7 +2860,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2923,7 +2930,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -2992,7 +2999,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -3116,6 +3123,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
 
         return (cc, cc_ref, min(Es), sum(Ds))
 
+    @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -3126,7 +3134,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         mixed=st.booleans(),
         cache_algorithm=st.sampled_from(CacheAlgorithm),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_pipeline(
         self,
         T: int,
@@ -3242,6 +3250,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         torch.testing.assert_close(output, output_ref)
         self.assertTrue(torch.all(cc.lxu_cache_locking_counter == 0))
 
+    @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -3252,7 +3261,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         mixed=st.booleans(),
         prefetch_location=st.sampled_from(["before_fwd", "between_fwd_bwd"]),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline(
         self,
         T: int,
@@ -3274,6 +3283,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             prefetch_stream=None,
         )
 
+    @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -3283,7 +3293,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline_stream_1(
         self,
         T: int,
@@ -3304,6 +3314,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             prefetch_stream=torch.cuda.Stream(),
         )
 
+    @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -3313,7 +3324,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline_stream_2(
         self,
         T: int,
@@ -3985,7 +3996,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         uvm_non_rowwise_momentum=st.booleans(),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -4065,7 +4076,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         ),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -4137,7 +4148,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else st.just(True),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -4196,7 +4207,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else st.just(True),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
         suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
@@ -4371,14 +4382,9 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
             # Initialize and insert Array index remapping based data structure
             index_remappings_array = []
             for t in range(T):
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 indice_t = (indices.view(T, B, L))[t].long().view(-1).to(current_device)
                 dense_indice_t = (
-                    (dense_indices.view(T, B, L))[t].view(-1)
-                    # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                    #  str]`.
-                    .to(current_device)
+                    (dense_indices.view(T, B, L))[t].view(-1).to(current_device)
                 )
                 index_remappings_array_t = torch.tensor(
                     [-1] * original_E,
@@ -4520,9 +4526,15 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         nbit_weights_ty=get_nbit_weights_ty(),
         use_array_for_index_remapping=st.booleans(),
         do_pruning=st.booleans(),
+        pooling_mode=st.sampled_from(
+            [PoolingMode.SUM, PoolingMode.NONE, PoolingMode.MEAN]
+        ),
+        output_dtype=st.sampled_from(
+            [SparseType.FP32, SparseType.FP16, SparseType.BF16]
+        ),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
     )
@@ -4531,6 +4543,8 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         nbit_weights_ty: Optional[SparseType],
         use_array_for_index_remapping: bool,
         do_pruning: bool,
+        pooling_mode: PoolingMode,
+        output_dtype: SparseType,
     ) -> None:
         use_cpu = True
         T = random.randint(1, 50)
@@ -4543,27 +4557,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         # cache_algorithm is don't care as we don't use cache.
         cache_algorithm = CacheAlgorithm.LRU
 
-        pooling_mode = random.choice(
-            [
-                PoolingMode.SUM,
-                PoolingMode.MEAN,
-                PoolingMode.NONE,
-            ]
-        )
         mixed = random.choice([True, False])
-        if pooling_mode == PoolingMode.NONE:
-            nbit_weights_ty = random.choice(
-                [
-                    SparseType.FP32,
-                    SparseType.FP16,
-                    # CPU sequence embedding does not support FP8/INT4/INT2 yet
-                    # SparseType.FP8,
-                    SparseType.INT8,
-                    # SparseType.INT4,
-                    # SparseType.INT2,
-                ]
-            )
-
         if pooling_mode == PoolingMode.SUM:
             weighted = random.choice([True, False])
         else:
@@ -4576,81 +4570,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else:
             weights_ty: SparseType = nbit_weights_ty
             mixed_weights_ty = False
-        output_dtype = random.choice(
-            (
-                [SparseType.BF16]
-                if weights_ty in [SparseType.INT4, SparseType.INT2]
-                else []
-            )
-            + [SparseType.FP32, SparseType.FP16]
-        )
-        self.execute_nbit_forward_(
-            T,
-            D,
-            B,
-            log_E,
-            L,
-            weighted,
-            mixed,
-            pooling_mode,
-            weights_ty,
-            use_cache,
-            cache_algorithm,
-            use_cpu,
-            use_array_for_index_remapping,
-            do_pruning,
-            mixed_weights_ty,
-            output_dtype,
-        )
 
-    @given(
-        nbit_weights_ty=get_nbit_weights_ty(),
-        use_array_for_index_remapping=st.booleans(),
-        do_pruning=st.booleans(),
-    )
-    @settings(
-        verbosity=Verbosity.verbose,
-        max_examples=MAX_EXAMPLES_LONG_RUNNING,
-        deadline=None,
-    )
-    def test_nbit_forward_cpu_bf16_out(
-        self,
-        nbit_weights_ty: Optional[SparseType],
-        use_array_for_index_remapping: bool,
-        do_pruning: bool,
-    ) -> None:
-        use_cpu = True
-        T = random.randint(1, 50)
-        B = random.randint(0, 128)
-        L = random.randint(0, 32)
-        D = random.randint(2, 2048)
-        log_E = random.randint(2, 4)
-
-        use_cache = False
-        # cache_algorithm is don't care as we don't use cache.
-        cache_algorithm = CacheAlgorithm.LRU
-
-        pooling_mode = random.choice(
-            [
-                PoolingMode.SUM,
-                PoolingMode.MEAN,
-            ]
-        )
-        mixed = random.choice([True, False])
-
-        if pooling_mode == PoolingMode.SUM:
-            weighted = random.choice([True, False])
-        else:
-            weighted = False
-
-        if nbit_weights_ty is None:
-            # don't care when mixed type is used.
-            weights_ty: SparseType = SparseType.INT8
-            mixed_weights_ty = True
-        else:
-            weights_ty: SparseType = nbit_weights_ty
-            mixed_weights_ty = False
-        output_dtype = SparseType.BF16
         self.execute_nbit_forward_(
             T,
             D,
@@ -4699,7 +4619,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         do_pruning=st.booleans(),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES_LONG_RUNNING,
         deadline=None,
     )
@@ -4778,7 +4698,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         ),
         emulate_pruning=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_int_nbit_split_embedding_uvm_caching_codegen_lookup_function(
         self,
         weights_ty: SparseType,
@@ -4963,7 +4883,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         do_pruning=st.booleans(),
         use_array_for_index_remapping=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_nbit_forward_uvm_cache(
         self,
         weights_ty: SparseType,
@@ -5080,7 +5000,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         use_cpu_hashtable=st.booleans(),
         use_array_for_index_remapping=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_pruning(
         self,
         T: int,
@@ -5144,19 +5064,13 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         index_remappings_array_offsets = torch.empty(
             T + 1,
             dtype=torch.int64,
-            # pyre-fixme[6]: For 3rd param expected `Union[None, str, device]` but
-            #  got `Union[int, str]`.
             device=current_device,
         )
         index_remappings_array_offsets[0] = 0
         for t in range(T):
-            # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int, str]`.
             indice_t = (indices.view(T, B, L))[t].long().view(-1).to(current_device)
             dense_indice_t = (
-                (dense_indices.view(T, B, L))[t].view(-1)
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
-                .to(current_device)
+                (dense_indices.view(T, B, L))[t].view(-1).to(current_device)
             )
             selected_indices = torch.add(indice_t, t * original_E)[:E]
             index_remappings_array[selected_indices] = dense_indice_t
@@ -5175,26 +5089,12 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                 index_remappings_array,
                 index_remappings_array_offsets,
             ) = (
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 indices.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 dense_indices.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 offsets.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 hash_table.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 hash_table_offsets.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 index_remappings_array.to(current_device),
-                # pyre-fixme[6]: For 1st param expected `dtype` but got `Union[int,
-                #  str]`.
                 index_remappings_array_offsets.to(current_device),
             )
 
@@ -5244,7 +5144,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         H=st.integers(min_value=512, max_value=1024),
         S=st.integers(min_value=0, max_value=128),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_update_function(self, L: int, H: int, S: int) -> None:
         # Generate synthetic data
         linear_cache_indices_cpu = torch.randint(L, H, (S,))
@@ -5295,7 +5195,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         self.assertLessEqual(cache_miss_forward_count, unique_cache_miss_count)
 
     @given(N=st.integers(min_value=1, max_value=8))
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_miss_counter(self, N: int) -> None:
         # Create an abstract split table
         D = 8
@@ -5351,7 +5251,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
                     self.assertEqual(tablewise_cache_miss[i], t_tablewise_cache_miss[i])
 
     @given(N=st.integers(min_value=1, max_value=2))
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_stb_uvm_cache_stats(self, N: int) -> None:
         # Create an abstract split table
         D = 8
@@ -5402,7 +5302,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         H=st.integers(min_value=512, max_value=1024),
         S=st.integers(min_value=0, max_value=128),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_nbit_cache_update_function(self, L: int, H: int, S: int) -> None:
         # Generate synthetic data
         linear_cache_indices_cpu = torch.randint(L, H, (S,))
@@ -5459,7 +5359,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
 
     @unittest.skipIf(*gpu_unavailable)
     @given(N=st.integers(min_value=1, max_value=8))
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_nbit_cache_miss_counter(self, N: int) -> None:
         # Create an abstract split table
         D = 8
@@ -5514,7 +5414,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         N=st.integers(min_value=1, max_value=8),
         dtype=st.sampled_from([SparseType.INT8, SparseType.INT4, SparseType.INT2]),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_nbit_uvm_cache_stats(self, N: int, dtype: SparseType) -> None:
         # Create an abstract split table
         D = 8
@@ -5629,7 +5529,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         N=st.integers(min_value=1, max_value=8),
         dtype=st.sampled_from([SparseType.INT8, SparseType.INT4, SparseType.INT2]),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_nbit_direct_mapped_uvm_cache_stats(
         self, N: int, dtype: SparseType
     ) -> None:
@@ -5772,7 +5672,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         ),
         mixed_B=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_bounds_check(  # noqa C901
         self,
         T: int,
@@ -6216,7 +6116,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
     @given(
         cache_sets=st.integers(min_value=10, max_value=300),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_lxu_cache_locking_counter_decrement(
         self,
         cache_sets: int,
@@ -6281,7 +6181,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         else st.just(True),
         test_internal=st.booleans(),
     )
-    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_embedding_inplace_update(
         self,
         T: int,  # num of embedding tables
@@ -6439,7 +6339,7 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         num_indices_per_table=st.integers(min_value=1, max_value=5),
     )
     @settings(
-        verbosity=Verbosity.verbose,
+        verbosity=VERBOSITY,
         max_examples=MAX_EXAMPLES,
         deadline=None,
     )
@@ -6575,6 +6475,164 @@ class SplitTableBatchedEmbeddingsTest(unittest.TestCase):
         )
 
         check_weight_momentum(0)
+
+    @unittest.skipIf(*gpu_unavailable)
+    @given(
+        T=st.integers(min_value=1, max_value=10),
+        D=st.integers(min_value=2, max_value=128),
+        B=st.integers(min_value=1, max_value=128),
+        log_E=st.integers(min_value=3, max_value=5),
+        L=st.integers(min_value=0, max_value=20),
+    )
+    @settings(verbosity=Verbosity.verbose, max_examples=MAX_EXAMPLES, deadline=None)
+    def test_unique_lxu_cache_lookup(
+        self,
+        T: int,
+        D: int,
+        B: int,
+        log_E: int,
+        L: int,
+    ) -> None:
+        E = int(10**log_E)
+
+        indices = to_device(
+            torch.randint(low=0, high=E, size=(T * L * B,)),
+            use_cpu=False,
+        ).long()
+        offsets = to_device(
+            torch.tensor([0] + list(accumulate([L] * (T * L)))),
+            use_cpu=False,
+        ).long()
+
+        def unique_lookup(
+            indices: Tensor,
+            offsets: Tensor,
+            cache_hash_size_cumsum: Tensor,
+            total_cache_hash_size: int,
+        ) -> Tuple[Tensor, Tensor]:
+            linear_cache_indices = torch.ops.fbgemm.linearize_cache_indices(
+                cache_hash_size_cumsum,
+                indices,
+                offsets,
+            )
+
+            uniq_indices, uniq_indices_length, _ = torch.ops.fbgemm.get_unique_indices(
+                linear_cache_indices, total_cache_hash_size, compute_count=False
+            )
+
+            uniq_lxu_cache_locations = torch.ops.fbgemm.lxu_cache_lookup(
+                uniq_indices,
+                lxu_cache_state,
+                total_cache_hash_size,
+                gather_cache_stats=False,
+                num_uniq_cache_indices=uniq_indices_length,
+            )
+
+            return uniq_lxu_cache_locations, uniq_indices_length
+
+        def duplicate_lookup(
+            indices: Tensor,
+            offsets: Tensor,
+            cache_hash_size_cumsum: Tensor,
+            total_cache_hash_size: int,
+        ) -> Tensor:
+            linear_cache_indices = torch.ops.fbgemm.linearize_cache_indices(
+                cache_hash_size_cumsum,
+                indices,
+                offsets,
+            )
+
+            lxu_cache_locations = torch.ops.fbgemm.lxu_cache_lookup(
+                linear_cache_indices,
+                lxu_cache_state,
+                total_cache_hash_size,
+                gather_cache_stats=False,
+            )
+            return lxu_cache_locations
+
+        cache_sets = int((E * T) * 0.2)
+        lxu_cache_state = torch.zeros(
+            cache_sets,
+            DEFAULT_ASSOC,
+            device="cuda",
+            dtype=torch.int64,
+        ).fill_(-1)
+
+        hash_sizes = torch.tensor([E] * T, dtype=torch.long, device="cuda")
+        cache_hash_size_cumsum = torch.ops.fbgemm.asynchronous_complete_cumsum(
+            hash_sizes
+        )
+        total_cache_hash_size = cache_hash_size_cumsum[-1].item()
+
+        linear_cache_indices = torch.ops.fbgemm.linearize_cache_indices(
+            cache_hash_size_cumsum,
+            indices,
+            offsets,
+        )
+
+        # Emulate cache population
+        uniq_indices_cpu = linear_cache_indices.unique().cpu()
+        index_cache_set_map = uniq_indices_cpu.clone()
+        index_cache_set_map.apply_(
+            lambda x: torch.ops.fbgemm.lxu_cache_slot(x, cache_sets)
+        )
+        index_cache_set_map = index_cache_set_map.tolist()
+        uniq_indices_cpu = uniq_indices_cpu.tolist()
+
+        slots = {}
+        for idx, c in zip(uniq_indices_cpu, index_cache_set_map):
+            if c not in slots:
+                slots[c] = 0
+            slot = slots[c]
+            if slot < DEFAULT_ASSOC:
+                lxu_cache_state[c][slot] = idx
+            slots[c] = slot + 1
+
+        # Run unique lookup
+        uniq_lookup_output, uniq_indices_length = unique_lookup(
+            indices, offsets, cache_hash_size_cumsum, total_cache_hash_size
+        )
+
+        # Run duplicate lookup
+        duplicate_lookup_output = duplicate_lookup(
+            indices, offsets, cache_hash_size_cumsum, total_cache_hash_size
+        )
+
+        # Start running validation
+
+        # Compute unique indices using PyTorch ops
+        sorted_linear_cache_indices, inverse_sorted_cache_indices = torch.sort(
+            linear_cache_indices
+        )
+        ref_uniq_cache_indices, cache_indices_counts = torch.unique_consecutive(
+            sorted_linear_cache_indices, return_inverse=False, return_counts=True
+        )
+
+        # Convert to lists
+        cache_indices_counts = cache_indices_counts.cpu().tolist()
+        uniq_lookup_output = uniq_lookup_output.cpu().tolist()
+
+        # Validate the number of unique cache indices
+        ref_num_uniq_indices = ref_uniq_cache_indices.numel()
+        assert ref_num_uniq_indices == uniq_indices_length.item()
+
+        # Expand
+        reshaped_uniq_lookup_output = uniq_lookup_output[:ref_num_uniq_indices]
+        sorted_lxu_cache_locations = to_device(
+            torch.tensor(
+                np.repeat(reshaped_uniq_lookup_output, cache_indices_counts),
+                dtype=duplicate_lookup_output.dtype,
+            ),
+            use_cpu=False,
+        )
+
+        _, cache_location_indices = torch.sort(inverse_sorted_cache_indices)
+
+        expanded_lxu_cache_locations = torch.index_select(
+            sorted_lxu_cache_locations, 0, cache_location_indices
+        )
+
+        assert torch.equal(expanded_lxu_cache_locations, duplicate_lookup_output)
 
 
 if __name__ == "__main__":

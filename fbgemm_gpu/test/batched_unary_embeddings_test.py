@@ -5,12 +5,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
 
 import random
+import sys
 import unittest
 from math import sqrt
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import fbgemm_gpu.batched_unary_embeddings_ops as batched_unary_embeddings_ops
 import numpy as np
@@ -30,6 +30,7 @@ except Exception:
 
 
 # Relative tolerances
+# pyre-fixme[5]: Global expression must be annotated.
 TOLERANCE_REL = {
     torch.float32: 1e-4,
     torch.float16: 1e-2,
@@ -37,11 +38,21 @@ TOLERANCE_REL = {
 }
 
 # Absolute tolerances
+# pyre-fixme[5]: Global expression must be annotated.
 TOLERANCE_ABS = {
     torch.float32: 1e-4,
     torch.float16: 1e-2,
     torch.bfloat16: 1e-2,
 }
+
+
+# pyre-fixme[2]
+# pyre-fixme[24]
+def torch_compiled(model: Callable, **kwargs) -> Callable:
+    if sys.version_info < (3, 12, 0):
+        return torch.compile(model, **kwargs)
+    else:
+        return model
 
 
 class TableBatchedEmbeddingsTest(unittest.TestCase):
@@ -81,7 +92,11 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             return torch.cat(tt_list).view(self.num_tasks, -1, len(self.hash_sizes))
 
     def _generate_unary_features(
-        self, batch_size: int, num_embeddings: int
+        self,
+        batch_size: int,
+        num_embeddings: int
+        # pyre-fixme[24]: Generic type `list` expects 1 type parameter, use
+        #  `typing.List[<element type>]` to avoid runtime subscripting errors.
     ) -> Tuple[List, List, List]:
         lengths = []
         offsets = []
@@ -142,7 +157,7 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             param.detach().copy_(ref_emb.emb_modules[i].weight)
         output_ref = ref_emb(offsets, indices)
         if torch_compile:
-            unary_emb = torch.compile(unary_emb, dynamic=True, fullgraph=True)
+            unary_emb = torch_compiled(unary_emb, dynamic=True, fullgraph=True)
         output = unary_emb(offsets_tensor, indices_tensor)
         torch.testing.assert_close(
             output_ref,
@@ -164,7 +179,7 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             param.detach().copy_(ref_emb.emb_modules[i].weight)
         output_ref = ref_emb(offsets, indices)
         if torch_compile:
-            unary_emb = torch.compile(unary_emb, dynamic=True, fullgraph=True)
+            unary_emb = torch_compiled(unary_emb, dynamic=True, fullgraph=True)
         output = unary_emb(offsets_tensor.long(), indices_tensor.long())
         torch.testing.assert_close(
             output_ref,
@@ -212,6 +227,8 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             output = output[1:]
             output.sum().backward()
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    #  `test_utils.gpu_unavailable` to decorator factory `unittest.skipIf`.
     @unittest.skipIf(*gpu_unavailable)
     def test_gpu(self) -> None:
         self._test_main(gpu_infer=True)

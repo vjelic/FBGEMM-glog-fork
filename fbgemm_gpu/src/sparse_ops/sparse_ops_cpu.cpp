@@ -18,6 +18,7 @@
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <torch/csrc/autograd/custom_function.h>
 #include "c10/util/MaybeOwned.h"
+#include "fbgemm_gpu/dispatch_macros.h"
 #include "fbgemm_gpu/sparse_ops.h"
 #include "fbgemm_gpu/sparse_ops_utils.h"
 
@@ -127,7 +128,7 @@ Tensor pack_segments_autograd(
 Tensor native_empty_like(const Tensor& self) {
   return at::native::empty_like(
       self,
-      optTypeMetaToScalarType(self.options().dtype_opt()),
+      c10::optTypeMetaToScalarType(self.options().dtype_opt()),
       self.options().layout_opt(),
       self.options().device_opt(),
       self.options().pinned_memory_opt(),
@@ -283,7 +284,8 @@ void _block_bucketize_sparse_features_cpu(
     c10::optional<Tensor> new_weights,
     c10::optional<Tensor> new_pos,
     const c10::optional<Tensor>& unbucketize_permute,
-    const c10::optional<Tensor>& batch_size_per_feature) {
+    const c10::optional<Tensor>& batch_size_per_feature,
+    const c10::optional<std::vector<at::Tensor>>& block_bucketize_pos) {
   // allocate tensors and buffers
   const auto lengths_size = lengths.numel();
   const auto new_lengths_size = lengths_size * my_size;
@@ -304,9 +306,11 @@ void _block_bucketize_sparse_features_cpu(
   const index_t* const block_sizes_data = block_sizes.data_ptr<index_t>();
   offset_t* batch_sizes_data = nullptr;
   const auto variable_batch_size = batch_size_per_feature.has_value();
-
+  const auto variable_bucket_sizes = block_bucketize_pos.has_value() &&
+      block_bucketize_pos.value().size() != 0;
   using uindex_t = std::make_unsigned_t<index_t>;
   using uoffset_t = std::make_unsigned_t<offset_t>;
+  std::vector<int64_t> lower_bounds(indices.numel(), 0);
 
   if constexpr (sequence) {
     unbucketize_permute_data = unbucketize_permute.value().data_ptr<index_t>();
@@ -330,6 +334,12 @@ void _block_bucketize_sparse_features_cpu(
   for (const auto t : c10::irange(T)) {
     const auto blk_size = block_sizes_data[t];
     const auto cur_batch_size = variable_batch_size ? batch_sizes_data[t] : B;
+    const index_t* bucketize_offset = nullptr;
+    int64_t bucket_size = 0;
+    if (variable_bucket_sizes) {
+      bucketize_offset = block_bucketize_pos.value()[t].data_ptr<index_t>();
+      bucket_size = block_bucketize_pos.value()[t].numel();
+    }
     for (const auto b : c10::irange(cur_batch_size)) {
       const auto b_t = (variable_batch_size ? cur_offset : t * B) + b;
       const offset_t rowstart = offsets_data[b_t];
@@ -342,10 +352,21 @@ void _block_bucketize_sparse_features_cpu(
         // range of blk_size, we expect the later embedding module to take care
         // of hashing indices calculation.
         uindex_t idx = static_cast<uindex_t>(indices_data[i]);
-        uindex_t p = idx < static_cast<uindex_t>(blk_size * my_size)
-            ? idx / blk_size
-            : idx % my_size;
-        new_lengths_data[p * lengths_size + b_t]++;
+        if (variable_bucket_sizes) {
+          int64_t lb = std::upper_bound(
+                           bucketize_offset,
+                           bucketize_offset + static_cast<index_t>(bucket_size),
+                           indices_data[i]) -
+              bucketize_offset - 1;
+          lower_bounds[i] = lb;
+          uindex_t p = lb < my_size ? lb : idx % my_size;
+          new_lengths_data[p * lengths_size + b_t]++;
+        } else {
+          uindex_t p = idx < static_cast<uindex_t>(blk_size * my_size)
+              ? idx / blk_size
+              : idx % my_size;
+          new_lengths_data[p * lengths_size + b_t]++;
+        }
       }
     }
     cur_offset += cur_batch_size;
@@ -358,6 +379,10 @@ void _block_bucketize_sparse_features_cpu(
   for (const auto t : c10::irange(T)) {
     const auto blk_size = block_sizes_data[t];
     const auto cur_batch_size = variable_batch_size ? batch_sizes_data[t] : B;
+    const index_t* bucketize_offset = nullptr;
+    if (variable_bucket_sizes) {
+      bucketize_offset = block_bucketize_pos.value()[t].data_ptr<index_t>();
+    }
     for (const auto b : c10::irange(cur_batch_size)) {
       const auto b_t = (variable_batch_size ? cur_offset : t * B) + b;
       const offset_t rowstart = offsets_data[b_t];
@@ -370,12 +395,19 @@ void _block_bucketize_sparse_features_cpu(
         // range of blk_size, we expect the later embedding module to take care
         // of hashing indices calculation.
         const uindex_t idx = static_cast<uindex_t>(indices_data[i]);
-        const uindex_t p = idx < static_cast<uindex_t>(blk_size * my_size)
-            ? idx / blk_size
-            : idx % my_size;
-        const uindex_t new_idx = idx < static_cast<uindex_t>(blk_size * my_size)
-            ? idx % blk_size
-            : idx / my_size;
+        uindex_t p, new_idx;
+        if (variable_bucket_sizes) {
+          int64_t lb = lower_bounds[i];
+          p = lb < my_size ? lb : idx % my_size;
+          new_idx = lb < my_size ? idx - bucketize_offset[lb] : idx / my_size;
+
+        } else {
+          p = idx < static_cast<uindex_t>(blk_size * my_size) ? idx / blk_size
+                                                              : idx % my_size;
+          new_idx = idx < static_cast<uindex_t>(blk_size * my_size)
+              ? idx % blk_size
+              : idx / my_size;
+        }
         const uoffset_t pos = new_offsets_data[p * lengths_size + b_t];
         new_indices_data[pos] = new_idx;
         if (sequence) {
@@ -910,8 +942,8 @@ block_bucketize_sparse_features_cpu(
     const int64_t my_size,
     const c10::optional<Tensor>& weights,
     const c10::optional<Tensor>& batch_size_per_feature,
-    const int64_t /* max_batch_size */ // Only used in GPU variant
-) {
+    const int64_t /* max_batch_size */, // Only used in GPU variant
+    const c10::optional<std::vector<at::Tensor>>& block_bucketize_pos) {
   const auto lengths_size = lengths.numel();
   const auto new_lengths_size = lengths_size * my_size;
   auto new_lengths = at::zeros({new_lengths_size}, lengths.options());
@@ -958,7 +990,8 @@ block_bucketize_sparse_features_cpu(
                             new_weights,
                             new_pos,
                             unbucketize_permute,
-                            batch_size_per_feature);
+                            batch_size_per_feature,
+                            block_bucketize_pos);
                       });
                 });
           });
@@ -993,7 +1026,8 @@ block_bucketize_sparse_features_cpu(
                             new_weights,
                             new_pos,
                             unbucketize_permute,
-                            batch_size_per_feature);
+                            batch_size_per_feature,
+                            block_bucketize_pos);
                       });
                 });
           });
@@ -1026,7 +1060,8 @@ block_bucketize_sparse_features_cpu(
                       new_weights,
                       new_pos,
                       unbucketize_permute,
-                      batch_size_per_feature);
+                      batch_size_per_feature,
+                      block_bucketize_pos);
                 });
           });
     } else {
@@ -1054,7 +1089,8 @@ block_bucketize_sparse_features_cpu(
                       new_weights,
                       new_pos,
                       unbucketize_permute,
-                      batch_size_per_feature);
+                      batch_size_per_feature,
+                      block_bucketize_pos);
                 });
           });
     }
@@ -2686,22 +2722,36 @@ Tensor bottom_k_per_row(
 } // namespace fbgemm_gpu
 
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
+#ifdef HAS_IMPL_ABSTRACT_PYSTUB
+  m.impl_abstract_pystub(
+      "fbgemm_gpu.sparse_ops",
+      "//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_py");
+#endif
   m.def(
       "permute_sparse_data(Tensor permute, Tensor lengths, Tensor values, Tensor? weights=None, SymInt? permuted_lengths_sum=None) -> (Tensor, Tensor, Tensor?)");
   m.def(
-      "permute_2D_sparse_data(Tensor permute, Tensor lengths, Tensor values, Tensor? weights=None, SymInt? permuted_lengths_sum=None) -> (Tensor, Tensor, Tensor?)");
+      "permute_2D_sparse_data(Tensor permute, Tensor lengths, Tensor values, Tensor? weights=None, SymInt? permuted_lengths_sum=None) -> (Tensor, Tensor, Tensor?)",
+      {PT2_COMPLIANT_TAG});
   m.def(
-      "permute_1D_sparse_data(Tensor permute, Tensor lengths, Tensor values, Tensor? weights=None, SymInt? permuted_lengths_sum=None) -> (Tensor, Tensor, Tensor?)");
+      "permute_1D_sparse_data(Tensor permute, Tensor lengths, Tensor values, Tensor? weights=None, SymInt? permuted_lengths_sum=None) -> (Tensor, Tensor, Tensor?)",
+      {PT2_COMPLIANT_TAG});
   m.def("invert_permute(Tensor permute) -> Tensor");
   m.def(
-      "expand_into_jagged_permute(Tensor permute, Tensor input_offset, Tensor output_offset, SymInt output_size) -> Tensor");
+      "expand_into_jagged_permute(Tensor permute, Tensor input_offset, Tensor output_offset, SymInt output_size) -> Tensor",
+      {PT2_COMPLIANT_TAG});
   m.def(
-      "block_bucketize_sparse_features(Tensor lengths, Tensor indices, bool bucketize_pos, bool sequence, Tensor block_sizes, SymInt my_size, Tensor? weights=None, Tensor? batch_size_per_feature=None, SymInt max_B= -1) -> (Tensor, Tensor, Tensor?, Tensor?, Tensor?)");
+      "block_bucketize_sparse_features(Tensor lengths, Tensor indices, bool bucketize_pos, bool sequence, Tensor block_sizes, SymInt my_size, Tensor? weights=None, Tensor? batch_size_per_feature=None, SymInt max_B= -1, Tensor[]? block_bucketize_pos=None) -> (Tensor, Tensor, Tensor?, Tensor?, Tensor?)");
   m.def(
       "bucketize_sparse_features(Tensor lengths, Tensor indices, bool bucketize_pos, SymInt my_size, Tensor? weights=None) -> (Tensor, Tensor, Tensor?, Tensor?)");
-  m.def("asynchronous_exclusive_cumsum(Tensor t_in) -> Tensor");
-  m.def("asynchronous_inclusive_cumsum(Tensor t_in) -> Tensor");
-  m.def("asynchronous_complete_cumsum(Tensor t_in) -> Tensor");
+  m.def(
+      "asynchronous_exclusive_cumsum(Tensor t_in) -> Tensor",
+      {PT2_COMPLIANT_TAG});
+  m.def(
+      "asynchronous_inclusive_cumsum(Tensor t_in) -> Tensor",
+      {PT2_COMPLIANT_TAG});
+  m.def(
+      "asynchronous_complete_cumsum(Tensor t_in) -> Tensor",
+      {PT2_COMPLIANT_TAG});
   m.def(
       "reorder_batched_ad_lengths(Tensor cat_ad_lengths, Tensor batch_offsets, SymInt num_ads_in_batch, bool broadcast_lengths=False) -> Tensor");
   m.def(
@@ -2710,7 +2760,8 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
       "cat_reorder_batched_ad_indices(Tensor cat_ad_offsets, Tensor[] cat_ad_indices, Tensor reordered_cat_ad_offsets, Tensor batch_offsets, SymInt num_ads_in_batch, bool broadcast_indices, SymInt total_num_indices, bool pinned_memory=False) -> Tensor");
   m.def("offsets_range(Tensor offsets, SymInt range_size) -> Tensor");
   m.def(
-      "batched_unary_embeddings(Tensor weight, Tensor table_offsets, Tensor offsets, Tensor indices) -> Tensor");
+      "batched_unary_embeddings(Tensor weight, Tensor table_offsets, Tensor offsets, Tensor indices) -> Tensor",
+      {PT2_COMPLIANT_TAG});
   m.def(
       "histogram_binning_calibration(Tensor logit, Tensor bin_num_examples, Tensor bin_num_positives, float positive_weight, float lower_bound, float upper_bound, SymInt bin_ctr_in_use_after, float bin_ctr_weight_value) -> (Tensor, Tensor)");
   m.def(
@@ -2718,14 +2769,16 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "generic_histogram_binning_calibration_by_feature(Tensor logit, Tensor segment_value, Tensor segment_lengths, SymInt num_segments, Tensor bin_num_examples, Tensor bin_num_positives, Tensor bin_boundaries, float positive_weight, SymInt bin_ctr_in_use_after, float bin_ctr_weight_value) -> (Tensor, Tensor)");
   m.def(
-      "segment_sum_csr(SymInt batch_size, Tensor csr_seg, Tensor values) -> Tensor");
+      "segment_sum_csr(SymInt batch_size, Tensor csr_seg, Tensor values) -> Tensor",
+      {PT2_COMPLIANT_TAG});
   m.def(
       "embedding_bag_rowwise_prune(Tensor weight, Tensor indicator, float threshold, ScalarType compressed_indices_dtype, bool abs=True, SymInt min_num_rows=0, float? min_save_ratio=1.0) -> (Tensor, Tensor)");
   m.def("lengths_range(Tensor t_in, SymInt[]? shape=None) -> Tensor");
   m.def(
       "lengths_range_out(Tensor output, Tensor t_in, SymInt[]? shape=None) -> Tensor");
   m.def(
-      "permute_sparse_features(Tensor permute, Tensor lengths, Tensor indices, Tensor? weights=None) -> (Tensor, Tensor, Tensor?)");
+      "permute_sparse_features(Tensor permute, Tensor lengths, Tensor indices, Tensor? weights=None) -> (Tensor, Tensor, Tensor?)",
+      {PT2_COMPLIANT_TAG});
   m.def("Bfloat16QuantizedToFloat(Tensor input) -> Tensor");
   m.def("FloatToBfloat16Quantized(Tensor input) -> Tensor");
   m.def(
@@ -2733,7 +2786,8 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "permute_sequence_embeddings(Tensor permute, Tensor lengths, Tensor embeddings) -> (Tensor, Tensor)");
   m.def(
-      "pack_segments(Tensor t_in, Tensor lengths, SymInt max_length) -> Tensor");
+      "pack_segments(Tensor t_in, Tensor lengths, SymInt max_length) -> Tensor",
+      {PT2_COMPLIANT_TAG});
   m.def(
       "pack_segments_backward(Tensor data, Tensor lengths, SymInt total_length, SymInt max_length) -> Tensor");
   // A specialization of at::index_select for selecting dim 0
@@ -2756,7 +2810,8 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
       "index_select_dim0(Tensor input, Tensor indices, SymInt? consecutive_range_start=0, SymInt? consecutive_range_length=0, bool? skip_indices_sorting_fwd=None) -> Tensor");
   m.def(
-      "group_index_select_dim0(Tensor[] input_group, Tensor[] indices_group) -> Tensor[]");
+      "group_index_select_dim0(Tensor[] input_group, Tensor[] indices_group) -> Tensor[]",
+      {PT2_COMPLIANT_TAG});
   // This is an one-off op to be used in split_embedding_utils.py for zipf
   // generation w/o replacement along dim=-1. If requires_unique=True, find
   // smallest unique k.  If the number of unique elements is less than k,
