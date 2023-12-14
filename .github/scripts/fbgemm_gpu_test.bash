@@ -50,11 +50,11 @@ run_python_test () {
 run_fbgemm_gpu_tests () {
   local env_name="$1"
   local fbgemm_variant="$2"
-  if [ "$env_name" == "" ]; then
+  if [ "$fbgemm_variant" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} ENV_NAME [FBGEMM_VARIANT]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env        # Run all tests applicable to CUDA"
     echo "    ${FUNCNAME[0]} build_env cpu    # Run all tests applicable to CPU"
+    echo "    ${FUNCNAME[0]} build_env cuda   # Run all tests applicable to CUDA"
     echo "    ${FUNCNAME[0]} build_env rocm   # Run all tests applicable to ROCm"
     return 1
   else
@@ -71,9 +71,11 @@ run_fbgemm_gpu_tests () {
 
   # Enable ROCM testing if specified
   if [ "$fbgemm_variant" == "rocm" ]; then
-    echo "[TEST] Set environment variable FBGEMM_TEST_WITH_ROCM to enable ROCm tests ..."
+    echo "[TEST] Set environment variables for ROCm testing ..."
     # shellcheck disable=SC2086
     print_exec conda env config vars set ${env_prefix} FBGEMM_TEST_WITH_ROCM=1
+    # shellcheck disable=SC2086
+    print_exec conda env config vars set ${env_prefix} HIP_LAUNCH_BLOCKING=1
   fi
 
   # These are either non-tests or currently-broken tests in both FBGEMM_GPU and FBGEMM_GPU-CPU
@@ -138,7 +140,7 @@ test_setup_conda_environment () {
   if [ "$pytorch_variant_type" == "" ]; then
     echo "Usage: ${FUNCNAME[0]} ENV_NAME PYTHON_VERSION PYTORCH_INSTALLER PYTORCH_VERSION PYTORCH_VARIANT_TYPE [PYTORCH_VARIANT_VERSION]"
     echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env 3.10 pip test cuda 12.1.0       # Setup environment with pytorch-test for Python 3.10 + CUDA 12.1.0"
+    echo "    ${FUNCNAME[0]} build_env 3.12 pip test cuda 12.1.0       # Setup environment with pytorch-test for Python 3.12 + CUDA 12.1.0"
     return 1
   else
     echo "################################################################################"
@@ -210,8 +212,8 @@ test_fbgemm_gpu_build_and_install () {
   cd -
   install_fbgemm_gpu_wheel    "${env_name}" fbgemm_gpu/dist/*.whl             || return 1
 
-  cd fbgemm_gpu/test                        || return 1
-  run_fbgemm_gpu_tests        "${env_name}" || return 1
+  cd fbgemm_gpu/test                                                          || return 1
+  run_fbgemm_gpu_tests        "${env_name}" "${pytorch_variant_type}"         || return 1
   # shellcheck disable=SC2164
   cd -
 }

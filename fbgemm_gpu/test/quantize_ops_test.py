@@ -7,6 +7,7 @@
 import logging
 import os
 import random
+import sys
 import unittest
 from ctypes import c_float, c_int32, cast, POINTER, pointer
 from typing import Callable, Dict, List, Tuple
@@ -1006,10 +1007,6 @@ class TestBfloat16QuantizationConversion(unittest.TestCase):
 # skips and failures in deeplearning/fbgemm/fbgemm_gpu/test/failures_dict.json
 # pyre-ignore[24]: Generic type `Callable` expects 2 type parameters.
 additional_decorators: Dict[str, List[Callable]] = {
-    "test_pt2_compliant_tag_fbgemm_dense_to_jagged": [
-        # This operator has been grandfathered in. We need to fix this test failure.
-        unittest.expectedFailure,
-    ],
     "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add": [
         # This operator has been grandfathered in. We need to fix this test failure.
         unittest.expectedFailure,
@@ -1084,7 +1081,7 @@ class TestFP8RowwiseQuantizationConversion(unittest.TestCase):
                 dynamic=True,
                 fullgraph=True,
             )
-            if test_compile
+            if test_compile and sys.version_info < (3, 12, 0)
             else torch.ops.fbgemm.FP8RowwiseQuantizedToFloat
         )
 
