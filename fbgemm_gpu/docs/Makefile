@@ -3,9 +3,9 @@
 
 # You can set these variables from the command line, and also
 # from the environment for the first two.
-SPHINXOPTS    ?=
+SPHINXOPTS    ?= # -W # -b linkcheck
 SPHINXBUILD   ?= sphinx-build
-SOURCEDIR     = source
+SOURCEDIR     = src
 BUILDDIR      = build
 
 # Put it first so that "make" without argument is like "make help".
@@ -18,3 +18,11 @@ help:
 # "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
 %: Makefile
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+# Build the C++ Doxygen documentation
+doxygen:
+	doxygen Doxyfile.in
+
+# Clean out the build directory
+clean:
+	rm -rf build/*

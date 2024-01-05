@@ -17,7 +17,7 @@
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
 
-///@defgroup embedding-cpu Embedding CPU Operators
+/// @defgroup embedding-cpu Embedding CPU Operators
 ///
 
 namespace {
@@ -179,6 +179,7 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   // The (a!) tells PyTorch this is an impure operation and so cannot be CSE'd
   // or DCE'd, etc.
   m.def(
-      "bounds_check_indices(Tensor rows_per_table, Tensor(a!) indices, Tensor(b!) offsets, int bounds_check_mode, Tensor(c!) warning, Tensor(d!)? weights=None, Tensor? B_offsets=None, int max_B=-1) -> ()");
+      "bounds_check_indices(Tensor rows_per_table, Tensor(a!) indices, Tensor(b!) offsets, int bounds_check_mode, Tensor(c!) warning, Tensor(d!)? weights=None, Tensor? B_offsets=None, int max_B=-1) -> ()",
+      {PT2_COMPLIANT_TAG});
   DISPATCH_TO_CPU("bounds_check_indices", bounds_check_indices_cpu);
 }
