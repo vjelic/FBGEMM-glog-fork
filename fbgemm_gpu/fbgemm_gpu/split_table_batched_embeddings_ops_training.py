@@ -34,9 +34,14 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
 )
 
 try:
-    torch.ops.load_library(
-        "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cuda_training"
-    )
+    if torch.version.hip:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_hip_training"
+        )
+    else:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cuda_training"
+        )
     torch.ops.load_library(
         "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cpu_training"
     )
@@ -62,6 +67,7 @@ class WeightDecayMode(enum.IntEnum):
     L2 = 1
     DECOUPLE = 2
     COUNTER = 3
+    COWCLIP = 4
 
 
 class CounterWeightDecayMode(enum.IntEnum):
@@ -98,6 +104,14 @@ class CounterBasedRegularizationDefinition:
     grad_sum_decay: GradSumDecay = GradSumDecay.NO_DECAY
     tail_id_threshold: TailIdThreshold = field(default_factory=TailIdThreshold)
     max_counter_update_freq: int = 1000
+
+
+@dataclass
+class CowClipDefinition:
+    counter_weight_decay_mode: CounterWeightDecayMode = CounterWeightDecayMode.NONE
+    counter_halflife: int = -1
+    weight_norm_coefficient: float = 0.0
+    lower_bound: float = 0.0
 
 
 def construct_split_state(
@@ -319,6 +333,9 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         counter_based_regularization: Optional[
             CounterBasedRegularizationDefinition
         ] = None,  # used by Rowwise Adagrad
+        cowclip_regularization: Optional[
+            CowClipDefinition
+        ] = None,  # used by Rowwise Adagrad
         pooling_mode: PoolingMode = PoolingMode.SUM,
         device: Optional[Union[str, int, torch.device]] = None,
         bounds_check_mode: BoundsCheckMode = BoundsCheckMode.WARNING,
@@ -533,39 +550,53 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.optimizer = optimizer
 
         self.weight_decay_mode = weight_decay_mode
-        if (
-            weight_decay_mode == WeightDecayMode.COUNTER
-            and counter_based_regularization is None
+        if (weight_decay_mode == WeightDecayMode.COUNTER) != (
+            counter_based_regularization is not None
         ):
             raise AssertionError(
-                "weight_decay_mode is set to WeightDecayMode.COUNTER but counter_based_regularization is None"
+                "Need to set weight_decay_mode=WeightDecayMode.COUNTER together with valid counter_based_regularization"
             )
-        if (
-            weight_decay_mode != WeightDecayMode.COUNTER
-            and counter_based_regularization is not None
+        if (weight_decay_mode == WeightDecayMode.COWCLIP) != (
+            cowclip_regularization is not None
         ):
             raise AssertionError(
-                "Need to set weight_decay_mode to WeightDecayMode.COUNTER together with counter_based_regularization"
+                "Need to set weight_decay_mode=WeightDecayMode.COWCLIP together with valid cowclip_regularization"
             )
 
         self._used_rowwise_adagrad_with_counter: bool = (
             optimizer == OptimType.EXACT_ROWWISE_ADAGRAD
-            and weight_decay_mode == WeightDecayMode.COUNTER
-            and counter_based_regularization is not None
+            and (
+                weight_decay_mode in (WeightDecayMode.COUNTER, WeightDecayMode.COWCLIP)
+            )
         )
 
         if counter_based_regularization is None:
             counter_based_regularization = CounterBasedRegularizationDefinition()
+        if cowclip_regularization is None:
+            cowclip_regularization = CowClipDefinition()
         self._max_counter_update_freq: int = -1
+        # Extract parameters from CounterBasedRegularizationDefinition or CowClipDefinition
+        # which are passed as entries for OptimizerArgs
         if self._used_rowwise_adagrad_with_counter:
-            self._max_counter_update_freq = (
-                counter_based_regularization.max_counter_update_freq
-            )
-            opt_arg_weight_decay_mode = (
-                counter_based_regularization.counter_weight_decay_mode
-            )
+            if self.weight_decay_mode == WeightDecayMode.COUNTER:
+                self._max_counter_update_freq = (
+                    counter_based_regularization.max_counter_update_freq
+                )
+                opt_arg_weight_decay_mode = (
+                    counter_based_regularization.counter_weight_decay_mode
+                )
+                counter_halflife = counter_based_regularization.counter_halflife
+            else:
+                opt_arg_weight_decay_mode = (
+                    cowclip_regularization.counter_weight_decay_mode
+                )
+                counter_halflife = cowclip_regularization.counter_halflife
         else:
             opt_arg_weight_decay_mode = weight_decay_mode
+            # Default: -1, no decay applied, as a placeholder for OptimizerArgs
+            # which should not be effective when CounterBasedRegularizationDefinition
+            # and CowClipDefinition are not used
+            counter_halflife = -1
 
         self.optimizer_args = invokers.lookup_args.OptimizerArgs(
             stochastic_rounding=stochastic_rounding,
@@ -579,7 +610,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             weight_decay_mode=opt_arg_weight_decay_mode.value,
             eta=eta,
             momentum=momentum,
-            counter_halflife=counter_based_regularization.counter_halflife,
+            counter_halflife=counter_halflife,
             adjustment_iter=counter_based_regularization.adjustment_iter,
             adjustment_ub=counter_based_regularization.adjustment_ub,
             learning_rate_mode=counter_based_regularization.learning_rate_mode.value,
@@ -589,6 +620,9 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 counter_based_regularization.tail_id_threshold.is_ratio
             ),
             total_hash_size=self.total_hash_size,
+            weight_norm_coefficient=cowclip_regularization.weight_norm_coefficient,
+            lower_bound=cowclip_regularization.lower_bound,
+            regularization_mode=weight_decay_mode.value,
         )
 
         if optimizer != OptimType.NONE:
@@ -943,7 +977,9 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         if len(self.timesteps_prefetched) == 0:
             self._prefetch(indices, offsets)
 
-        self.timesteps_prefetched.pop(0)
+        if len(self.timesteps_prefetched) > 0:
+            self.timesteps_prefetched.pop(0)
+
         self.lxu_cache_locations = (
             self.lxu_cache_locations_empty
             if len(self.lxu_cache_locations_list) == 0
@@ -1078,7 +1114,10 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             placements=self.row_counter_placements,
         )
         if self._used_rowwise_adagrad_with_counter:
-            if self.iter.item() % self._max_counter_update_freq == 0:
+            if (
+                self._max_counter_update_freq > 0
+                and self.iter.item() % self._max_counter_update_freq == 0
+            ):
                 row_counter_dev = self.row_counter_dev.detach()
                 if row_counter_dev.numel() > 0:
                     self.max_counter[0] = torch.max(row_counter_dev).cpu().item() + 1
@@ -1121,7 +1160,7 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         assert (
             self.gather_uvm_cache_stats
         ), "gather_uvm_cache_stats should be set to true to access uvm cache stats."
-        uvm_cache_stats = self.uvm_cache_stats.tolist()
+        uvm_cache_stats: List[float] = self.uvm_cache_stats.tolist()
         logging.info(
             f"N_called: {uvm_cache_stats[0]}\n"
             f"N_requested_indices: {uvm_cache_stats[1]}\n"

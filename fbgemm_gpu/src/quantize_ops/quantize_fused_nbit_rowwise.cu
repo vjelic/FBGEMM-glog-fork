@@ -10,9 +10,6 @@
 
 using Tensor = at::Tensor;
 
-/// @defgroup quantize-data-cuda Quantization Data CUDA Operators
-/// The following are CUDA Operators
-
 namespace fbgemm_gpu {
 
 namespace {
@@ -110,7 +107,6 @@ __global__ inline void _fusednbitrowwise_to_float_cuda_kernel(
 
 } // namespace
 
-///@ingroup quantize-data-cuda
 template <typename input_t>
 Tensor _float_to_fusednbitrowwise_gpu_t(
     const Tensor& input,
@@ -167,20 +163,44 @@ Tensor _float_to_fusednbitrowwise_gpu_t(
   return output;
 }
 
-///@ingroup quantize-data-cuda
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of `float` values into a tensor of fused N-bit rowwise
+/// values.
+///
+/// @param input A tensor of `float` values
+/// @param bit_rate
+///
+/// @return A new tensor with values from the input tensor converted to
+/// fused N-bit rowwise.
 DLL_PUBLIC Tensor
 _float_to_fusednbitrowwise_gpu(const Tensor& input, const int64_t bit_rate) {
   return _float_to_fusednbitrowwise_gpu_t<float>(input, bit_rate);
 }
 
-///@ingroup quantize-data-cuda
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of `at::Half` values into a tensor of fused N-bit rowwise
+/// values.
+///
+/// @param input A tensor of `at::Half` values
+/// @param bit_rate
+///
+/// @return A new tensor with values from the input tensor converted to
+/// fused N-bit rowwise.
 DLL_PUBLIC at::Tensor _half_to_fusednbitrowwise_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _float_to_fusednbitrowwise_gpu_t<at::Half>(input, bit_rate);
 }
 
-///@ingroup sparse-data-cuda
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of `float` or `at::Half` values into a tensor of fused
+/// N-bit rowwise values.
+///
+/// @param input A tensor of `float` or `at::Half` values
+/// @param bit_rate
+///
+/// @return A new tensor with values from the input tensor converted to
+/// fused N-bit rowwise.
 DLL_PUBLIC Tensor _float_or_half_to_fusednbitrowwise_gpu(
     const Tensor& input,
     const int64_t bit_rate) {
@@ -194,7 +214,6 @@ DLL_PUBLIC Tensor _float_or_half_to_fusednbitrowwise_gpu(
   return output;
 }
 
-///@ingroup quantize-data-cuda
 template <typename output_t>
 Tensor _fusednbitrowwise_to_float_gpu_t(
     const Tensor& input,
@@ -254,20 +273,49 @@ Tensor _fusednbitrowwise_to_float_gpu_t(
   return output;
 }
 
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of fused N-bit rowwise values into a tensor of `float`
+/// values.
+///
+/// @param input A tensor of fused N-bit rowwise values
+/// @param bit_rate
+///
+/// @return A new tensor with values from the input tensor converted to `float`.
 DLL_PUBLIC at::Tensor _fusednbitrowwise_to_float_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _fusednbitrowwise_to_float_gpu_t<float>(input, bit_rate);
 }
 
-///@ingroup quantize-data-cuda
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of fused N-bit rowwise values into a tensor of `at::Half`
+/// values.
+///
+/// @param input A tensor of fused N-bit rowwise values
+/// @param bit_rate
+///
+/// @return A new tensor with values from the input tensor converted to
+/// `at::Half`.
 DLL_PUBLIC at::Tensor _fusednbitrowwise_to_half_gpu(
     const at::Tensor& input,
     const int64_t bit_rate) {
   return _fusednbitrowwise_to_float_gpu_t<at::Half>(input, bit_rate);
 }
 
-///@ingroup quantize-data-cuda
+/// @ingroup quantize-ops-cuda
+/// Converts a tensor of fused N-bit rowwise values into a tensor of `float` or
+/// `at::Half` values.
+///
+/// @param input A tensor of fused N-bit rowwise values
+/// @param bit_rate
+/// @param output_dtype The target floating point type, specified as integer
+///                     representation of `SparseType` enum
+///
+/// @return A new tensor with values from the input tensor converted to `float`
+/// or `at::Half`, depending on `output_dtype`.
+///
+/// @throw c10::Error if `output_dtype` is not one of (`SparseType::FP32` or
+/// `SparseType::FP16`).
 DLL_PUBLIC at::Tensor _fusednbitrowwise_to_float_or_half_gpu(
     const at::Tensor& input,
     const int64_t bit_rate,
