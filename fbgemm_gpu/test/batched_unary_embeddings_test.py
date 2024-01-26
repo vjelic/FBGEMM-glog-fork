@@ -5,11 +5,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
 
+import random
+import sys
 import unittest
 from math import sqrt
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import fbgemm_gpu.batched_unary_embeddings_ops as batched_unary_embeddings_ops
 import numpy as np
@@ -23,9 +24,39 @@ try:
     from test_utils import gpu_unavailable
 
 except Exception:
-    torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
+    if torch.version.hip:
+        torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_hip")
+    else:
+        torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops")
+
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_cpu")
     from fbgemm_gpu.test.test_utils import gpu_unavailable
+
+
+# Relative tolerances
+# pyre-fixme[5]: Global expression must be annotated.
+TOLERANCE_REL = {
+    torch.float32: 1e-4,
+    torch.float16: 1e-2,
+    torch.bfloat16: 0.1,
+}
+
+# Absolute tolerances
+# pyre-fixme[5]: Global expression must be annotated.
+TOLERANCE_ABS = {
+    torch.float32: 1e-4,
+    torch.float16: 1e-2,
+    torch.bfloat16: 1e-2,
+}
+
+
+# pyre-fixme[2]
+# pyre-fixme[24]
+def torch_compiled(model: Callable, **kwargs) -> Callable:
+    if sys.version_info < (3, 12, 0):
+        return torch.compile(model, **kwargs)
+    else:
+        return model
 
 
 class TableBatchedEmbeddingsTest(unittest.TestCase):
@@ -65,7 +96,11 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             return torch.cat(tt_list).view(self.num_tasks, -1, len(self.hash_sizes))
 
     def _generate_unary_features(
-        self, batch_size: int, num_embeddings: int
+        self,
+        batch_size: int,
+        num_embeddings: int
+        # pyre-fixme[24]: Generic type `list` expects 1 type parameter, use
+        #  `typing.List[<element type>]` to avoid runtime subscripting errors.
     ) -> Tuple[List, List, List]:
         lengths = []
         offsets = []
@@ -82,7 +117,11 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
         offsets.append(offset)
         return (lengths, offsets, indices)
 
-    def _test_main(self, gpu_infer: bool) -> None:
+    def _test_main(
+        self,
+        gpu_infer: bool,
+        torch_compile: bool = False,
+    ) -> None:
         if gpu_infer:
             device = torch.device("cuda:0")
             torch.cuda.set_device(device)
@@ -91,6 +130,7 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
         batch_size = 128
         hash_sizes = [100, 200]
         num_tasks = 3
+        emb_dtype = random.choice([torch.float, torch.half, torch.bfloat16])
         # generate unary features
         lengths = []
         offsets = []
@@ -111,29 +151,53 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             lengths_tensor.view(-1)
         )
         # forward with int_32
-        ref_emb = self.RefEmb(num_tasks, hash_sizes).to(device)
-        unary_emb = batched_unary_embeddings_ops.BatchedUnaryEmbeddingBag(
-            num_tasks, hash_sizes
-        ).to(device)
+        ref_emb = self.RefEmb(num_tasks, hash_sizes).to(device).to(emb_dtype)
+        unary_emb = (
+            batched_unary_embeddings_ops.BatchedUnaryEmbeddingBag(num_tasks, hash_sizes)
+            .to(device)
+            .to(emb_dtype)
+        )
         for i, param in enumerate(unary_emb.split_embedding_weights()):
             param.detach().copy_(ref_emb.emb_modules[i].weight)
         output_ref = ref_emb(offsets, indices)
+        if torch_compile:
+            unary_emb = torch_compiled(unary_emb, dynamic=True, fullgraph=True)
         output = unary_emb(offsets_tensor, indices_tensor)
-        torch.testing.assert_close(output_ref, output)
+        torch.testing.assert_close(
+            output_ref,
+            output,
+            atol=TOLERANCE_ABS[emb_dtype],
+            rtol=TOLERANCE_REL[emb_dtype],
+        )
 
         # forward with int_64
-        ref_emb = self.RefEmb(num_tasks, hash_sizes).to(device)
-        unary_emb = batched_unary_embeddings_ops.BatchedUnaryEmbeddingBag(
-            num_tasks=num_tasks, hash_sizes=hash_sizes, long_index=True
-        ).to(device)
+        ref_emb = self.RefEmb(num_tasks, hash_sizes).to(device).to(emb_dtype)
+        unary_emb = (
+            batched_unary_embeddings_ops.BatchedUnaryEmbeddingBag(
+                num_tasks=num_tasks, hash_sizes=hash_sizes, long_index=True
+            )
+            .to(device)
+            .to(emb_dtype)
+        )
         for i, param in enumerate(unary_emb.split_embedding_weights()):
             param.detach().copy_(ref_emb.emb_modules[i].weight)
         output_ref = ref_emb(offsets, indices)
+        if torch_compile:
+            unary_emb = torch_compiled(unary_emb, dynamic=True, fullgraph=True)
         output = unary_emb(offsets_tensor.long(), indices_tensor.long())
-        torch.testing.assert_close(output_ref, output)
+        torch.testing.assert_close(
+            output_ref,
+            output,
+            atol=TOLERANCE_ABS[emb_dtype],
+            rtol=TOLERANCE_REL[emb_dtype],
+        )
 
         # No implementation for CPU backprop yet
         if not gpu_infer:
+            return
+        # FIXME: the following doesn't work
+        # with torch.compile-d unary_emb
+        if torch_compile:
             return
 
         d_output = (
@@ -145,8 +209,13 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
         for emb in ref_emb.emb_modules:
             d_weight_ref.append(emb.weight.grad)
         d_weight_ref = torch.cat(d_weight_ref).view(num_tasks, sum(hash_sizes), -1)
-        d_weight = unary_emb.weight.grad
-        torch.testing.assert_close(d_weight_ref, d_weight)
+        d_weight = unary_emb.weight.grad  # pyre-ignore[16]
+        torch.testing.assert_close(
+            d_weight_ref,
+            d_weight,
+            atol=TOLERANCE_ABS[emb_dtype],
+            rtol=TOLERANCE_REL[emb_dtype],
+        )
 
         # Testing the case where we add permute operation, which produces
         # in contiguous grad tensor, this should also work
@@ -162,9 +231,18 @@ class TableBatchedEmbeddingsTest(unittest.TestCase):
             output = output[1:]
             output.sum().backward()
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    #  `test_utils.gpu_unavailable` to decorator factory `unittest.skipIf`.
     @unittest.skipIf(*gpu_unavailable)
     def test_gpu(self) -> None:
         self._test_main(gpu_infer=True)
+
+    # the test below fails with CUDA error in the OSS CI
+    # likely to the CUDA IMA issues in the test_gpu above
+    # commenting out for now
+    # @unittest.skipIf(*gpu_unavailable)
+    # def test_gpu_torch_compile(self) -> None:
+    #     self._test_main(gpu_infer=True, torch_compile=True)
 
     def test_cpu(self) -> None:
         self._test_main(gpu_infer=False)

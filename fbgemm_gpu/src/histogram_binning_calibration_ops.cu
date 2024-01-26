@@ -60,12 +60,11 @@ std::tuple<Tensor, Tensor> histogram_binning_calibration_cuda(
     double upper_bound,
     int64_t bin_ctr_in_use_after,
     double bin_ctr_weight_value) {
-  TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
-      logit, bin_num_examples, bin_num_positives);
+  TENSOR_ON_CUDA_GPU(logit);
+  TENSOR_ON_CUDA_GPU(bin_num_examples);
+  TENSOR_ON_CUDA_GPU(bin_num_positives);
   TORCH_CHECK_EQ(bin_num_examples.numel(), bin_num_positives.numel());
-
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(logit.get_device());
+  CUDA_DEVICE_GUARD(logit);
 
   Tensor calibrated_prediction = at::empty_like(logit);
   Tensor bin_ids = at::empty({logit.numel()}, logit.options().dtype(at::kLong));
@@ -181,16 +180,13 @@ std::tuple<Tensor, Tensor> histogram_binning_calibration_by_feature_cuda(
     double upper_bound,
     int64_t bin_ctr_in_use_after,
     double bin_ctr_weight_value) {
-  TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
-      logit,
-      segment_value,
-      segment_lengths,
-      bin_num_examples,
-      bin_num_positives);
+  TENSOR_ON_CUDA_GPU(logit);
+  TENSOR_ON_CUDA_GPU(segment_value);
+  TENSOR_ON_CUDA_GPU(segment_lengths);
+  TENSOR_ON_CUDA_GPU(bin_num_examples);
+  TENSOR_ON_CUDA_GPU(bin_num_positives);
   TORCH_CHECK_EQ(bin_num_examples.numel(), bin_num_positives.numel());
-
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(logit.get_device());
+  CUDA_DEVICE_GUARD(logit);
 
   // Convert lengths to offsets for better handling on GPUs.
   const auto segment_lengths_packed = segment_lengths.contiguous();
@@ -341,20 +337,17 @@ generic_histogram_binning_calibration_by_feature_cuda(
     double positive_weight,
     int64_t bin_ctr_in_use_after,
     double bin_ctr_weight_value) {
-  TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(
-      logit,
-      segment_value,
-      segment_lengths,
-      bin_num_examples,
-      bin_num_positives,
-      bin_boundaries);
+  TENSOR_ON_CUDA_GPU(logit);
+  TENSOR_ON_CUDA_GPU(segment_value);
+  TENSOR_ON_CUDA_GPU(segment_lengths);
+  TENSOR_ON_CUDA_GPU(bin_num_examples);
+  TENSOR_ON_CUDA_GPU(bin_num_positives);
+  TENSOR_ON_CUDA_GPU(bin_boundaries);
   TORCH_CHECK_EQ(bin_num_examples.numel(), bin_num_positives.numel());
   TORCH_CHECK(
       bin_num_examples.numel() ==
       (num_segments + 1) * (bin_boundaries.numel() + 1));
-
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(logit.get_device());
+  CUDA_DEVICE_GUARD(logit);
 
   // Convert lengths to offsets for better handling on GPUs.
   const auto segment_lengths_packed = segment_lengths.contiguous();

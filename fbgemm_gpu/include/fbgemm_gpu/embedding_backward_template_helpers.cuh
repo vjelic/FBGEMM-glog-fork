@@ -23,10 +23,10 @@
 #include <curand_kernel.h>
 #include <mutex>
 
-#include "dispatch_macros.h"
-#include "embedding_common.h"
-#include "fbgemm_cuda_utils.cuh"
-#include "sparse_ops_utils.h"
+#include "fbgemm_gpu/dispatch_macros.h"
+#include "fbgemm_gpu/embedding_common.h"
+#include "fbgemm_gpu/fbgemm_cuda_utils.cuh"
+#include "fbgemm_gpu/sparse_ops_utils.h"
 
 #define SHFL_SYNC(val, srcLane) \
   shfl_sync(val, srcLane, kThreadGroupSize, shfl_sync_mask)
@@ -56,49 +56,3 @@ int get_max_thread_blocks_() {
 }
 } // namespace
 } // namespace fbgemm_gpu
-
-__global__
-    __launch_bounds__(fbgemm_gpu::kMaxThreads) void split_embedding_backward_codegen_find_long_segments(
-        const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            sorted_linear_indices_num_runs,
-        const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            sorted_linear_indices_run_lengths,
-        at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            long_run_ids,
-        at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            num_long_run_ids,
-        at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            long_run_id_to_really_long_run_ids,
-        at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            num_really_long_run_ids,
-        at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-            grad_accum_counter,
-        const int32_t max_segment_length_per_warp,
-        const int32_t max_segment_length_per_cta,
-        const bool use_deterministic_algorithms);
-
-template <typename grad_t>
-__global__ __launch_bounds__(fbgemm_gpu::kMaxThreads) void grad_mean_kernel(
-    at::PackedTensorAccessor64<grad_t, 2, at::RestrictPtrTraits>
-        grad_output_mean,
-    const at::PackedTensorAccessor64<grad_t, 2, at::RestrictPtrTraits>
-        grad_output,
-    const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-        D_offsets,
-    const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> offsets,
-    fbgemm_gpu::FixedDivisor fd_B);
-
-template <typename grad_t>
-__global__ __launch_bounds__(fbgemm_gpu::kMaxThreads) void grad_mean_vbe_kernel(
-    at::PackedTensorAccessor64<grad_t, 2, at::RestrictPtrTraits>
-        grad_output_mean,
-    const at::PackedTensorAccessor64<grad_t, 2, at::RestrictPtrTraits>
-        grad_output,
-    const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits>
-        D_offsets,
-    const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> offsets,
-    const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits>
-        grad_offsets,
-    const at::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> b_t_map,
-    const int32_t info_B_num_bits,
-    const uint32_t info_B_mask);

@@ -21,7 +21,7 @@ namespace fbgemm_gpu {
 at::Tensor jagged_to_padded_dense_forward(
     const Tensor& values,
     const std::vector<Tensor>& offsets,
-    const at::ArrayRef<at::SymInt>& max_lengths,
+    c10::SymIntArrayRef max_lengths,
     const double padding_value) {
   const size_t num_jagged_dim = offsets.size();
   TORCH_CHECK(
@@ -30,8 +30,7 @@ at::Tensor jagged_to_padded_dense_forward(
       max_lengths.size(),
       " != num_jagged_dim, ",
       num_jagged_dim);
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(values.get_device());
+  CUDA_DEVICE_GUARD(values);
 
   const Tensor values_canonicalized = values.view(
       {values.size(0),
@@ -83,8 +82,7 @@ std::vector<Tensor> stacked_jagged_1d_to_dense_gpu(
     int64_t padding_value) {
   TORCH_CHECK(values.dim() == 1);
   TORCH_CHECK(lengths.dim() == 2);
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(values.get_device());
+  CUDA_DEVICE_GUARD(values);
 
   const auto lengths_contig = lengths.contiguous();
   int32_t B = lengths.size(1);
@@ -138,8 +136,7 @@ stacked_jagged_2d_to_dense_forward_cuda(
     int64_t padding_value) {
   TORCH_CHECK(values.dim() == 2);
   TORCH_CHECK(lengths.dim() == 2);
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(values.get_device());
+  CUDA_DEVICE_GUARD(values);
 
   const auto lengths_contig = lengths.contiguous();
   int32_t D = values.size(1);
@@ -194,8 +191,7 @@ Tensor stacked_jagged_2d_to_dense_backward_cuda(
     const std::vector<Tensor>& grad_padded_values_per_key,
     const std::vector<Tensor>& offsets_tensor_per_key,
     const std::vector<int64_t>& offset_per_key) {
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(grad_padded_values_per_key[0].get_device());
+  CUDA_DEVICE_GUARD(grad_padded_values_per_key[0]);
 
   auto grad_values =
       at::zeros({total_L, D}, grad_padded_values_per_key[0].options());
@@ -321,8 +317,7 @@ class JaggedDenseAddJaggedOutputGPUOp
 
     auto output = at::empty_like(x_values);
 
-    at::cuda::OptionalCUDAGuard device_guard;
-    device_guard.set_index(dense.get_device());
+    CUDA_DEVICE_GUARD(dense);
 
     AT_DISPATCH_SWITCH(
         x_values.scalar_type(),
@@ -364,9 +359,7 @@ class JaggedDenseAddJaggedOutputGPUOp
     auto offsets = ctx->get_saved_variables();
     auto dense_shape = ctx->saved_data["dense_shape"].toIntVector();
     TORCH_CHECK(grad_outputs.size() == 1);
-
-    at::cuda::OptionalCUDAGuard device_guard;
-    device_guard.set_index(grad_outputs[0].get_device());
+    CUDA_DEVICE_GUARD(grad_outputs[0]);
 
     Tensor dense_values_grad = jagged_to_padded_dense_forward(
         grad_outputs[0],
@@ -399,21 +392,27 @@ jagged_dense_elementwise_add_jagged_output_cuda(
 
 } // namespace fbgemm_gpu
 
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "jagged_to_padded_dense_forward",
     fbgemm_gpu::jagged_to_padded_dense_forward);
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "stacked_jagged_1d_to_dense",
     fbgemm_gpu::stacked_jagged_1d_to_dense_gpu);
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "stacked_jagged_2d_to_dense",
     fbgemm_gpu::stacked_jagged_2d_to_dense_gpu);
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "stacked_jagged_2d_to_dense_forward",
     fbgemm_gpu::stacked_jagged_2d_to_dense_forward_cuda);
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "stacked_jagged_2d_to_dense_backward",
     fbgemm_gpu::stacked_jagged_2d_to_dense_backward_cuda);
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "jagged_dense_elementwise_add_jagged_output",
     fbgemm_gpu::jagged_dense_elementwise_add_jagged_output_cuda);

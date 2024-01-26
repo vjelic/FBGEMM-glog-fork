@@ -39,16 +39,23 @@
 #define SHFL_SYNC(val, srcLane) \
   shfl_sync(val, srcLane, kThreadGroupSize, shfl_sync_mask)
 
-#define MAKE_PTA(TENSOR, T, N, INDEX_NBITS) \
-  MAKE_PACKED_TENSOR_ACCESSOR_BASE(         \
-      func_name, TENSOR, T, N, at::RestrictPtrTraits, INDEX_NBITS)
-
-#define MAKE_PTA_ACC(TENSOR, T, N, INDEX_NBITS) \
-  MAKE_PACKED_TENSOR_ACCESSOR_ACC_TYPE_BASE(    \
-      func_name, TENSOR, T, N, at::RestrictPtrTraits, INDEX_NBITS)
-
 constexpr int32_t kCacheLocationMissing = -1;
 constexpr size_t kForwardMaxThreads = 512;
+
+namespace fbgemm_gpu {
+
+enum cache_conflict_miss_rate {
+  // Cache conflict misses will sometimes occur
+  mixed = 0,
+  // Cache conflict misses will always occur, i.e. every weight row to be
+  // accessed is NOT in the cache
+  all = 1,
+  // Cache conflict misses will never occur, i.e. every weight row to be
+  // accessed IS in the cache
+  zero = 2,
+};
+
+} // namespace fbgemm_gpu
 
 namespace nbit {
 // "Effective" number of elements in the row when we include the row-wise
@@ -138,7 +145,7 @@ __device__ __forceinline__ void cp_async_fence() {
 
 /// Partial specialization
 
-/// Blocks until all but <N> previous cp.async.commit_group operations have
+/// Blocks until all but N previous cp.async.commit_group operations have
 /// committed.
 
 template <int N>

@@ -9,6 +9,7 @@
 #pragma once
 
 #include <ATen/ATen.h>
+#include <cstdint>
 
 namespace fbgemm_gpu {
 
@@ -40,6 +41,12 @@ at::Tensor asynchronous_complete_cumsum_cpu(const at::Tensor& t_in);
 
 ///@ingroup sparse-data-cpu
 at::Tensor asynchronous_inclusive_cumsum_cpu(const at::Tensor& t_in);
+
+///@ingroup sparse-data-cuda
+at::Tensor asynchronous_complete_cumsum_meta(const at::Tensor& t_in);
+
+///@ingroup sparse-data-cuda
+at::Tensor asynchronous_exclusive_cumsum_meta(const at::Tensor& t_in);
 
 ///@ingroup sparse-data-cuda
 at::Tensor offsets_range_cuda(const at::Tensor& offsets, int64_t range_size);
@@ -96,6 +103,7 @@ at::Tensor invert_permute_cuda(const at::Tensor& permute);
 #endif
 
 /// @ingroup sparse-data-cuda
+///
 /// expand_into_jagged_permute expand the sparse data permute index from
 /// table dimension to batch dimension, for cases where the sparse features
 /// has different batch sizes across ranks.
@@ -134,13 +142,16 @@ std::tuple<
 
 ///@ingroup sparse-data-cuda
 block_bucketize_sparse_features_cuda(
-    at::Tensor lengths,
-    at::Tensor indices,
-    bool bucketize_pos,
-    bool sequence,
-    at::Tensor block_sizes,
-    int64_t my_size,
-    c10::optional<at::Tensor> weights);
+    const at::Tensor& lengths,
+    const at::Tensor& indices,
+    const bool bucketize_pos,
+    const bool sequence,
+    const at::Tensor& block_sizes,
+    const int64_t my_size,
+    const c10::optional<at::Tensor>& weights,
+    const c10::optional<at::Tensor>& batch_size_per_feature,
+    const int64_t max_batch_size,
+    const c10::optional<std::vector<at::Tensor>>& block_bucketize_pos);
 
 std::tuple<
     at::Tensor,
@@ -151,13 +162,16 @@ std::tuple<
 
 ///@ingroup sparse-data-cpu
 block_bucketize_sparse_features_cpu(
-    at::Tensor lengths,
-    at::Tensor indices,
-    bool bucketize_pos,
-    bool sequence,
-    at::Tensor block_sizes,
-    int64_t my_size,
-    c10::optional<at::Tensor> weights);
+    const at::Tensor& lengths,
+    const at::Tensor& indices,
+    const bool bucketize_pos,
+    const bool sequence,
+    const at::Tensor& block_sizes,
+    const int64_t my_size,
+    const c10::optional<at::Tensor>& weights,
+    const c10::optional<at::Tensor>& batch_size_per_feature,
+    const int64_t max_batch_size,
+    const c10::optional<std::vector<at::Tensor>>& block_bucketize_pos);
 
 std::tuple<
     at::Tensor,
@@ -217,12 +231,14 @@ at::Tensor _float_or_half_to_fused8bitrowwise_gpu(const at::Tensor& input);
 at::Tensor _fused8bitrowwise_to_float_gpu(const at::Tensor& input);
 at::Tensor _FP8rowwise_to_float_gpu(
     const at::Tensor& input,
-    const bool forward = true);
+    const bool forward = true,
+    const int64_t output_dtype = 0);
 at::Tensor _paddedFP8rowwise_to_float_gpu(
     const at::Tensor& input,
     const bool forward = true,
     const int64_t row_dim = 256,
-    const int64_t output_last_dim = -1);
+    const int64_t output_last_dim = -1,
+    const int64_t output_dtype = 0);
 at::Tensor _fused8bitrowwise_to_half_gpu(const at::Tensor& input);
 at::Tensor _fused8bitrowwise_to_float_or_half_gpu(
     const at::Tensor& input,
@@ -236,7 +252,8 @@ at::Tensor float_or_half_to_fused8bitrowwise_cpu(const at::Tensor& input);
 at::Tensor fused8bitrowwise_to_float_cpu(const at::Tensor& input);
 at::Tensor FP8rowwise_to_float_cpu(
     const at::Tensor& input,
-    const bool forward = true);
+    const bool forward = true,
+    const int64_t output_dtype = 0);
 at::Tensor fused8bitrowwise_to_half_cpu(const at::Tensor& input);
 at::Tensor fused8bitrowwise_to_float_or_half_cpu(
     const at::Tensor& input,
@@ -334,6 +351,14 @@ at::Tensor reorder_batched_ad_indices_gpu(
     const bool broadcast_indices = false,
     const int64_t num_indices_after_broadcast = -1);
 
+///@ingroup sparse-data-cuda
+at::Tensor reorder_batched_sequence_embeddings_gpu(
+    const at::Tensor& cat_sequence_embeddings_offsets,
+    const at::Tensor& cat_sequence_embeddings,
+    const at::Tensor& reordered_cat_sequence_embeddings_offsets,
+    const at::Tensor& batch_offsets,
+    const int64_t num_items_in_batch);
+
 ///@ingroup sparse-data-cpu
 at::Tensor reorder_batched_ad_lengths_cpu(
     const at::Tensor& cat_ad_lengths,
@@ -349,7 +374,23 @@ at::Tensor reorder_batched_ad_indices_cpu(
     const int64_t num_ads_in_batch,
     const bool broadcast_indices = false,
     const int64_t num_indices_after_broadcast = -1);
-
+///@ingroup sparse-data-cpu
+at::Tensor reorder_batched_sequence_embeddings_cpu(
+    const at::Tensor& cat_sequence_embeddings_offsets,
+    const at::Tensor& cat_sequence_embeddings,
+    const at::Tensor& reordered_cat_sequence_embeddings_offsets,
+    const at::Tensor& batch_offsets,
+    const int64_t num_items_in_batch);
+///@ingroup sparse-data-cpu
+at::Tensor cat_reorder_batched_ad_indices_cpu(
+    const at::Tensor& cat_ad_offsets,
+    const std::vector<at::Tensor>& cat_ad_indices,
+    const at::Tensor& reordered_cat_ad_offsets,
+    const at::Tensor& batch_offsets,
+    const int64_t num_ads_in_batch,
+    const bool broadcast_indices,
+    const int64_t num_indices_after_broadcast,
+    const bool pinned_memory = false);
 at::Tensor recat_embedding_grad_output_cuda(
     at::Tensor grad_output, // [B_local][T_global][D]
     const std::vector<int64_t>& num_features_per_rank);
@@ -393,7 +434,7 @@ std::vector<at::Tensor> stacked_jagged_2d_to_dense_cpu(
 at::Tensor jagged_to_padded_dense(
     const at::Tensor& values,
     const std::vector<at::Tensor>& offsets,
-    const std::vector<std::int64_t>& max_lengths,
+    const c10::SymIntArrayRef max_lengths,
     const double padding_value);
 
 at::Tensor jagged_dense_elementwise_add(
@@ -404,13 +445,24 @@ at::Tensor jagged_dense_elementwise_add(
 at::Tensor jagged_1d_to_dense(
     at::Tensor values,
     at::Tensor offsets,
-    int64_t max_L,
+    c10::SymInt max_L,
     int64_t padding_value);
 
 at::Tensor jagged_2d_to_dense(
     at::Tensor values,
     at::Tensor offsets,
-    int64_t max_sequence_length);
+    c10::SymInt max_sequence_length);
+
+at::Tensor jagged_1d_to_dense_meta(
+    at::Tensor values,
+    at::Tensor offsets,
+    c10::SymInt max_L,
+    int64_t padding_value);
+
+at::Tensor jagged_2d_to_dense_meta(
+    at::Tensor values,
+    at::Tensor offsets,
+    c10::SymInt max_sequence_length);
 
 std::tuple<at::Tensor, std::vector<at::Tensor>>
 jagged_dense_dense_elementwise_add_jagged_output(
@@ -432,7 +484,7 @@ std::tuple<at::Tensor, std::vector<at::Tensor>> jagged_dense_elementwise_mul(
 std::tuple<at::Tensor, std::vector<at::Tensor>> dense_to_jagged(
     const at::Tensor& dense,
     const std::vector<at::Tensor>& offsets,
-    const c10::optional<at::SymInt>& total_L);
+    c10::optional<at::SymInt> total_L);
 
 std::tuple<at::Tensor, std::vector<at::Tensor>>
 jagged_dense_elementwise_add_jagged_output(
@@ -475,20 +527,26 @@ std::tuple<at::Tensor, at::Tensor> jagged_dense_bmm(
     const at::Tensor& y,
     const int64_t max_L);
 
+std::tuple<at::Tensor, at::Tensor> masked_select_jagged_1d(
+    const at::Tensor& values,
+    const at::Tensor& lengths,
+    const at::Tensor& mask);
+
 #endif
 
 ///@ingroup sparse-data-cpu
 /// Divide the prediction range (e.g., [0, 1]) into B bins. In each bin, use
-/// two parameters to store the number of positive examples and the number of
-/// examples that fall into this bucket. So we basically have a histogram for
-/// the model prediction. As a result, for each bin, we have a statistical
-/// value for the real CTR (`num_pos / num_example`). We use this statistical
-/// value as the final calibrated prediction if the pre-cali prediction falls
-/// into the corresponding bin. In this way, the predictions within each bin
-/// should be well-calibrated if we have sufficient examples. That is, we have
-/// a fine-grained calibrated model by this calibration module. Theoretically,
-/// this calibration layer can fix any uncalibrated model or prediction if we
-/// have sufficient bins and examples.
+/// two parameters to store the number of positive examples and the number
+/// of examples that fall into this bucket. So we basically have a histogram
+/// for the model prediction. As a result, for each bin, we have a
+/// statistical value for the real CTR (`num_pos / num_example`). We use
+/// this statistical value as the final calibrated prediction if the
+/// pre-cali prediction falls into the corresponding bin. In this way, the
+/// predictions within each bin should be well-calibrated if we have
+/// sufficient examples. That is, we have a fine-grained calibrated model by
+/// this calibration module. Theoretically, this calibration layer can fix
+/// any uncalibrated model or prediction if we have sufficient bins and
+/// examples.
 ///@return `[calibrated_prediction, bin_ids]`
 ///@param logit is input tensor before applying Sigmoid.
 /// Assumes positive weight calibration is used for calibartion target, and
@@ -498,8 +556,8 @@ std::tuple<at::Tensor, at::Tensor> jagged_dense_bmm(
 ///@param lower/upper_bound Bounds of the bins.
 ///@param bin_ctr_in_use_after We will use the calibration_target for the
 /// final calibrated prediction if we don't have sufficient examples. Only
-/// use the statistical value of bin CTR after we observe `bin_ctr_in_use_after`
-/// examples that fall in this bin. Default value: 0.
+/// use the statistical value of bin CTR after we observe
+/// `bin_ctr_in_use_after` examples that fall in this bin. Default value: 0.
 ///@param bin_ctr_weight_value Weight for statistical value of bin CTR.
 /// When this is specified, we perform a weighted sum for the statisctical
 /// bin CTR and the calibration_target:
@@ -696,24 +754,31 @@ std::tuple<at::Tensor, at::Tensor> permute_sequence_embeddings_cuda(
 at::Tensor pack_segments_cpu(
     const at::Tensor& t_in,
     const at::Tensor& lengths,
-    const int64_t max_length);
+    int64_t max_length);
 
 ///@ingroup sparse-data-cuda
 at::Tensor pack_segments_cuda(
     const at::Tensor& t_in,
     const at::Tensor& lengths,
-    const int64_t max_length);
+    int64_t max_length);
 
 at::Tensor pack_segments_forward_cuda(
     const at::Tensor& t_in,
     const at::Tensor& lengths,
-    const int64_t max_length);
+    int64_t max_length);
 
 at::Tensor pack_segments_backward_cuda(
     const at::Tensor& data,
     const at::Tensor& lengths,
     int64_t total_length,
     int64_t max_length);
+
+///@ingroup sparse-data-cuda
+void compute_frequency_sequence(
+    const at::Tensor& input,
+    at::Tensor& output,
+    const int start_input,
+    const int output_size);
 
 ///@ingroup sparse-data-cuda
 at::Tensor index_select_cuda(
@@ -740,7 +805,6 @@ void group_index_select_or_add_cuda(
     const c10::ScalarType& input_scalar_type,
     const c10::ScalarType& indices_scalar_type,
     const c10::DeviceIndex& device,
-    const int max_indices,
     const int num_work_rows,
     const int64_t total_num_warps,
     const int group_size,

@@ -14,9 +14,11 @@ namespace fbgemm_gpu {
 
 template <const int THREADS_PER_BLOCK, typename index_t, typename scalar_t>
 __global__ __launch_bounds__(kMaxThreads) void jagged_softmax_kernel(
-    const at::PackedTensorAccessor32<scalar_t, 2> values,
-    const at::PackedTensorAccessor32<index_t, 1> offsets,
-    at::PackedTensorAccessor32<scalar_t, 2> output,
+    const pta::PackedTensorAccessor32<scalar_t, 2, at::RestrictPtrTraits>
+        values,
+    const pta::PackedTensorAccessor32<index_t, 1, at::RestrictPtrTraits>
+        offsets,
+    pta::PackedTensorAccessor32<scalar_t, 2, at::RestrictPtrTraits> output,
     const int max_L) {
   const auto B = offsets.size(0) - 1;
   const auto D = output.size(1);
@@ -117,9 +119,7 @@ Tensor jagged_softmax_forward_cuda(
     const Tensor& offsets,
     const int64_t max_L) {
   TENSORS_ON_SAME_CUDA_GPU_IF_NOT_OPTIONAL(values, offsets);
-
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(values.get_device());
+  CUDA_DEVICE_GUARD(values);
 
   const auto B = offsets.numel() - 1;
   const auto D = values.size(1);
@@ -137,14 +137,19 @@ Tensor jagged_softmax_forward_cuda(
               values.scalar_type(),
               "jagged_softmax_kernel_2",
               [&] {
+
+#ifdef FBGEMM_GPU_MEMCHECK
+                const auto func_name1 = "jagged_softmax_kernel";
+#endif
+
                 jagged_softmax_kernel<THREADS_PER_BLOCK, index_t, scalar_t>
                     <<<grid,
                        THREADS_PER_BLOCK,
                        0,
                        at::cuda::getCurrentCUDAStream()>>>(
-                        values.packed_accessor32<scalar_t, 2>(),
-                        offsets.packed_accessor32<index_t, 1>(),
-                        output.packed_accessor32<scalar_t, 2>(),
+                        MAKE_PTA_WITH_NAME(func_name1, values, scalar_t, 2, 32),
+                        MAKE_PTA_WITH_NAME(func_name1, offsets, index_t, 1, 32),
+                        MAKE_PTA_WITH_NAME(func_name1, output, scalar_t, 2, 32),
                         (int)max_L);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
               });
@@ -155,6 +160,7 @@ Tensor jagged_softmax_forward_cuda(
 }
 } // namespace fbgemm_gpu
 
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "jagged_softmax_forward",
     fbgemm_gpu::jagged_softmax_forward_cuda);

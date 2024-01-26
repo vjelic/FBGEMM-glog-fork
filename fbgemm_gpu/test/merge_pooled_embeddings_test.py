@@ -5,9 +5,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-unsafe
 
 import unittest
+from typing import Tuple
 
 import hypothesis.strategies as st
 import torch
@@ -21,18 +21,32 @@ try:
     # pyre-ignore[21]
     from test_utils import gpu_unavailable
 except Exception:
-    torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:merge_pooled_embeddings")
+    if torch.version.hip:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu:merge_pooled_embeddings_hip"
+        )
+    else:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu:merge_pooled_embeddings"
+        )
+
     torch.ops.load_library(
         "//deeplearning/fbgemm/fbgemm_gpu:merge_pooled_embeddings_cpu"
     )
+    import fbgemm_gpu.sparse_ops  # noqa: F401, E402
     from fbgemm_gpu.test.test_utils import gpu_unavailable
 
     open_source = False
+
+typed_gpu_unavailable: Tuple[bool, str] = gpu_unavailable
 
 
 @unittest.skipIf(*gpu_unavailable)
 @unittest.skipIf(open_source, "Not supported in open source yet")
 class MergePooledEmbeddingsTest(unittest.TestCase):
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    #  `hypothesis.strategies.integers($parameter$min_value = 1, $parameter$max_value =
+    #  10)` to decorator factory `hypothesis.given`.
     @given(
         num_ads=st.integers(min_value=1, max_value=10),
         embedding_dimension=st.integers(min_value=1, max_value=32),
@@ -46,11 +60,17 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
     @settings(verbosity=Verbosity.verbose, max_examples=40, deadline=None)
     def test_merge(
         self,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_ads,
+        # pyre-fixme[2]: Parameter must be annotated.
         embedding_dimension,
+        # pyre-fixme[2]: Parameter must be annotated.
         ads_tables,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_gpus,
+        # pyre-fixme[2]: Parameter must be annotated.
         non_default_stream,
+        # pyre-fixme[2]: Parameter must be annotated.
         r,
         dim: int,
     ) -> None:
@@ -79,6 +99,8 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
                 pooled_ad_embeddings, uncat_size, batch_indices.device, dim
             )
 
+        # pyre-fixme[3]: Return type must be annotated.
+        # pyre-fixme[2]: Parameter must be annotated.
         def ref(pooled_ad_embeddings, batch_indices):
             return torch.cat([p.cpu() for p in pooled_ad_embeddings], dim=dim)
 
@@ -93,6 +115,9 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
         torch.testing.assert_close(output_ref, output.cpu())
         torch.testing.assert_close(output_ref, output_cpu)
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    #  `hypothesis.strategies.integers($parameter$min_value = 1, $parameter$max_value =
+    #  10)` to decorator factory `hypothesis.given`.
     @given(
         num_inputs=st.integers(min_value=1, max_value=10),
         num_gpus=st.integers(min_value=1, max_value=torch.cuda.device_count()),
@@ -102,8 +127,11 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
     @settings(verbosity=Verbosity.verbose, max_examples=40, deadline=None)
     def test_all_to_one_device(
         self,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_inputs,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_gpus,
+        # pyre-fixme[2]: Parameter must be annotated.
         r,
     ) -> None:
         dst_device = torch.device(f"cuda:{r.randint(0, num_gpus - 1)}")
@@ -129,6 +157,9 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
         self.assertFalse(output_meta.is_cpu)
         self.assertTrue(output_meta.is_meta)
 
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    #  `hypothesis.strategies.integers($parameter$min_value = 1, $parameter$max_value =
+    #  10)` to decorator factory `hypothesis.given`.
     @given(
         num_inputs=st.integers(min_value=1, max_value=10),
         num_gpus=st.integers(min_value=1, max_value=torch.cuda.device_count()),
@@ -138,8 +169,11 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
     @settings(verbosity=Verbosity.verbose, max_examples=10, deadline=None)
     def test_sum_reduce_to_one(
         self,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_inputs,
+        # pyre-fixme[2]: Parameter must be annotated.
         num_gpus,
+        # pyre-fixme[2]: Parameter must be annotated.
         r,
     ) -> None:
         dst_device = torch.device(f"cuda:{r.randint(0, num_gpus - 1)}")
@@ -153,6 +187,37 @@ class MergePooledEmbeddingsTest(unittest.TestCase):
             torch.testing.assert_close(
                 cuda_output.cpu(), torch.stack(inputs).sum(dim=0)
             )
+
+    @unittest.skipIf(*typed_gpu_unavailable)
+    def test_merge_pooled_embeddings_meta(self) -> None:
+        """
+        Test that merge_pooled_embeddings works with meta tensor and
+        dynamo export mode
+        """
+        uncat_size = 2
+        cat_dim = 1
+        pooled_embeddings = [torch.ones(uncat_size, 4), torch.ones(uncat_size, 8)]
+
+        # pyre-fixme[53]: Captured variable `cat_dim` is not annotated.
+        # pyre-fixme[53]: Captured variable `pooled_embeddings` is not annotated.
+        # pyre-fixme[53]: Captured variable `uncat_size` is not annotated.
+        # pyre-fixme[3]: Return type must be annotated.
+        # pyre-fixme[2]: Parameter must be annotated.
+        def fbgemm_merge_pooled_embeddings(device):
+            pooled_embeddings_device = [
+                pooled_embedding.to(device) for pooled_embedding in pooled_embeddings
+            ]
+            return torch.ops.fbgemm.merge_pooled_embeddings(
+                pooled_embeddings_device, uncat_size, device, cat_dim
+            )
+
+        output_cpu = fbgemm_merge_pooled_embeddings(torch.device("cpu"))
+        output_meta = fbgemm_merge_pooled_embeddings(torch.device("meta"))
+
+        self.assertFalse(output_meta.is_cpu)
+        self.assertTrue(output_meta.is_meta)
+
+        assert output_meta.shape == output_cpu.shape
 
 
 if __name__ == "__main__":

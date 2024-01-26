@@ -13,12 +13,16 @@
 
 #include <ATen/ATen.h>
 #include <ATen/AccumulateType.h>
+#include <ATen/core/op_registration/op_registration.h>
+#include <torch/script.h>
 
 #include "codegen/embedding_forward_split_cpu.h"
 #include "fbgemm/FbgemmEmbedding.h"
 #include "fbgemm/Types.h"
 #include "fbgemm_gpu/embedding_common.h"
+#include "fbgemm_gpu/dispatch_macros.h"
 #include "fbgemm_gpu/cpu_utils.h"
+#include "fbgemm_gpu/sparse_ops_utils.h"
 
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
@@ -341,11 +345,11 @@ for (const auto d : c10::irange(D)) {
   grad_output = grad_output.contiguous();
 
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  FBGEMM_DISPATCH_FLOAT_AND_HALF(
       grad_output.scalar_type(),
       "split_embedding_backward_exact_cpu_outer", [&]() {
         using grad_t = scalar_t;
-      AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+      FBGEMM_DISPATCH_FLOAT_AND_HALF(
           host_weights.scalar_type(), "split_embedding_backward_exact_cpu", [&] {
             split_embedding_backward_exact_cpu_kernel<scalar_t, grad_t>(
                 grad_output,
@@ -376,7 +380,7 @@ for (const auto d : c10::irange(D)) {
 
   // When input is dense enough, avoid sorting and just treat as dense.
   auto grad = zeros_like(host_weights, grad_output.dtype());
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  FBGEMM_DISPATCH_FLOAT_AND_HALF(
       grad_output.scalar_type(), "split_embedding_backward_exact_cpu", [&] {
 
         split_embedding_backward_exact_cpu_dense_kernel<scalar_t>(
@@ -396,4 +400,14 @@ for (const auto d : c10::irange(D)) {
   return grad;
   {% endif %}
 }
+
+TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
+  {% if not dense %}
+  m.def("split_embedding_backward_codegen_{{ optimizer }}_cpu(Tensor grad_output, Tensor(a!) host_weights, Tensor weights_placements, Tensor weights_offsets, Tensor D_offsets, int max_D, Tensor hash_size_cumsum, int total_hash_size_bits, Tensor indices, Tensor offsets,int pooling_mode, Tensor indice_weights, bool stochastic_rounding, {{ (args.split_function_args | join(", ")).replace("double", "float").replace("int64_t", "int").replace("Tensor momentum1_host", "Tensor(b!) momentum1_host")}}, int output_dtype = 0) -> ()");
+  {% else %}
+  m.def("split_embedding_backward_codegen_{{ optimizer }}_cpu(Tensor grad_output, Tensor(a!) host_weights, Tensor weights_offsets, Tensor D_offsets, int max_D, Tensor hash_size_cumsum, int total_hash_size_bits, Tensor indices, Tensor offsets,int pooling_mode, Tensor indice_weights, {{ (args.split_function_args | join(", ")).replace("double", "float").replace("int64_t", "int").replace("Tensor momentum1_host", "Tensor(b!) momentum1_host")}}) -> Tensor");
+  {% endif %}
+  DISPATCH_TO_CPU("split_embedding_backward_codegen_{{ optimizer }}_cpu", split_embedding_backward_codegen_{{ optimizer }}_cpu);
+}
+
 // clang-format on

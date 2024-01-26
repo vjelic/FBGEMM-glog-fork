@@ -375,15 +375,19 @@ bool fbgemmHasAvx512Support() {
 }
 
 bool fbgemmHasAvx2Support() {
-  return (cpuinfo_has_x86_avx2());
+  return cpuinfo_has_x86_avx2();
 }
 
 bool fbgemmHasAvx512VnniSupport() {
-  return (cpuinfo_has_x86_avx512vnni());
+  return cpuinfo_has_x86_avx512vnni();
 }
 
 bool fbgemmHasArmNeonSupport() {
-  return (cpuinfo_has_arm_neon());
+  return cpuinfo_has_arm_neon();
+}
+
+bool fbgemmHasArmSve2Support() {
+  return cpuinfo_has_arm_sve2();
 }
 
 void fbgemmPartition1D(
@@ -623,7 +627,6 @@ void combine_prefix_sum(
   int64_t offset = 0;
   update_prefsum_and_offset_in_range(
       offset, 0, RDX_HIST_SIZE, nthreads, histogram, histogram_ps);
-  histogram_ps[RDX_HIST_SIZE * nthreads] = offset;
   // TODO(DamianSzwichtenberg): Is assert sufficient? In most cases, it will
   // work only in debug build.
   assert(offset == elements_count);
@@ -641,7 +644,6 @@ void combine_prefix_sum_for_msb(
       offset, 128, RDX_HIST_SIZE, nthreads, histogram, histogram_ps);
   update_prefsum_and_offset_in_range(
       offset, 0, 128, nthreads, histogram, histogram_ps);
-  histogram_ps[RDX_HIST_SIZE * (nthreads - 1) + 127] = offset;
   // TODO(DamianSzwichtenberg): Is assert sufficient? In most cases, it will
   // work only in debug build.
   assert(offset == elements_count);
@@ -760,13 +762,13 @@ std::pair<K*, V*> radix_sort_parallel(
   const size_t array_size = (size_t)RDX_HIST_SIZE * maxthreads;
   // fixes MSVC error C2131
   auto* const histogram = static_cast<int64_t*>(
-      fbgemm::fbgemmAlignedAlloc(64, (array_size) * sizeof(int64_t)));
+      fbgemm::fbgemmAlignedAlloc(64, array_size * sizeof(int64_t)));
   auto* const histogram_ps = static_cast<int64_t*>(
-      fbgemm::fbgemmAlignedAlloc(64, (array_size + 1) * sizeof(int64_t)));
+      fbgemm::fbgemmAlignedAlloc(64, array_size * sizeof(int64_t)));
 
 #else
   alignas(64) int64_t histogram[RDX_HIST_SIZE * maxthreads];
-  alignas(64) int64_t histogram_ps[RDX_HIST_SIZE * maxthreads + 1];
+  alignas(64) int64_t histogram_ps[RDX_HIST_SIZE * maxthreads];
 #endif
   // If negative values are present, we want to perform all passes
   // up to a sign bit
@@ -812,10 +814,10 @@ std::pair<K*, V*> radix_sort_parallel(
 }
 
 #define FORALL_INT_TYPES_AND_KEY(key_t, _) \
-  _(key_t, uint8_t)                        \
-  _(key_t, int8_t)                         \
-  _(key_t, int16_t)                        \
-  _(key_t, int)                            \
+  _(key_t, uint8_t);                       \
+  _(key_t, int8_t);                        \
+  _(key_t, int16_t);                       \
+  _(key_t, int);                           \
   _(key_t, int64_t)
 
 #define INSTANTIATE(key_t, val_t)                                    \
@@ -826,7 +828,7 @@ std::pair<K*, V*> radix_sort_parallel(
       val_t* const tmp_value_buf,                                    \
       const int64_t elements_count,                                  \
       const int64_t max_value,                                       \
-      const bool maybe_with_neg_vals);
+      const bool maybe_with_neg_vals)
 
 FORALL_INT_TYPES_AND_KEY(uint8_t, INSTANTIATE);
 FORALL_INT_TYPES_AND_KEY(int8_t, INSTANTIATE);

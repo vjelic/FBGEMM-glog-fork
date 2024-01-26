@@ -29,10 +29,16 @@ try:
     # pyre-ignore[21]
     from fbgemm_gpu import open_source  # noqa: F401
 except Exception:
-    torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:cumem_utils")
-    torch.ops.load_library(
-        "//deeplearning/fbgemm/fbgemm_gpu:split_table_batched_embeddings"
-    )
+    if torch.version.hip:
+        torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:cumem_utils_hip")
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu:split_table_batched_embeddings_hip"
+        )
+    else:
+        torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu:cumem_utils")
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu:split_table_batched_embeddings"
+        )
 
 
 # pyre-ignore
@@ -416,10 +422,8 @@ def lru_cache_populate_byte(
 
     total_rows = 0
     for request in requests:
-        # pyre-ignore
         prev = replay_cc.lxu_cache_state.clone().detach()
         replay_populate(request)
-        # pyre-ignore
         after = replay_cc.lxu_cache_state.clone().detach()
 
         diff = after - prev
@@ -535,10 +539,8 @@ def lfu_cache_populate_byte(
 
     total_rows = 0
     for request in requests:
-        # pyre-ignore
         prev = replay_cc.lxu_cache_state.clone().detach()
         replay_populate(request)
-        # pyre-ignore
         after = replay_cc.lxu_cache_state.clone().detach()
 
         diff = after - prev
