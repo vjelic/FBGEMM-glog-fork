@@ -2,7 +2,7 @@ Installation Instructions
 =========================
 
 **Note:** The most up-to-date installation instructions are embedded in a set
-of scripts bundled in the FBGEMM_GPU repo under
+of scripts bundled in the FBGEMM repo under
 `setup_env.bash <https://github.com/pytorch/FBGEMM/blob/main/.github/scripts/setup_env.bash>`_.
 
 The general steps for installing FBGEMM_GPU are as follows:
@@ -69,8 +69,8 @@ be verified with the ``nvidia-smi`` command:
   |  No running processes found                                                 |
   +-----------------------------------------------------------------------------+
 
-Set Up the Docker Container and Conda Environment
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Set Up the CUDA Docker Container and Conda Environment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 It is recommended, though not required, to install and run FBGEMM_GPU through a
 Docker setup for isolation and reproducibility of the CUDA environment.
@@ -126,8 +126,8 @@ verified with the ``rocm-smi`` command:
   ================================================================================
   ============================= End of ROCm SMI Log ==============================
 
-Set Up the Docker Container and Conda Environment
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Set Up the ROCm Docker Container and Conda Environment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 It is recommended, though not required, to install and run FBGEMM_GPU through a
 Docker setup for isolation and reproducibility of the ROCm environment, which
