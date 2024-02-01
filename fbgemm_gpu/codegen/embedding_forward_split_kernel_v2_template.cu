@@ -130,12 +130,12 @@ __inline__ __device__ void process_all_indices_no_pooling(
   const auto total_load_D = static_cast<uint32_t>(smem[params_offset + SAVED_PARAMS::P_total_load_D]);
 
   // Each thread loads a separate weight ptr
-  const auto weight_ptrs = reinterpret_cast<const uintptr_t>(&weights[indices[threadIdx.x] * load_D]);
+  const auto weight_ptrs = reinterpret_cast<uintptr_t>(&weights[indices[threadIdx.x] * load_D]);
 
   // Assuming kWarpSize is a multiple of STEP
   for (uint32_t l_start = 0; l_start < TOTAL_L; l_start += STEP) {
     Vec4StepT<STEP, emb_t> vecs;
-    #pragma loop unroll
+    #pragma unroll
     for (uint32_t j = 0; j < STEP; ++j) {
       // Get weight pointer
       const auto* ptr = reinterpret_cast<const emb_vec_t*>(
@@ -151,7 +151,7 @@ __inline__ __device__ void process_all_indices_no_pooling(
 
     if (process_d) {
       // Write to output (not pooling)
-      #pragma loop unroll
+      #pragma unroll
       for (uint32_t j = 0; j < STEP; ++j) {
         {%- if weighted %}
         const auto index_weight = index_weights[l_start + j];
@@ -240,8 +240,9 @@ __noinline__ __device__ void process_all_indices_small_Ls(
       const uint32_t num_offsets = smem[params_offset + SAVED_PARAMS::P_num_offsets];
       const uint32_t total_load_D = smem[params_offset + SAVED_PARAMS::P_total_load_D];
       // Write zeros to the sample that L = 0
+      Vec4StepT<1, emb_t> accumulator;
       for (uint32_t i = 0; i < num_offsets; ++i) {
-        memset(output + i * total_load_D, 0, sizeof(output_vec_t));
+        accumulator.store(output + i * total_load_D);
       }
     }
     return;
@@ -299,7 +300,8 @@ __noinline__ __device__ void process_all_indices_small_Ls(
     auto * __restrict__ const output = *reinterpret_cast<output_vec_t**>(&smem[params_offset + SAVED_PARAMS::P_outputs]);
     const auto total_load_D = static_cast<uint32_t>(smem[params_offset + SAVED_PARAMS::P_total_load_D]);
     if (process_d) {
-      memset(output + write_idx + threadIdx.x, 0, sizeof(output_vec_t));
+      Vec4StepT<1, emb_t> accumulator;
+      accumulator.store(output + write_idx + threadIdx.x);
     }
     write_idx += total_load_D;
 
@@ -330,8 +332,8 @@ __noinline__ __device__ void process_all_indices_small_Ls(
           const cache_t* lxu_cache_weights =
             reinterpret_cast<const cache_t*>(smem[params_offset + LXU_CACHE_PARAMS::P_lxu_cache_weights]);
           SMEM_GENERIC_PTR[threadIdx.x] = cache_idx != kCacheLocationMissing ?
-            reinterpret_cast<const uintptr_t>(&lxu_cache_weights[cache_idx * max_D_cache]) :
-            reinterpret_cast<const uintptr_t>(&weights[indices[l] * load_D]);
+            reinterpret_cast<uintptr_t>(&lxu_cache_weights[cache_idx * max_D_cache]) :
+            reinterpret_cast<uintptr_t>(&weights[indices[l] * load_D]);
         }
         if (!std::is_same<emb_t, cache_t>::value) {
           cache_look_up_bits = ballot_sync(cache_idx != kCacheLocationMissing);
@@ -352,7 +354,7 @@ __noinline__ __device__ void process_all_indices_small_Ls(
     const auto cache_look_up_bits_step = cache_look_up_bits & STEP_MASK;
     if (USE_MIXED_TYPE_CACHE && cache_look_up_bits_step != 0) {
       if (cache_look_up_bits_step == STEP_MASK) {
-        #pragma loop unroll
+        #pragma unroll
         for (uint32_t j = 0; j < STEP; ++j) {
           const auto smem_offset = (l_start % kWarpSize) + j;
           if (process_d) {
@@ -381,7 +383,7 @@ __noinline__ __device__ void process_all_indices_small_Ls(
         cache_look_up_bits >>= STEP;
       }
       else {
-        #pragma loop unroll
+        #pragma unroll
         for (uint32_t j = 0; j < STEP; ++j) {
           const auto smem_offset = (l_start % kWarpSize) + j;
           if (process_d) {
@@ -423,14 +425,14 @@ __noinline__ __device__ void process_all_indices_small_Ls(
     else {
       if (process_d) {
         // Load STEP rows
-        #pragma loop unroll
+        #pragma unroll
         for (uint32_t j = 0; j < STEP; ++j) {
           const auto smem_offset = (l_start % kWarpSize) + j;
           accumulator.load(&SMEM_EMB_WEIGHT_DATA(smem_offset, threadIdx.x), j);
         }
       }
 
-      #pragma loop unroll
+      #pragma unroll
       for (uint32_t j = 0; j < STEP; ++j) {
         // Accumulate rows
         if (process_d) {
@@ -556,8 +558,8 @@ __noinline__ __device__ void process_all_indices_large_Ls(
           const auto* lxu_cache_weights =
             reinterpret_cast<const cache_t*>(smem[params_offset + LXU_CACHE_PARAMS::P_lxu_cache_weights]);
           SMEM_GENERIC_PTR[threadIdx.x] = cache_idx != kCacheLocationMissing ?
-            reinterpret_cast<const uintptr_t>(&lxu_cache_weights[cache_idx * max_D_cache]) :
-            reinterpret_cast<const uintptr_t>(&weights[indices[l] * load_D]);
+            reinterpret_cast<uintptr_t>(&lxu_cache_weights[cache_idx * max_D_cache]) :
+            reinterpret_cast<uintptr_t>(&weights[indices[l] * load_D]);
         }
         if (!std::is_same<emb_t, cache_t>::value) {
           cache_look_up_bits = ballot_sync(cache_idx != kCacheLocationMissing);
@@ -586,20 +588,21 @@ __noinline__ __device__ void process_all_indices_large_Ls(
         {%- endif %}
         if (cache_look_up_bits_step == STEP_MASK) {
           // Load STEP rows from lxu_cache_weights
-          #pragma loop unroll
+          #pragma unroll
           for (uint32_t j = 0; j < STEP; ++j) {
             const auto* weight =
               &SMEM_CACHE_WEIGHT_DATA((l_start % kWarpSize) + SMEM_OFFSET, WEIGHT_OFFSET);
             ACC_ADD_OR_FMA(weight, index_weights[SMEM_OFFSET])
           }
-          cache_look_up_bits >>= STEP * NUM_LOAD_GROUPS;
+          // Bypass the hip clang error of "shift count >= width of type"
+          cache_look_up_bits >>= std::min(STEP * NUM_LOAD_GROUPS, 31u);
         }
         else {
           // Load and accumulate STEP rows for UVM caching that emb_t and cache_t
           // are not the same and rows within STEPS are read from different
           // locations. It is unlikely that the compiler will be able to unroll
           // the loop below because of the runtime conditionals
-          #pragma loop unroll
+          #pragma unroll
           for (uint32_t j = 0; j < STEP; ++j) {
             if (cache_look_up_bits & 1u) {
               // Look up from lxu_cache_weights
@@ -619,7 +622,7 @@ __noinline__ __device__ void process_all_indices_large_Ls(
       }
       else {
         // Load STEP rows from dev_weights
-        #pragma loop unroll
+        #pragma unroll
         for (uint32_t j = 0; j < STEP; ++j) {
           accumulator.load(
               &SMEM_EMB_WEIGHT_DATA(
@@ -639,7 +642,8 @@ __noinline__ __device__ void process_all_indices_large_Ls(
         {%- endif %}
 
         if (USE_MIXED_TYPE_CACHE) {
-          cache_look_up_bits >>= STEP * NUM_LOAD_GROUPS;
+          // Bypass the hip clang error of "shift count >= width of type"
+          cache_look_up_bits >>= std::min(STEP * NUM_LOAD_GROUPS, 31u);
         }
       }
     }
@@ -746,13 +750,34 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
       return;
     }
 
-    bool is_small_L;
-    if (threadIdx.x == 0) {
-      // Use the small-L optimization if average L <= 8
-      is_small_L = (offsets[(t + 1) * B] - offsets[t * B]) <= (static_cast<index_t>(B) * 8);
-    }
-    is_small_L = shfl_sync(is_small_L, 0);
+    const auto total_L = offsets[(t + 1) * B] - offsets[t * B];
+    const auto is_zero_total_L = total_L == 0;
 
+    // Short circuit for all zeros
+    if (is_zero_total_L) {
+      const uint32_t D_start = D_offsets[t] / VEC_WIDTH;
+      const uint32_t load_D = (D_offsets[t + 1] / VEC_WIDTH) - D_start;
+      const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, kWarpSize);
+      if (table_warp_id >= num_warps_per_row * B) {
+        return;
+      }
+      const uint32_t load_d = (table_warp_id % num_warps_per_row) * kWarpSize;
+      if (load_d + threadIdx.x < load_D) {
+        const uint32_t b = table_warp_id / num_warps_per_row;
+        const uint32_t total_load_D = D_offsets[T] / VEC_WIDTH;
+
+        output_vec_t* output_ptr = reinterpret_cast<output_vec_t*>(output) +
+            D_start + b * total_load_D + load_d + threadIdx.x;
+
+        // Write zeros to output
+        Vec4StepT<1, emb_t> accumulator;
+        accumulator.store(output_ptr);
+      }
+      return;
+    }
+
+    // Use the small-L optimization if average L <= 8
+    const auto is_small_L = total_L <= (static_cast<index_t>(B) * 8);
     const uint32_t num_warps_for_small_L = DIV_ROUND_UP(B, NUM_OFFSETS_PER_WARP);
 
     // Early exit for small-L to avoid D_offsets reads
@@ -879,7 +904,8 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
       if (L == 0) {
         if (load_d + threadIdx.x < load_D) {
           // Write zeros to output
-          memset(output_ptr, 0, sizeof(output_vec_t));
+          Vec4StepT<1, emb_t> accumulator;
+          accumulator.store(output_ptr);
         }
       }
       else {
@@ -916,6 +942,7 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
 
     // Tail warp
     // STEP_MASK computation assumes STEP = 4
+    {% if not weighted %}
     if (load_D - load_d < kWarpSize) {
       const auto tail_warp_size = load_D % kWarpSize;
       if (tail_warp_size <= 8) {
@@ -931,6 +958,9 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
     else {
       INVOKE_PROCESS_ALL_INDICES(large_Ls, 32, 0xf)
     }
+    {% else %}
+    INVOKE_PROCESS_ALL_INDICES(large_Ls, 32, 0xf)
+    {% endif %}
 
 #undef INVOKE_PROCESS_ALL_INDICES_HELPER
 #undef INVOKE_PROCESS_ALL_INDICES

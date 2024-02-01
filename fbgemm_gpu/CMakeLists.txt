@@ -182,14 +182,14 @@ set(GPU_ONLY_OPTIMIZERS
   partial_rowwise_adam
   partial_rowwise_lamb
   lars_sgd
-  rowwise_adagrad_with_weight_decay
-  approx_rowwise_adagrad_with_weight_decay
   none)
 
 set(DEPRECATED_OPTIMIZERS
   approx_sgd
   approx_rowwise_adagrad
-  approx_rowwise_adagrad_with_counter)
+  approx_rowwise_adagrad_with_counter
+  approx_rowwise_adagrad_with_weight_decay
+  rowwise_adagrad_with_weight_decay)
 
 set(ALL_OPTIMIZERS
   ${COMMON_OPTIMIZERS}
@@ -202,7 +202,16 @@ set(CPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${CPU_ONLY_OPTIMIZERS})
 set(GPU_OPTIMIZERS ${COMMON_OPTIMIZERS} ${GPU_ONLY_OPTIMIZERS})
 
 # Optimizers with the VBE support
-set(VBE_OPTIMIZERS rowwise_adagrad)
+set(VBE_OPTIMIZERS
+    rowwise_adagrad
+    rowwise_adagrad_with_counter
+    sgd)
+
+# Individual optimizers (not fused with SplitTBE backward)
+set(DEFUSED_OPTIMIZERS rowwise_adagrad)
+
+# Individual optimizers (not fused with SplitTBE backward)
+set(DEFUSED_OPTIMIZERS rowwise_adagrad)
 
 set(gen_gpu_kernel_source_files
     "gen_embedding_forward_dense_weighted_codegen_cuda.cu"
@@ -211,9 +220,17 @@ set(gen_gpu_kernel_source_files
     "gen_embedding_forward_split_unweighted_codegen_cuda.cu"
     "gen_embedding_backward_dense_indice_weights_codegen_cuda.cu"
     "gen_embedding_backward_split_indice_weights_codegen_cuda.cu"
-    "gen_embedding_backward_split_grad.cu"
     "gen_embedding_forward_split_weighted_vbe_codegen_cuda.cu"
-    "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu")
+    "gen_embedding_forward_split_unweighted_vbe_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_forward_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_forward_kernel.cu"
+    "gen_batch_index_select_dim0_forward_kernel_small.cu"
+    "gen_batch_index_select_dim0_backward_codegen_cuda.cu"
+    "gen_batch_index_select_dim0_backward_kernel_cta.cu"
+    "gen_batch_index_select_dim0_backward_kernel_warp.cu"
+    "gen_embedding_backward_split_grad_embedding_ops.cu"
+    "gen_embedding_backward_split_grad_index_select.cu"
+)
 
 if(NOT USE_ROCM)
   list(APPEND gen_gpu_kernel_source_files
@@ -281,13 +298,14 @@ foreach(optimizer ${CPU_OPTIMIZERS})
 endforeach()
 
 foreach(optimizer ${GPU_OPTIMIZERS})
+  list(APPEND gen_gpu_kernel_source_files
+    "gen_embedding_optimizer_${optimizer}_split_device_kernel.cuh")
   foreach(wdesc weighted unweighted_nobag unweighted)
     list(APPEND gen_gpu_kernel_source_files
       "gen_embedding_backward_${optimizer}_split_${wdesc}_cuda.cu"
       "gen_embedding_backward_${optimizer}_split_${wdesc}_kernel_cta.cu"
       "gen_embedding_backward_${optimizer}_split_${wdesc}_kernel_warp.cu")
   endforeach()
-
 endforeach()
 
 foreach(optimizer ${VBE_OPTIMIZERS})
@@ -300,10 +318,20 @@ foreach(optimizer ${VBE_OPTIMIZERS})
   endforeach()
 endforeach()
 
+foreach(optimizer ${DEFUSED_OPTIMIZERS})
+  list(APPEND gen_defused_optim_source_files
+    "gen_embedding_optimizer_${optimizer}_split.cpp"
+    "gen_embedding_optimizer_${optimizer}_split_cuda.cu"
+    "gen_embedding_optimizer_${optimizer}_split_kernel.cu")
+  list(APPEND gen_defused_optim_py_files
+    "${CMAKE_BINARY_DIR}/split_embedding_optimizer_${optimizer}.py")
+endforeach()
+
 set(CMAKE_CODEGEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/codegen)
 
-set(codegen_dependencies
+set(embedding_codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/embedding_backward_code_generator.py
+    ${CMAKE_CODEGEN_DIR}/embedding_common_code_generator.py
     ${CMAKE_CODEGEN_DIR}/embedding_backward_dense_host.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_backward_dense_host_cpu.cpp
     ${CMAKE_CODEGEN_DIR}/embedding_backward_split_cpu_approx_template.cpp
@@ -330,6 +358,7 @@ set(codegen_dependencies
     ${CMAKE_CODEGEN_DIR}/__init__.template
     ${CMAKE_CODEGEN_DIR}/lookup_args.py
     ${CMAKE_CODEGEN_DIR}/split_embedding_codegen_lookup_invoker.template
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_split_device_kernel_template.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cpu_utils.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cub_namespace_prefix.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/cub_namespace_postfix.cuh
@@ -337,12 +366,29 @@ set(codegen_dependencies
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_backward_template_helpers.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_common.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_inplace_update.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_op_registration.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/fbgemm_cuda_utils.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/quantize_ops_utils.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_utils.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/sparse_ops_utils.h
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_cache_cuda.cuh
     ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/fbgemm_tensor_accessor.h)
+
+set(optimizer_codegen_dependencies
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_code_generator.py
+    ${CMAKE_CODEGEN_DIR}/embedding_common_code_generator.py
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_split_host_template.cpp
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_split_template.cu
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_split_device_kernel_template.cuh
+    ${CMAKE_CODEGEN_DIR}/embedding_optimizer_split_kernel_template.cu
+    ${CMAKE_CODEGEN_DIR}/optimizer_args.py
+    ${CMAKE_CODEGEN_DIR}/split_embedding_optimizer_codegen.template
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_common.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/sparse_ops_utils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/split_embeddings_utils.cuh
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/embedding_backward_template_helpers.cuh
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/dispatch_macros.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fbgemm_gpu/fbgemm_cuda_utils.cuh)
 
 if(USE_ROCM)
   message(STATUS "${PYTHON_EXECUTABLE}" "${CMAKE_CODEGEN_DIR}/embedding_backward_code_generator.py" "--opensource --is_rocm")
@@ -351,7 +397,13 @@ if(USE_ROCM)
     COMMAND
       "${PYTHON_EXECUTABLE}"
       "${CMAKE_CODEGEN_DIR}/embedding_backward_code_generator.py"
-      "--opensource" "--is_rocm" DEPENDS "${codegen_dependencies}")
+      "--opensource" "--is_rocm" DEPENDS "${embedding_codegen_dependencies}")
+
+  execute_process(
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${CMAKE_CODEGEN_DIR}/embedding_optimizer_code_generator.py"
+      "--opensource" "--is_rocm" DEPENDS "${optimizer_codegen_dependencies}")
 
   set(header_include_dir
       ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -369,13 +421,35 @@ else()
     COMMAND
       "${PYTHON_EXECUTABLE}"
       "${CMAKE_CODEGEN_DIR}/embedding_backward_code_generator.py" "--opensource"
-    DEPENDS "${codegen_dependencies}")
+    DEPENDS "${embedding_codegen_dependencies}")
+
+  add_custom_command(
+    OUTPUT
+      ${gen_defused_optim_source_files}
+      ${gen_defused_optim_py_files}
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${CMAKE_CODEGEN_DIR}/embedding_optimizer_code_generator.py"
+      "--opensource"
+    DEPENDS "${optimizer_codegen_dependencies}")
+endif()
+
+set(AVX2_FLAGS "-mavx2;-mf16c;-mfma;-fopenmp")
+if(NOT FBGEMM_CPU_ONLY AND WSL_MODE)
+  # NVCC in WSL complains about unknown -mavx options
+  # https://github.com/pytorch/FBGEMM/issues/2135
+  set(AVX2_FLAGS "-Xcompiler;-mavx;-Xcompiler;-mavx2;-Xcompiler;-mf16c;-Xcompiler;-mfma;-fopenmp")
+endif()
+
+set(AVX512_FLAGS "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl;-fopenmp")
+if(NOT FBGEMM_CPU_ONLY AND WSL_MODE)
+  set(AVX512_FLAGS "-Xcompiler;-mavx2;-Xcompiler;-mf16c;-Xcompiler;-mfma;-Xcompiler;-mavx512f;-Xcompiler;-mavx512bw;-Xcompiler;-mavx512dq;-Xcompiler;-mavx512vl;-fopenmp")
 endif()
 
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${gen_cpu_source_files}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma;-fopenmp")
+    "${AVX2_FLAGS}")
 else()
   set_source_files_properties(${gen_cpu_source_files}
     PROPERTIES COMPILE_OPTIONS
@@ -400,14 +474,24 @@ set_source_files_properties(${gen_gpu_kernel_source_files}
   PROPERTIES COMPILE_OPTIONS
   "${TORCH_CUDA_OPTIONS}")
 
+set_source_files_properties(${gen_defused_optim_source_files}
+  PROPERTIES INCLUDE_DIRECTORIES
+  "${CMAKE_CURRENT_SOURCE_DIR};${CMAKE_CURRENT_SOURCE_DIR}/include;${CMAKE_CURRENT_SOURCE_DIR}/../include"
+)
+
 if(NOT FBGEMM_CPU_ONLY)
   set(fbgemm_gpu_sources_gen
     ${gen_gpu_kernel_source_files}
     ${gen_gpu_host_source_files}
-    ${gen_cpu_source_files})
+    ${gen_cpu_source_files}
+    ${gen_defused_optim_source_files})
 else()
   set(fbgemm_gpu_sources_gen
-    ${gen_cpu_source_files})
+    ${gen_cpu_source_files}
+    # To force embedding_optimizer_code_generator to generate Python
+    # files
+    ${gen_defused_optim_py_files}
+  )
 endif()
 
 
@@ -417,6 +501,7 @@ endif()
 
 set(fbgemm_sources_normal
   "${FBGEMM}/src/EmbeddingSpMDM.cc"
+  "${FBGEMM}/src/EmbeddingSpMDMAutovec.cc"
   "${FBGEMM}/src/EmbeddingSpMDMNBit.cc"
   "${FBGEMM}/src/QuantUtils.cc"
   "${FBGEMM}/src/RefImplementations.cc"
@@ -434,13 +519,13 @@ set(fbgemm_sources_avx512
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${fbgemm_sources_avx2}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma")
+    "${AVX2_FLAGS}")
 endif()
 
 if(CXX_AVX512_FOUND)
   set_source_files_properties(${fbgemm_sources_avx512}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx2;-mf16c;-mfma;-mavx512f;-mavx512bw;-mavx512dq;-mavx512vl")
+    "${AVX512_FLAGS}")
 endif()
 
 set(fbgemm_sources ${fbgemm_sources_normal})
@@ -454,6 +539,8 @@ if(NOT USE_ROCM AND CXX_AVX512_FOUND)
     ${fbgemm_sources}
     ${fbgemm_sources_avx2}
     ${fbgemm_sources_avx512})
+else()
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNO_AVX512=1")
 endif()
 
 set(fbgemm_sources_include_directories
@@ -489,33 +576,46 @@ set(fbgemm_gpu_sources_static_cpu
     codegen/embedding_forward_quantized_host_cpu.cpp
     codegen/embedding_backward_dense_host_cpu.cpp
     codegen/embedding_bounds_check_host_cpu.cpp
-    src/permute_pooled_embedding_ops_split_cpu.cpp
-    src/jagged_tensor_ops_autograd.cpp
-    src/jagged_tensor_ops_meta.cpp
-    src/jagged_tensor_ops_cpu.cpp
-    src/input_combine_cpu.cpp
-    src/layout_transform_ops_cpu.cpp
-    src/quantize_ops_cpu.cpp
-    src/sparse_ops_cpu.cpp
-    src/sparse_ops_meta.cpp
-    src/embedding_inplace_update_cpu.cpp)
+    src/merge_pooled_embedding_ops/merge_pooled_embedding_ops_cpu.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_function.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_cpu.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split_cpu.cpp
+    src/jagged_tensor_ops/jagged_tensor_ops_autograd.cpp
+    src/jagged_tensor_ops/jagged_tensor_ops_meta.cpp
+    src/jagged_tensor_ops/jagged_tensor_ops_cpu.cpp
+    src/input_combine_ops/input_combine_cpu.cpp
+    src/layout_transform_ops/layout_transform_ops_cpu.cpp
+    src/quantize_ops/quantize_ops_cpu.cpp
+    src/quantize_ops/quantize_ops_meta.cpp
+    src/sparse_ops/sparse_ops_cpu.cpp
+    src/sparse_ops/sparse_ops_meta.cpp
+    src/embedding_inplace_ops/embedding_inplace_update_cpu.cpp
+    src/split_embeddings_cache/linearize_cache_indices.cpp
+    src/split_embeddings_cache/lfu_cache_populate_byte.cpp
+    src/split_embeddings_cache/lru_cache_populate_byte.cpp
+    src/split_embeddings_cache/lxu_cache.cpp
+    src/split_embeddings_cache/split_embeddings_cache_ops.cpp
+    codegen/batch_index_select_dim0_cpu_host.cpp)
 
 if(NOT FBGEMM_CPU_ONLY)
   list(APPEND fbgemm_gpu_sources_static_cpu
     codegen/embedding_forward_quantized_host.cpp
     codegen/embedding_backward_dense_host.cpp
     codegen/embedding_bounds_check_host.cpp
-    src/cumem_utils_host.cpp
-    src/layout_transform_ops_gpu.cpp
-    src/permute_pooled_embedding_ops_gpu.cpp
-    src/permute_pooled_embedding_ops_split_gpu.cpp
-    src/quantize_ops_gpu.cpp
-    src/sparse_ops_gpu.cpp
-    src/split_embeddings_utils.cpp
-    src/split_table_batched_embeddings.cpp
-    src/metric_ops_host.cpp
-    src/embedding_inplace_update_gpu.cpp
-    src/input_combine_gpu.cpp)
+    src/memory_utils/memory_utils.cpp
+    src/memory_utils/memory_utils_ops.cpp
+    src/memory_utils/memory_utils_ops_cpu.cpp
+    src/layout_transform_ops/layout_transform_ops_gpu.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_gpu.cpp
+    src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split_gpu.cpp
+    src/quantize_ops/quantize_ops_gpu.cpp
+    src/sparse_ops/sparse_ops_gpu.cpp
+    src/split_embeddings_utils/split_embeddings_utils.cpp
+    src/split_embeddings_cache/split_embeddings_cache_ops.cu
+    src/metric_ops/metric_ops_host.cpp
+    src/embedding_inplace_ops/embedding_inplace_update_gpu.cpp
+    src/input_combine_ops/input_combine_gpu.cpp
+    codegen/batch_index_select_dim0_host.cpp)
 
   if(NVML_LIB_PATH)
     message(STATUS "Found NVML_LIB_PATH: ${NVML_LIB_PATH}")
@@ -524,8 +624,7 @@ if(NOT FBGEMM_CPU_ONLY)
   if(NVML_LIB_PATH OR USE_ROCM)
     message(STATUS "Adding merge_pooled_embeddings sources")
     list(APPEND fbgemm_gpu_sources_static_cpu
-      src/merge_pooled_embeddings_cpu.cpp
-      src/merge_pooled_embeddings_gpu.cpp
+      src/merge_pooled_embedding_ops/merge_pooled_embedding_ops_gpu.cpp
       src/topology_utils.cpp)
   else()
     message(STATUS "Skipping merge_pooled_embeddings sources")
@@ -535,7 +634,7 @@ endif()
 if(CXX_AVX2_FOUND)
   set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
     PROPERTIES COMPILE_OPTIONS
-    "-mavx;-mf16c;-mfma;-mavx2;-fopenmp")
+    "${AVX2_FLAGS}")
 else()
   set_source_files_properties(${fbgemm_gpu_sources_static_cpu}
     PROPERTIES COMPILE_OPTIONS
@@ -546,16 +645,16 @@ if(NOT FBGEMM_CPU_ONLY)
   set(fbgemm_gpu_sources_static_gpu
       codegen/embedding_bounds_check.cu
       codegen/embedding_forward_quantized_split_lookup.cu
-      src/cumem_utils.cu
-      src/embedding_inplace_update.cu
+      src/memory_utils/memory_utils.cu
+      src/memory_utils/memory_utils_ops.cu
+      src/embedding_inplace_ops/embedding_inplace_update.cu
       src/histogram_binning_calibration_ops.cu
-      src/input_combine.cu
+      src/input_combine_ops/input_combine.cu
       src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_backward.cu
       src/jagged_tensor_ops/batched_dense_vec_jagged_2d_mul_forward.cu
       src/jagged_tensor_ops/dense_to_jagged_forward.cu
       src/jagged_tensor_ops/jagged_dense_bmm_forward.cu
       src/jagged_tensor_ops/jagged_dense_dense_elementwise_add_jagged_output_forward.cu
-      src/jagged_tensor_ops/jagged_dense_elementwise_add_jagged_output.cu
       src/jagged_tensor_ops/jagged_dense_elementwise_mul_backward.cu
       src/jagged_tensor_ops/jagged_dense_elementwise_mul_forward.cu
       src/jagged_tensor_ops/jagged_index_add_2d_forward.cu
@@ -568,16 +667,50 @@ if(NOT FBGEMM_CPU_ONLY)
       src/jagged_tensor_ops/jagged_to_padded_dense_forward.cu
       src/jagged_tensor_ops/jagged_unique_indices.cu
       src/jagged_tensor_ops/keyed_jagged_index_select_dim1.cu
-      src/jagged_tensor_ops/stacked_jagged_1d_to_dense.cu
-      src/jagged_tensor_ops/stacked_jagged_2d_to_dense.cu
-      src/layout_transform_ops.cu
-      src/metric_ops.cu
-      src/permute_pooled_embedding_ops_split.cu
-      src/permute_pooled_embedding_ops.cu
-      src/quantize_ops.cu
-      src/sparse_ops.cu
-      src/split_embeddings_cache_cuda.cu
-      src/split_embeddings_utils.cu)
+      src/layout_transform_ops/layout_transform_ops.cu
+      src/metric_ops/metric_ops.cu
+      src/permute_pooled_embedding_ops/permute_pooled_embedding_ops_split.cu
+      src/permute_pooled_embedding_ops/permute_pooled_embedding_ops.cu
+      src/quantize_ops/quantize_bfloat16.cu
+      src/quantize_ops/quantize_fp8_rowwise.cu
+      src/quantize_ops/quantize_fused_8bit_rowwise.cu
+      src/quantize_ops/quantize_fused_nbit_rowwise.cu
+      src/quantize_ops/quantize_hfp8.cu
+      src/quantize_ops/quantize_msfp.cu
+      src/quantize_ops/quantize_padded_fp8_rowwise.cu
+      src/sparse_ops/sparse_async_cumsum.cu
+      src/sparse_ops/sparse_block_bucketize_features.cu
+      src/sparse_ops/sparse_bucketize_features.cu
+      src/sparse_ops/sparse_batched_unary_embeddings.cu
+      src/sparse_ops/sparse_compute_frequency_sequence.cu
+      src/sparse_ops/sparse_expand_into_jagged_permute.cu
+      src/sparse_ops/sparse_group_index.cu
+      src/sparse_ops/sparse_index_add.cu
+      src/sparse_ops/sparse_index_select.cu
+      src/sparse_ops/sparse_invert_permute.cu
+      src/sparse_ops/sparse_pack_segments_backward.cu
+      src/sparse_ops/sparse_pack_segments_forward.cu
+      src/sparse_ops/sparse_permute_1d.cu
+      src/sparse_ops/sparse_permute_2d.cu
+      src/sparse_ops/sparse_permute102.cu
+      src/sparse_ops/sparse_permute_embeddings.cu
+      src/sparse_ops/sparse_range.cu
+      src/sparse_ops/sparse_reorder_batched_ad.cu
+      src/sparse_ops/sparse_segment_sum_csr.cu
+      src/sparse_ops/sparse_zipf.cu
+      src/split_embeddings_cache/lfu_cache_find.cu
+      src/split_embeddings_cache/lfu_cache_populate.cu
+      src/split_embeddings_cache/lfu_cache_populate_byte.cu
+      src/split_embeddings_cache/lru_cache_find.cu
+      src/split_embeddings_cache/lru_cache_populate.cu
+      src/split_embeddings_cache/lru_cache_populate_byte.cu
+      src/split_embeddings_cache/lxu_cache.cu
+      src/split_embeddings_cache/linearize_cache_indices.cu
+      src/split_embeddings_cache/reset_weight_momentum.cu
+      src/split_embeddings_utils/generate_vbe_metadata.cu
+      src/split_embeddings_utils/get_infos_metadata.cu
+      src/split_embeddings_utils/radix_sort_pairs.cu
+      src/split_embeddings_utils/transpose_embedding_input.cu)
 
   set_source_files_properties(${fbgemm_gpu_sources_static_gpu}
     PROPERTIES COMPILE_OPTIONS
@@ -694,3 +827,9 @@ install(FILES ${gen_python_source_files}
 
 install(FILES ${CMAKE_CODEGEN_DIR}/lookup_args.py
         DESTINATION fbgemm_gpu/split_embedding_codegen_lookup_invokers)
+
+install(FILES ${gen_defused_optim_py_files}
+        DESTINATION fbgemm_gpu/split_embedding_optimizer_codegen)
+
+install(FILES ${CMAKE_CODEGEN_DIR}/optimizer_args.py
+        DESTINATION fbgemm_gpu/split_embedding_optimizer_codegen)

@@ -24,10 +24,12 @@ prepare_fbgemm_gpu_build () {
     echo "################################################################################"
     echo "# Prepare FBGEMM-GPU Build"
     echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
     echo "################################################################################"
     echo ""
   fi
+
+  test_network_connection || return 1
 
   if [[ "${GITHUB_WORKSPACE}" ]]; then
     # https://github.com/actions/checkout/issues/841
@@ -38,11 +40,17 @@ prepare_fbgemm_gpu_build () {
   git submodule sync
   git submodule update --init --recursive
 
-  echo "[BUILD] Installing other build dependencies ..."
-  (exec_with_retries conda run -n "${env_name}" python -m pip install -r requirements.txt) || return 1
+  # shellcheck disable=SC2155
+  local env_prefix=$(env_name_or_prefix "${env_name}")
 
-  (test_python_import "${env_name}" numpy) || return 1
-  (test_python_import "${env_name}" skbuild) || return 1
+  echo "[BUILD] Installing other build dependencies ..."
+  # shellcheck disable=SC2086
+  (exec_with_retries 3 conda run --no-capture-output ${env_prefix} python -m pip install -r requirements.txt) || return 1
+
+  # shellcheck disable=SC2086
+  (test_python_import_package "${env_name}" numpy) || return 1
+  # shellcheck disable=SC2086
+  (test_python_import_package "${env_name}" skbuild) || return 1
 
   echo "[BUILD] Successfully ran git submodules update"
 }
@@ -50,7 +58,9 @@ prepare_fbgemm_gpu_build () {
 __configure_fbgemm_gpu_build_cpu () {
   # Update the package name and build args depending on if CUDA is specified
   echo "[BUILD] Setting CPU-only build args ..."
-  build_args=(--cpu_only)
+  build_args=(
+    --package_variant=cpu
+  )
 }
 
 __configure_fbgemm_gpu_build_rocm () {
@@ -67,8 +77,14 @@ __configure_fbgemm_gpu_build_rocm () {
       echo "[BUILD] Architectures list from rocminfo: ${arch_list}"
 
       if [ "$arch_list" == "" ]; then
-        # By default, build for MI250 only to save time
-        local arch_list=gfx90a
+        # It is possible to build FBGEMM_GPU-ROCm on a machine without AMD
+        # cards, in which case the arch_list will be empty.
+        echo "[BUILD] rocminfo did not return anything valid!"
+
+        # By default, we build just for MI100 and MI250 to save time.  This list
+        # needs to be updated if the CI ROCm machines have different hardware.
+        # Architecture mapping can be found at: https://wiki.gentoo.org/wiki/ROCm
+        local arch_list="gfx908,gfx90a"
       fi
     else
       echo "[BUILD] rocminfo not found in PATH!"
@@ -76,10 +92,19 @@ __configure_fbgemm_gpu_build_rocm () {
   fi
 
   echo "[BUILD] Setting the following ROCm targets: ${arch_list}"
-  print_exec conda env config vars set -n "${env_name}" PYTORCH_ROCM_ARCH="${arch_list}"
+  # shellcheck disable=SC2086
+  print_exec conda env config vars set ${env_prefix} PYTORCH_ROCM_ARCH="${arch_list}"
 
   echo "[BUILD] Setting ROCm build args ..."
-  build_args=()
+  build_args=(
+    --package_variant=rocm
+    # HIP_ROOT_DIR now required for HIP to be correctly detected by CMake
+    -DHIP_ROOT_DIR=/opt/rocm
+    # Enable device-side assertions in HIP
+    # https://stackoverflow.com/questions/44284275/passing-compiler-options-in-cmake-command-line
+    -DCMAKE_C_FLAGS="-DTORCH_USE_HIP_DSA"
+    -DCMAKE_CXX_FLAGS="-DTORCH_USE_HIP_DSA"
+  )
 }
 
 __configure_fbgemm_gpu_build_cuda () {
@@ -103,7 +128,14 @@ __configure_fbgemm_gpu_build_cuda () {
 
   else
     echo "[BUILD] Using the default CUDA targets ..."
-    local arch_list="7.0;8.0"
+    # For cuda version 12.1, enable sm 9.0
+    cuda_version_nvcc=$(conda run -n "${env_name}" nvcc --version)
+    echo "$cuda_version_nvcc"
+    if [[ $cuda_version_nvcc == *"V12.1"* ]]; then
+      local arch_list="7.0;8.0;9.0"
+    else
+      local arch_list="7.0;8.0"
+    fi
   fi
 
   # Unset the environment-supplied TORCH_CUDA_ARCH_LIST because it will take
@@ -114,10 +146,12 @@ __configure_fbgemm_gpu_build_cuda () {
 
   # Build only CUDA 7.0 and 8.0 (i.e. V100 and A100) because of 100 MB binary size limits from PyPI.
   echo "[BUILD] Setting CUDA build args ..."
-  # shellcheck disable=SC2155
-  local nvml_lib_path=$(conda run -n "${env_name}" printenv NVML_LIB_PATH)
+  # shellcheck disable=SC2155,SC2086
+  local nvml_lib_path=$(conda run --no-capture-output ${env_prefix} printenv NVML_LIB_PATH)
   build_args=(
+    --package_variant=cuda
     --nvml_lib_path="${nvml_lib_path}"
+    # Pass to PyTorch CMake
     -DTORCH_CUDA_ARCH_LIST="'${arch_list}'"
   )
 }
@@ -138,7 +172,7 @@ __configure_fbgemm_gpu_build () {
     echo "################################################################################"
     echo "# Configure FBGEMM-GPU Build"
     echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+    echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
     echo "################################################################################"
     echo ""
   fi
@@ -160,6 +194,76 @@ __configure_fbgemm_gpu_build () {
   echo "[BUILD] FBGEMM_GPU build arguments have been set:  ${build_args[@]}"
 }
 
+__build_fbgemm_gpu_set_package_name () {
+  # Determine the package name based on release type and variant
+  export package_name="fbgemm_gpu"
+
+  # Append qualifiers for the non-release version
+  if [ "$fbgemm_release_type" != "release" ]; then
+    export package_name="${package_name}_${fbgemm_release_type}"
+  fi
+
+  # Append cpu or rocm for the non-CUDA case
+  if [ "$fbgemm_variant" == "cpu" ]; then
+    export package_name="${package_name}-cpu"
+  elif [ "$fbgemm_variant" == "rocm" ]; then
+    export package_name="${package_name}-rocm"
+  fi
+
+  echo "[BUILD] Determined and set Python package name to use: ${package_name}"
+}
+
+__build_fbgemm_gpu_set_python_tag () {
+  # shellcheck disable=SC2207,SC2086
+  local python_version=($(conda run --no-capture-output ${env_prefix} python --version))
+
+  # shellcheck disable=SC2206
+  local python_version_arr=(${python_version[1]//./ })
+
+  # Set the python tag (e.g. Python 3.12 -> py312)
+  export python_tag="py${python_version_arr[0]}${python_version_arr[1]}"
+  echo "[BUILD] Extracted and set Python tag: ${python_tag}"
+}
+
+__build_fbgemm_gpu_set_python_plat_name () {
+  if [[ $KERN_NAME == 'Darwin' ]]; then
+    # This follows PyTorch package naming conventions
+    # See https://pypi.org/project/torch/#files
+    if [[ $MACHINE_NAME == 'arm64' ]]; then
+      export python_plat_name="macosx_11_0_${MACHINE_NAME}"
+    else
+      export python_plat_name="macosx_10_9_${MACHINE_NAME}"
+    fi
+
+  elif [[ $KERN_NAME == 'Linux' ]]; then
+    # manylinux2014 is specified, bc manylinux1 does not support aarch64
+    # See https://github.com/pypa/manylinux
+    export python_plat_name="manylinux2014_${MACHINE_NAME}"
+
+  else
+    echo "[BUILD] Unsupported OS platform: ${KERN_NAME}"
+    return 1
+  fi
+
+  echo "[BUILD] Extracted and set Python platform name: ${python_plat_name}"
+}
+
+__build_fbgemm_gpu_set_run_multicore () {
+  # shellcheck disable=SC2155
+  local core=$(lscpu | grep "Core(s)" | awk '{print $NF}') && echo "core = ${core}" || echo "core not found"
+  # shellcheck disable=SC2155
+  local sockets=$(lscpu | grep "Socket(s)" | awk '{print $NF}') && echo "sockets = ${sockets}" || echo "sockets not found"
+  local re='^[0-9]+$'
+
+  export run_multicore=""
+  if [[ $core =~ $re && $sockets =~ $re ]] ; then
+    local n_core=$((core * sockets))
+    export run_multicore=" -j ${n_core}"
+  fi
+
+  echo "[BUILD] Set multicore run option for setup.py: ${run_multicore}"
+}
+
 __build_fbgemm_gpu_common_pre_steps () {
   # Private function that uses variables instantiated by its caller
 
@@ -169,32 +273,28 @@ __build_fbgemm_gpu_common_pre_steps () {
   (test_binpath "${env_name}" c++) || return 1
   (test_binpath "${env_name}" g++) || return 1
 
-  # Determine the package name based on release type and variant
-  package_name="fbgemm_gpu"
-  if [ "$fbgemm_release_type" != "release" ]; then
-    package_name="${package_name}_${fbgemm_release_type}"
+  # Set the default the FBGEMM_GPU variant to be CUDA
+  if [ "$fbgemm_variant" != "cpu" ] && [ "$fbgemm_variant" != "rocm" ]; then
+    export fbgemm_variant="cuda"
   fi
-  if [ "$fbgemm_variant" == "cpu" ]; then
-    package_name="${package_name}-cpu"
-  elif [ "$fbgemm_variant" == "rocm" ]; then
-    package_name="${package_name}-rocm"
-  else
-    # Set to the default variant
-    fbgemm_variant="cuda"
-  fi
-  echo "[BUILD] Determined Python package name to use: ${package_name}"
 
-  # Extract the Python tag
-  # shellcheck disable=SC2207
-  python_version=($(conda run -n "${env_name}" python --version))
-  # shellcheck disable=SC2206
-  python_version_arr=(${python_version[1]//./ })
-  python_tag="py${python_version_arr[0]}${python_version_arr[1]}"
-  echo "[BUILD] Extracted Python tag: ${python_tag}"
+  # Extract and set the package name given the FBGEMM_GPU variant
+  __build_fbgemm_gpu_set_package_name
+
+  # Extract and set the Python tag
+  __build_fbgemm_gpu_set_python_tag
+
+  # Extract and set the platform name
+  __build_fbgemm_gpu_set_python_plat_name
+
+  # Set multicore run option for setup.py if the number of cores on the machine
+  # permit for this
+  __build_fbgemm_gpu_set_run_multicore
 
   echo "[BUILD] Running pre-build cleanups ..."
   print_exec rm -rf dist
-  print_exec conda run -n "${env_name}" python setup.py clean
+  # shellcheck disable=SC2086
+  print_exec conda run --no-capture-output ${env_prefix} python setup.py clean
 
   echo "[BUILD] Printing git status ..."
   print_exec git status
@@ -273,7 +373,7 @@ build_fbgemm_gpu_package () {
   fbgemm_variant="$3"
   fbgemm_variant_targets="$4"
   if [ "$fbgemm_variant" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME PACKAGE_NAME VARIANT [TARGETS]"
+    echo "Usage: ${FUNCNAME[0]} ENV_NAME RELEASE_TYPE VARIANT [VARIANT_TARGETS]"
     echo "Example(s):"
     echo "    ${FUNCNAME[0]} build_env nightly cpu                           # Nightly CPU-only variant"
     echo "    ${FUNCNAME[0]} build_env nightly cuda                          # Nightly CUDA variant for default target(s)"
@@ -283,6 +383,9 @@ build_fbgemm_gpu_package () {
     return 1
   fi
 
+  # shellcheck disable=SC2155
+  local env_prefix=$(env_name_or_prefix "${env_name}")
+
   # Set up and configure the build
   __build_fbgemm_gpu_common_pre_steps || return 1
   __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
@@ -290,21 +393,19 @@ build_fbgemm_gpu_package () {
   echo "################################################################################"
   echo "# Build FBGEMM-GPU Package (Wheel)"
   echo "#"
-  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
   echo "################################################################################"
   echo ""
 
-  # manylinux2014 is specified, bc manylinux1 does not support aarch64
-  # See https://github.com/pypa/manylinux
-  local plat_name="manylinux2014_${MACHINE_NAME}"
-
   # Distribute Python extensions as wheels on Linux
   echo "[BUILD] Building FBGEMM-GPU wheel (VARIANT=${fbgemm_variant}) ..."
-  print_exec conda run -n "${env_name}" \
-    python setup.py bdist_wheel \
+  # shellcheck disable=SC2086
+  print_exec conda run --no-capture-output ${env_prefix} \
+    python setup.py "${run_multicore}" bdist_wheel \
       --package_name="${package_name}" \
       --python-tag="${python_tag}" \
-      --plat-name="${plat_name}" \
+      --plat-name="${python_plat_name}" \
+      --verbose \
       "${build_args[@]}"
 
   # Run checks on the built libraries
@@ -315,6 +416,8 @@ build_fbgemm_gpu_package () {
 
   echo "[BUILD] Enumerating the wheel SHAs ..."
   print_exec sha1sum dist/*.whl
+  print_exec sha256sum dist/*.whl
+  print_exec md5sum dist/*.whl
 
   echo "[BUILD] FBGEMM-GPU build wheel completed"
 }
@@ -334,6 +437,9 @@ build_fbgemm_gpu_install () {
     return 1
   fi
 
+  # shellcheck disable=SC2155
+  local env_prefix=$(env_name_or_prefix "${env_name}")
+
   # Set up and configure the build
   __build_fbgemm_gpu_common_pre_steps || return 1
   __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
@@ -341,15 +447,18 @@ build_fbgemm_gpu_install () {
   echo "################################################################################"
   echo "# Build + Install FBGEMM-GPU Package"
   echo "#"
-  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
   echo "################################################################################"
   echo ""
 
   # Parallelism may need to be limited to prevent the build from being
   # canceled for going over ulimits
   echo "[BUILD] Building + installing FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
-  print_exec conda run -n "${env_name}" \
-    python setup.py install "${build_args[@]}"
+  # shellcheck disable=SC2086
+  print_exec conda run --no-capture-output ${env_prefix} \
+    python setup.py "${run_multicore}" install \
+      --verbose \
+      "${build_args[@]}"
 
   # Run checks on the built libraries
   (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
@@ -358,7 +467,9 @@ build_fbgemm_gpu_install () {
   # Exit this directory to prevent import clashing, since there is an
   # fbgemm_gpu/ subdirectory present
   cd - || return 1
-  (test_python_import "${env_name}" fbgemm_gpu) || return 1
+  (test_python_import_package "${env_name}" fbgemm_gpu) || return 1
+  (test_python_import_symbol "${env_name}" fbgemm_gpu __version__) || return 1
+  cd - || return 1
 
   echo "[BUILD] FBGEMM-GPU build + install completed"
 }
@@ -378,55 +489,31 @@ build_fbgemm_gpu_develop () {
     return 1
   fi
 
+  # shellcheck disable=SC2155
+  local env_prefix=$(env_name_or_prefix "${env_name}")
+
   # Set up and configure the build
   __build_fbgemm_gpu_common_pre_steps || return 1
   __configure_fbgemm_gpu_build "${fbgemm_variant}" "${fbgemm_variant_targets}" || return 1
 
   echo "################################################################################"
-  echo "# Build + Install FBGEMM-GPU Package"
+  echo "# Build + Install FBGEMM-GPU Package (Develop)"
   echo "#"
-  echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
+  echo "# [$(date --utc +%FT%T.%3NZ)] + ${FUNCNAME[0]} ${*}"
   echo "################################################################################"
   echo ""
 
   # Parallelism may need to be limited to prevent the build from being
   # canceled for going over ulimits
   echo "[BUILD] Building (develop) FBGEMM-GPU (VARIANT=${fbgemm_variant}) ..."
-  print_exec conda run -n "${env_name}" \
-    python setup.py build develop "${build_args[@]}"
+  # shellcheck disable=SC2086
+  print_exec conda run --no-capture-output ${env_prefix} \
+    python setup.py "${run_multicore}" build develop \
+      --verbose \
+      "${build_args[@]}"
 
   # Run checks on the built libraries
   (run_fbgemm_gpu_postbuild_checks "${fbgemm_variant}") || return 1
 
   echo "[BUILD] FBGEMM-GPU build + develop completed"
-}
-
-install_fbgemm_gpu_package () {
-  local env_name="$1"
-  local package_name="$2"
-  if [ "$package_name" == "" ]; then
-    echo "Usage: ${FUNCNAME[0]} ENV_NAME WHEEL_NAME"
-    echo "Example(s):"
-    echo "    ${FUNCNAME[0]} build_env fbgemm_gpu.whl     # Install the package (wheel)"
-    return 1
-  else
-    echo "################################################################################"
-    echo "# Install FBGEMM-GPU Package (Wheel)"
-    echo "#"
-    echo "# [TIMESTAMP] $(date --utc +%FT%T.%3NZ)"
-    echo "################################################################################"
-    echo ""
-  fi
-
-  echo "[INSTALL] Printing out FBGEMM-GPU wheel SHA: ${package_name}"
-  print_exec sha1sum "${package_name}"
-
-  echo "[INSTALL] Installing FBGEMM-GPU wheel: ${package_name} ..."
-  (exec_with_retries conda run -n "${env_name}" python -m pip install "${package_name}") || return 1
-
-  echo "[INSTALL] Checking imports ..."
-  (test_python_import "${env_name}" fbgemm_gpu) || return 1
-  (test_python_import "${env_name}" fbgemm_gpu.split_embedding_codegen_lookup_invokers) || return 1
-
-  echo "[INSTALL] Wheel installation completed ..."
 }

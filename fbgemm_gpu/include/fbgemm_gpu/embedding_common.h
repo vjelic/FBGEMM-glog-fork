@@ -82,16 +82,6 @@ inline SparseType getSparseType(at::ScalarType dtype) {
   }
 };
 
-struct VBEMetadata {
-  at::Tensor B_offsets; // torch.int
-  at::Tensor output_offsets_feature_rank; // torch.long
-  at::Tensor B_offsets_rank_per_feature; // torch.int
-  at::Tensor output_offsets; // torch.long
-  at::Tensor b_t_map; // torch.int
-  int32_t max_B_feature_rank;
-  int64_t output_size;
-};
-
 } // namespace fbgemm_gpu
 
 namespace nbit {
@@ -105,8 +95,10 @@ div_round_up(uint32_t a, uint32_t b) {
   return ((a + b - 1) / b);
 }
 
-C10_HOST_DEVICE C10_ALWAYS_INLINE int32_t
-unpadded_row_size_in_bytes(int32_t dim, fbgemm_gpu::SparseType weight_ty) {
+C10_HOST_DEVICE C10_ALWAYS_INLINE int32_t unpadded_row_size_in_bytes(
+    int32_t dim,
+    fbgemm_gpu::SparseType weight_ty,
+    const int32_t scale_bias_bytes = 4) {
   if (weight_ty == fbgemm_gpu::SparseType::FP32) {
     return dim * 4;
   }
@@ -117,13 +109,13 @@ unpadded_row_size_in_bytes(int32_t dim, fbgemm_gpu::SparseType weight_ty) {
     return dim;
   }
   if (weight_ty == fbgemm_gpu::SparseType::INT8) {
-    return dim + 4;
+    return dim + scale_bias_bytes;
   }
   if (weight_ty == fbgemm_gpu::SparseType::INT4) {
-    return dim / 2 + 4;
+    return dim / 2 + scale_bias_bytes;
   }
   if (weight_ty == fbgemm_gpu::SparseType::INT2) {
-    return dim / 4 + 4;
+    return dim / 4 + scale_bias_bytes;
   }
   return 0;
 }
@@ -131,9 +123,10 @@ unpadded_row_size_in_bytes(int32_t dim, fbgemm_gpu::SparseType weight_ty) {
 C10_HOST_DEVICE C10_ALWAYS_INLINE int32_t padded_row_size_in_bytes(
     int32_t dim,
     fbgemm_gpu::SparseType weight_ty,
-    int32_t row_alignment) {
-  auto r = unpadded_row_size_in_bytes(dim, weight_ty);
-  return round_up(r, row_alignment);
+    const int32_t row_alignment,
+    const int32_t scale_bias_bytes = 4) {
+  auto r = unpadded_row_size_in_bytes(dim, weight_ty, scale_bias_bytes);
+  return static_cast<int32_t>(round_up(r, row_alignment));
 }
 
 } // namespace nbit

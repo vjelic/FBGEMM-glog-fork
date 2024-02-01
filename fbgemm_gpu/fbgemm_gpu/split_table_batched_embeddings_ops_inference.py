@@ -30,9 +30,14 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
 )
 
 try:
-    torch.ops.load_library(
-        "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cuda_inference"
-    )
+    if torch.version.hip:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_hip_inference"
+        )
+    else:
+        torch.ops.load_library(
+            "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cuda_inference"
+        )
     torch.ops.load_library(
         "//deeplearning/fbgemm/fbgemm_gpu/codegen:embedding_ops_cpu_inference"
     )
@@ -95,8 +100,8 @@ def nbit_construct_split_state(
             placements.append(EmbeddingLocation.HOST)
             offsets.append(host_size)
             host_size += state_size
-        elif location == EmbeddingLocation.DEVICE:
-            placements.append(EmbeddingLocation.DEVICE)
+        elif location == EmbeddingLocation.DEVICE or location == EmbeddingLocation.MTIA:
+            placements.append(location)
             offsets.append(dev_size)
             dev_size += state_size
         else:
@@ -113,6 +118,16 @@ def nbit_construct_split_state(
         uvm_size=uvm_size,
         placements=placements,
         offsets=offsets,
+    )
+
+
+def random_quant_scaled_tensor(shape: torch.Size, device: torch.device) -> torch.Tensor:
+    return torch.randint(
+        0,
+        255,
+        size=shape,
+        dtype=torch.uint8,
+        device=device,
     )
 
 
@@ -159,6 +174,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         scale_bias_size_in_bytes: int = DEFAULT_SCALE_BIAS_SIZE_IN_BYTES,
         cacheline_alignment: bool = True,
         uvm_host_mapped: bool = False,  # True to use cudaHostAlloc; False to use cudaMallocManaged.
+        reverse_qparam: bool = False,  # True to load qparams at end of each row; False to load qparam at begnning of each row.
     ) -> None:  # noqa C901  # tuple of (rows, dims,)
         super(IntNBitTableBatchedEmbeddingBagsCodegen, self).__init__()
 
@@ -314,6 +330,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.initialize_physical_weights_placements_and_offsets(cacheline_alignment)
         self.enforce_hbm: bool = enforce_hbm
 
+        self.reverse_qparam = reverse_qparam
         # Assign weights after weights and weights_offsets are initialized.
         if weight_lists:
             self._apply_split(
@@ -490,15 +507,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
     def prefetch(self, indices: Tensor, offsets: Tensor) -> None:
         self.timestep_counter.increment()
         self.timestep_prefetch_size.increment()
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if not self.lxu_cache_weights.numel():
             return
-
-        # FIXME: check the int32_t range failure in https://fburl.com/gdoc/kcdnrnvg .
-        # The real failure should be in cache handling in https://fburl.com/ox3f26r0 .
-        indices, offsets = indices.long(), offsets.long()
 
         linear_cache_indices = torch.ops.fbgemm.linearize_cache_indices(
             self.cache_hash_size_cumsum,
@@ -587,13 +597,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             )
         )
         if self.gather_uvm_cache_stats:
-            # Accumulate local_uvm_cache_stats (int32) into uvm_cache_stats (int64).
-            # We may wanna do this accumulation atomically, but as it's only for monitoring,
-            # slightly inaccurate result may be acceptable.
-            self.uvm_cache_stats = torch.add(
-                self.uvm_cache_stats, self.local_uvm_cache_stats
-            )
-            self.local_uvm_cache_stats.zero_()
+            self._accumulate_uvm_cache_stats()
 
     def prefetch_1way(self, linear_cache_indices: Tensor) -> None:
         if self.cache_algorithm == CacheAlgorithm.LRU:
@@ -611,6 +615,9 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 self.timestep_counter.get(),
                 self.lxu_state,
                 self.lxu_cache_miss_timestamp,
+                16,  # row_alignment; using default value.
+                self.gather_uvm_cache_stats,
+                self.local_uvm_cache_stats,
             )
         else:
             raise ValueError("Direct Mapped for LRU only")
@@ -623,8 +630,21 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                 linear_cache_indices,
                 self.lxu_cache_state,
                 self.total_cache_hash_size,
+                self.gather_uvm_cache_stats,
+                self.local_uvm_cache_stats,
             )
         )
+        if self.gather_uvm_cache_stats:
+            self._accumulate_uvm_cache_stats()
+
+    def _accumulate_uvm_cache_stats(self) -> None:
+        # Accumulate local_uvm_cache_stats (int32) into uvm_cache_stats (int64).
+        # We may wanna do this accumulation atomically, but as it's only for monitoring,
+        # slightly inaccurate result may be acceptable.
+        self.uvm_cache_stats = torch.add(
+            self.uvm_cache_stats, self.local_uvm_cache_stats
+        )
+        self.local_uvm_cache_stats.zero_()
 
     def _update_cache_miss_counter(
         self,
@@ -669,9 +689,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         CACHE_MISS = torch.tensor([-1], device=self.current_device, dtype=torch.int32)
         CACHE_HIT = torch.tensor([-2], device=self.current_device, dtype=torch.int32)
 
-        # pyre-ignore[6]:
-        # Incompatible parameter type [6]: Expected `typing.Sized` for 1st
-        # positional only parameter to call `len` but got `typing.Union[Tensor, nn.Module]`.
         num_tables = len(self.cache_hash_size_cumsum) - 1
         num_offsets_per_table = (len(offsets) - 1) // num_tables
         cache_missed_locations = torch.where(
@@ -827,26 +844,36 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
     def reset_weights_placements_and_offsets(
         self, device: torch.device, location: int
     ) -> None:
-        # Reset device/location denoted in embedding specs
-        self.reset_embedding_spec_location(device, location)
-        # Initialize all physical/logical weights placements and offsets without initializing large dev weights tensor
-        self.initialize_physical_weights_placements_and_offsets()
-        self.initialize_logical_weights_placements_and_offsets()
-
-    def reset_embedding_spec_location(
-        self, device: torch.device, location: int
-    ) -> None:
         # Overwrite location in embedding_specs with new location
         # Use map since can't script enum call (ie. EmbeddingLocation(value))
         INT_TO_EMBEDDING_LOCATION = {
-            0: EmbeddingLocation.DEVICE,
-            1: EmbeddingLocation.MANAGED,
-            2: EmbeddingLocation.MANAGED_CACHING,
-            3: EmbeddingLocation.HOST,
+            EmbeddingLocation.DEVICE.value: EmbeddingLocation.DEVICE,
+            EmbeddingLocation.MANAGED.value: EmbeddingLocation.MANAGED,
+            EmbeddingLocation.MANAGED_CACHING.value: EmbeddingLocation.MANAGED_CACHING,
+            EmbeddingLocation.HOST.value: EmbeddingLocation.HOST,
+            EmbeddingLocation.MTIA.value: EmbeddingLocation.MTIA,
         }
+        # Reset device/location denoted in embedding specs
         target_location = INT_TO_EMBEDDING_LOCATION[location]
+        if target_location == EmbeddingLocation.MTIA:
+            self.scale_bias_size_in_bytes = 8
+        self.reset_embedding_spec_location(device, target_location)
+        # Initialize all physical/logical weights placements and offsets without initializing large dev weights tensor
+        self.initialize_physical_weights_placements_and_offsets(
+            cacheline_alignment=target_location != EmbeddingLocation.MTIA
+        )
+        self.initialize_logical_weights_placements_and_offsets()
+
+    def reset_embedding_spec_location(
+        self, device: torch.device, target_location: EmbeddingLocation
+    ) -> None:
         self.current_device = device
-        self.row_alignment = 1 if target_location == EmbeddingLocation.HOST else 16
+        self.row_alignment = (
+            1
+            if target_location == EmbeddingLocation.HOST
+            or target_location == EmbeddingLocation.MTIA
+            else 16
+        )
         self.embedding_specs = [
             (spec[0], spec[1], spec[2], spec[3], target_location)
             for spec in self.embedding_specs
@@ -1128,9 +1155,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             self.reset_uvm_cache_stats()
 
     def reset_cache_states(self) -> None:
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if not self.lxu_cache_weights.numel():
             return
         self.lxu_cache_state.fill_(-1)
@@ -1152,7 +1176,10 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         splits: List[Tuple[Tensor, Optional[Tensor], Optional[Tensor]]] = []
         for t, (_, rows, dim, weight_ty, _) in enumerate(self.embedding_specs):
             placement = self.weights_physical_placements[t]
-            if placement == EmbeddingLocation.DEVICE.value:
+            if (
+                placement == EmbeddingLocation.DEVICE.value
+                or placement == EmbeddingLocation.MTIA.value
+            ):
                 weights = self.weights_dev
             elif placement == EmbeddingLocation.HOST.value:
                 weights = self.weights_host
@@ -1181,37 +1208,72 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
                     ),
                 ]
                 if (
-                    weight_ty == SparseType.INT8
-                    or weight_ty == SparseType.INT4
-                    or weight_ty == SparseType.INT2
+                    weight_ty.value == SparseType.INT8.value
+                    or weight_ty.value == SparseType.INT4.value
+                    or weight_ty.value == SparseType.INT2.value
                 ):
                     if split_scale_bias_mode == 1:
-                        splits.append(
-                            (
-                                weights_shifts[:, self.scale_bias_size_in_bytes :],
-                                weights_shifts[:, : self.scale_bias_size_in_bytes],
-                                None,
+                        if self.reverse_qparam:
+                            splits.append(
+                                (
+                                    weights_shifts[
+                                        :, 0 : (0 - self.scale_bias_size_in_bytes)
+                                    ],
+                                    weights_shifts[
+                                        :, (0 - self.scale_bias_size_in_bytes) :
+                                    ],
+                                    None,
+                                )
                             )
-                        )
-                    else:  # 2
-                        # weights_shifts: [0:2] is scale; [2:4] is bias; [4:] is real weights
-                        splits.append(
-                            (
-                                weights_shifts[:, self.scale_bias_size_in_bytes :],
-                                weights_shifts[
-                                    :, : self.scale_bias_size_in_bytes // 2
-                                ].view(torch.float16),
-                                weights_shifts[
-                                    :,
-                                    self.scale_bias_size_in_bytes
-                                    // 2 : self.scale_bias_size_in_bytes,
-                                ].view(torch.float16),
+                        else:
+                            splits.append(
+                                (
+                                    weights_shifts[:, self.scale_bias_size_in_bytes :],
+                                    weights_shifts[:, : self.scale_bias_size_in_bytes],
+                                    None,
+                                )
                             )
-                        )
+                    elif split_scale_bias_mode == 2:
+                        if self.reverse_qparam:
+                            # weights_shifts: [0:-4] is real weights; [-4:-2] is scale; [-2:] is bias
+                            splits.append(
+                                (
+                                    weights_shifts[
+                                        :, 0 : (0 - self.scale_bias_size_in_bytes)
+                                    ],
+                                    weights_shifts[
+                                        :,
+                                        (0 - self.scale_bias_size_in_bytes) : (
+                                            0 - self.scale_bias_size_in_bytes // 2
+                                        ),
+                                    ].view(torch.float16),
+                                    weights_shifts[
+                                        :, (0 - self.scale_bias_size_in_bytes // 2) :
+                                    ].view(torch.float16),
+                                )
+                            )
+                        else:
+                            # weights_shifts: [0:2] is scale; [2:4] is bias; [4:] is real weights
+                            splits.append(
+                                (
+                                    weights_shifts[:, self.scale_bias_size_in_bytes :],
+                                    weights_shifts[
+                                        :, : self.scale_bias_size_in_bytes // 2
+                                    ].view(torch.float16),
+                                    weights_shifts[
+                                        :,
+                                        self.scale_bias_size_in_bytes
+                                        // 2 : self.scale_bias_size_in_bytes,
+                                    ].view(torch.float16),
+                                )
+                            )
+                    else:
+                        raise ValueError("split_scale_bias_mode is not supported")
+
                 elif (
-                    weight_ty == SparseType.FP8
-                    or weight_ty == SparseType.FP16
-                    or weight_ty == SparseType.FP32
+                    weight_ty.value == SparseType.FP8.value
+                    or weight_ty.value == SparseType.FP16.value
+                    or weight_ty.value == SparseType.FP32.value
                 ):
                     splits.append(
                         (
@@ -1272,12 +1334,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         weights = self.split_embedding_weights()
         for dest_weight in weights:
             dest_weight[0].copy_(
-                torch.randint(
-                    0,
-                    255,
-                    size=dest_weight[0].shape,
-                    dtype=torch.uint8,
-                    device=self.current_device,
+                random_quant_scaled_tensor(
+                    shape=dest_weight[0].shape, device=self.current_device
                 )
             )
 
@@ -1500,9 +1558,6 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             )
 
         lxu_cache_locations = None
-        # pyre-fixme[29]:
-        #  `Union[BoundMethod[typing.Callable(Tensor.numel)[[Named(self, Tensor)],
-        #  int], Tensor], Tensor, nn.Module]` is not a function.
         if self.lxu_cache_weights.numel() > 0:
             linear_cache_indices = (
                 torch.ops.fbgemm.linearize_cache_indices_from_row_idx(

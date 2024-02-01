@@ -97,7 +97,7 @@ void jagged_dense_dense_elementwise_jagged_output_opt_(
               at::cuda::getCurrentDeviceProperties()->sharedMemPerBlock;
           if (dynamic_smem_size > cur_max_shared_bytes) {
             int max_shared_bytes;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             C10_CUDA_CHECK(cudaDeviceGetAttribute(
                 &max_shared_bytes,
                 cudaDevAttrMaxSharedMemoryPerBlockOptin,
@@ -107,7 +107,7 @@ void jagged_dense_dense_elementwise_jagged_output_opt_(
             max_shared_bytes = 64 << 10;
 #endif
             int shared_kb = max_shared_bytes >> 10;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             // Use 2/3 of the available GPU shared mem; leave rooms for L1$.
             int used_shared_kb = round_down(shared_kb * 2 / 3, 16);
             TORCH_CHECK_GT(used_shared_kb, 0);
@@ -116,7 +116,7 @@ void jagged_dense_dense_elementwise_jagged_output_opt_(
             int used_shared_kb = shared_kb;
 #endif
             int used_shared_bytes = used_shared_kb << 10;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             C10_CUDA_CHECK(cudaFuncSetAttribute(
                 jagged_dense_dense_elementwise_jagged_output_opt_search_kernel_<
                     index_t>,
@@ -218,8 +218,7 @@ Tensor jagged_dense_dense_elementwise_add_jagged_output_forward(
   TORCH_CHECK_EQ(dense_0.sizes(), dense_1.sizes());
   auto output = at::empty_like(x_values);
 
-  at::cuda::OptionalCUDAGuard device_guard;
-  device_guard.set_index(dense_0.get_device());
+  CUDA_DEVICE_GUARD(dense_0);
 
   if (x_values.scalar_type() == at::ScalarType::BFloat16 &&
       dense_0.scalar_type() == at::ScalarType::BFloat16 &&
@@ -279,6 +278,7 @@ Tensor jagged_dense_dense_elementwise_add_jagged_output_forward(
 
 } // namespace fbgemm_gpu
 
-JAGGED_TENSOR_OPS_CUDA_DISPATCH(
+FBGEMM_OP_DISPATCH(
+    CUDA,
     "jagged_dense_dense_elementwise_add_jagged_output_forward",
     fbgemm_gpu::jagged_dense_dense_elementwise_add_jagged_output_forward);

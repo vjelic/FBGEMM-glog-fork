@@ -184,7 +184,7 @@ void process_uvm_cache_stats(
 } // namespace
 #endif
 
-///@defgroup embedding-cuda Embedding CUDA Operators
+/// @defgroup embedding-cuda Embedding CUDA Operators
 ///
 
 Tensor int_nbit_split_embedding_codegen_forward_unweighted_cuda(
@@ -292,6 +292,7 @@ Tensor int_nbit_split_embedding_codegen_lookup_function(
         max_float16_D,
         max_float32_D};
     int64_t max_D = *std::max_element(max_D_list.begin(), max_D_list.end());
+    // TODO: extend to support Long indices/offests types T161999845
     return int_nbit_split_embedding_nobag_codegen_forward_unweighted_cuda(
         dev_weights,
         uvm_weights,
@@ -304,8 +305,8 @@ Tensor int_nbit_split_embedding_codegen_lookup_function(
         max_int8_D,
         max_float16_D,
         max_float32_D,
-        indices,
-        offsets,
+        indices.to(at::kInt),
+        offsets.to(at::kInt),
         row_alignment ? *row_alignment : 16,
         output_dtype,
         lxu_cache_weights.value_or(at::empty({0, 0}, at::kByte)),
@@ -496,7 +497,10 @@ Tensor int_nbit_split_embedding_uvm_caching_codegen_lookup_function(
         lxu_cache_state.value(),
         total_cache_hash_size.value(),
         gather_uvm_stats,
-        uvm_cache_stats);
+        uvm_cache_stats,
+        c10::optional<Tensor>(), // num_uniq_cache_indices
+        c10::optional<Tensor>() // lxu_cache_locations_output
+    );
 
 #ifdef FBCODE_CAFFE2
     if (FLAGS_tbe_uvm_cache_enforced_misses > 0) {
