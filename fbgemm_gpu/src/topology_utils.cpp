@@ -15,6 +15,7 @@
 #include "fbgemm_gpu/topology_utils.h"
 
 #ifdef USE_ROCM
+#include <inttypes.h>
 #include "hip/hip_runtime.h"
 #include "rocm_smi/rocm_smi.h"
 
