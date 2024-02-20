@@ -31,8 +31,8 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
 )
 from hypothesis import assume, given, HealthCheck, settings, Verbosity
 
-from . import common  # noqa E402
-from .common import (
+from .. import common  # noqa E402
+from ..common import (
     format_ref_tensors_in_mixed_B_layout,
     gen_mixed_B_batch_sizes,
     MAX_EXAMPLES,
@@ -42,13 +42,13 @@ from .common import (
 
 if open_source:
     # pyre-ignore[21]
-    from test_utils import gpu_available, gpu_unavailable, optests, TEST_WITH_ROCM
+    from test_utils import gpu_unavailable, optests, TEST_WITH_ROCM, use_cpu_strategy
 else:
     from fbgemm_gpu.test.test_utils import (
-        gpu_available,
         gpu_unavailable,
         optests,
         TEST_WITH_ROCM,
+        use_cpu_strategy,
     )
 
 
@@ -303,15 +303,21 @@ class BackwardSGDTest(unittest.TestCase):
         for t in range(T):
             torch.testing.assert_close(
                 cc.split_embedding_weights()[t],
-                new_weights[t].half()
-                if weights_precision == SparseType.FP16 and not use_cpu
-                else new_weights[t],
-                atol=1.0e-2
-                if long_segments
-                else (5.0e-3 if weights_precision == SparseType.FP16 else 1.0e-5),
-                rtol=1.0e-1
-                if long_segments
-                else (2.0e-2 if weights_precision == SparseType.FP16 else 1.0e-5),
+                (
+                    new_weights[t].half()
+                    if weights_precision == SparseType.FP16 and not use_cpu
+                    else new_weights[t]
+                ),
+                atol=(
+                    1.0e-2
+                    if long_segments
+                    else (5.0e-3 if weights_precision == SparseType.FP16 else 1.0e-5)
+                ),
+                rtol=(
+                    1.0e-1
+                    if long_segments
+                    else (2.0e-2 if weights_precision == SparseType.FP16 else 1.0e-5)
+                ),
             )
 
     @given(
@@ -334,11 +340,7 @@ class BackwardSGDTest(unittest.TestCase):
                 PoolingMode.NONE,
             ]
         ),
-        use_cpu=st.booleans()
-        if (gpu_available and not TEST_WITH_ROCM)
-        else st.just(False)
-        if (gpu_available and TEST_WITH_ROCM)
-        else st.just(True),
+        use_cpu=use_cpu_strategy(),
     )
     @settings(
         verbosity=VERBOSITY,

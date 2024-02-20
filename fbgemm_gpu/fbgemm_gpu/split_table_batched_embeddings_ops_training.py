@@ -646,9 +646,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                         embedding_specs,
                         rowwise=rowwise,
                         cacheable=False,
-                        placement=EmbeddingLocation.MANAGED
-                        if ((not rowwise) and uvm_non_rowwise_momentum)
-                        else None,
+                        placement=(
+                            EmbeddingLocation.MANAGED
+                            if ((not rowwise) and uvm_non_rowwise_momentum)
+                            else None
+                        ),
                     ),
                     prefix="momentum1",
                     # pyre-fixme[6]: Expected `Type[Type[torch._dtype]]` for 3rd param
@@ -671,9 +673,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
                         embedding_specs,
                         rowwise=rowwise,
                         cacheable=False,
-                        placement=EmbeddingLocation.MANAGED
-                        if ((not rowwise) and uvm_non_rowwise_momentum)
-                        else None,
+                        placement=(
+                            EmbeddingLocation.MANAGED
+                            if ((not rowwise) and uvm_non_rowwise_momentum)
+                            else None
+                        ),
                     ),
                     prefix="momentum2",
                     # pyre-fixme[6]: Expected `Type[Type[torch._dtype]]` for 3rd param
@@ -1011,6 +1015,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             indice_weights=per_sample_weights,
             feature_requires_grad=feature_requires_grad,
             lxu_cache_locations=self.lxu_cache_locations,
+            # Pass the local_uvm_cache_stats bc only that information is
+            # relevant for the current iteration
+            uvm_cache_stats=(
+                self.local_uvm_cache_stats if self.gather_uvm_cache_stats else None
+            ),
             output_dtype=self.output_dtype,
             vbe_metadata=vbe_metadata,
             is_experimental=self.is_experimental,
@@ -1159,17 +1168,16 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.uvm_cache_stats.zero_()
         self.local_uvm_cache_stats.zero_()
 
-    def get_uvm_cache_stats(self) -> Tensor:
+    def get_uvm_cache_stats(self, use_local_cache: bool = False) -> Tensor:
         assert (
             self.gather_uvm_cache_stats
         ), "gather_uvm_cache_stats should be set to true to access uvm cache stats."
-        return self.uvm_cache_stats
+        return self.local_uvm_cache_stats if use_local_cache else self.uvm_cache_stats
 
-    def print_uvm_cache_stats(self) -> None:
-        assert (
-            self.gather_uvm_cache_stats
-        ), "gather_uvm_cache_stats should be set to true to access uvm cache stats."
-        uvm_cache_stats: List[float] = self.uvm_cache_stats.tolist()
+    def print_uvm_cache_stats(self, use_local_cache: bool = False) -> None:
+        uvm_cache_stats: List[float] = self.get_uvm_cache_stats(
+            use_local_cache
+        ).tolist()
         logging.info(
             f"N_called: {uvm_cache_stats[0]}\n"
             f"N_requested_indices: {uvm_cache_stats[1]}\n"
@@ -1205,6 +1213,12 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.timesteps_prefetched.append(self.timestep)
         if not self.lxu_cache_weights.numel():
             return
+
+        # Clear the local_uvm_cache_stats before the prefetch instead of after
+        # the prefetch step, since it will be used in the CommonArgs in the
+        # forward step
+        if self.gather_uvm_cache_stats:
+            self.local_uvm_cache_stats.zero_()
 
         linear_cache_indices = torch.ops.fbgemm.linearize_cache_indices(
             self.cache_hash_size_cumsum,
@@ -1287,7 +1301,6 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             self.uvm_cache_stats = torch.add(
                 self.uvm_cache_stats, self.local_uvm_cache_stats
             )
-            self.local_uvm_cache_stats.zero_()
 
     def _prefetch_tensors_record_stream(
         self, forward_stream: torch.cuda.Stream
@@ -1411,9 +1424,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             or self.optimizer == OptimType.EXACT_ADAGRAD
         ):
             list_of_state_dict = [
-                {"sum": states[0], "prev_iter": states[1], "row_counter": states[2]}
-                if self._used_rowwise_adagrad_with_counter
-                else {"sum": states[0]}
+                (
+                    {"sum": states[0], "prev_iter": states[1], "row_counter": states[2]}
+                    if self._used_rowwise_adagrad_with_counter
+                    else {"sum": states[0]}
+                )
                 for states in split_optimizer_states
             ]
         elif self.optimizer == OptimType.SGD or self.optimizer == OptimType.EXACT_SGD:
@@ -1703,7 +1718,8 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
             f"Using on-device cache with admission algorithm "
             f"{cache_algorithm}, {cache_sets} sets, "
             f"load_factor: {cache_load_factor : .3f}, "
-            f"{cache_size / 1024.0 / 1024.0 / 1024.0 : .2f}GB"
+            f"cache_size: {cache_size / 1024.0 / 1024.0 / 1024.0 : .2f}GB, "
+            f"cache_precision: {dtype}"
         )
 
         self.total_cache_hash_size = cache_state.total_cache_hash_size
@@ -1741,9 +1757,11 @@ class SplitTableBatchedEmbeddingBagsCodegen(nn.Module):
         self.register_buffer(
             "lxu_state",
             torch.zeros(
-                size=(self.total_cache_hash_size + 1,)
-                if cache_algorithm == CacheAlgorithm.LFU
-                else (cache_sets, DEFAULT_ASSOC),
+                size=(
+                    (self.total_cache_hash_size + 1,)
+                    if cache_algorithm == CacheAlgorithm.LFU
+                    else (cache_sets, DEFAULT_ASSOC)
+                ),
                 device=self.current_device,
                 dtype=torch.int64,
             ),
