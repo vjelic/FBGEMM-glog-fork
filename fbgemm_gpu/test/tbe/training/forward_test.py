@@ -34,8 +34,8 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
 )
 from hypothesis import assume, given, HealthCheck, settings, Verbosity
 
-from . import common  # noqa E402
-from .common import (
+from .. import common  # noqa E402
+from ..common import (
     format_ref_tensors_in_mixed_B_layout,
     gen_mixed_B_batch_sizes,
     MAX_EXAMPLES_LONG_RUNNING,
@@ -248,9 +248,9 @@ class ForwardTest(unittest.TestCase):
                 for (E, D, M) in zip(Es, Ds, managed)
             ],
             weights_precision=weights_precision,
-            optimizer=OptimType.EXACT_ROWWISE_ADAGRAD
-            if mixed_B
-            else OptimType.EXACT_SGD,
+            optimizer=(
+                OptimType.EXACT_ROWWISE_ADAGRAD if mixed_B else OptimType.EXACT_SGD
+            ),
             learning_rate=0.05,
             cache_algorithm=cache_algorithm,
             pooling_mode=pooling_mode,
@@ -847,22 +847,26 @@ class ForwardTest(unittest.TestCase):
                 lowp_pooled_output, lowp_pooled_emb_split, dim=1
             )
             deq_lowp_pooled_output_per_table = [
-                torch.ops.fbgemm.Fused8BitRowwiseQuantizedToFloat(t.contiguous())
-                if output_dtype == SparseType.INT8
-                else t.float()
+                (
+                    torch.ops.fbgemm.Fused8BitRowwiseQuantizedToFloat(t.contiguous())
+                    if output_dtype == SparseType.INT8
+                    else t.float()
+                )
                 for t in lowp_pooled_output_per_table
             ]
             fp32_pooled_output_per_table = torch.split(
                 fp32_pooled_output, op.dims, dim=1
             )
             dq_fp32_pooled_output_per_table = [
-                torch.ops.fbgemm.Fused8BitRowwiseQuantizedToFloat(
-                    torch.ops.fbgemm.FloatToFused8BitRowwiseQuantized(
-                        t.contiguous()
-                    ).contiguous()
+                (
+                    torch.ops.fbgemm.Fused8BitRowwiseQuantizedToFloat(
+                        torch.ops.fbgemm.FloatToFused8BitRowwiseQuantized(
+                            t.contiguous()
+                        ).contiguous()
+                    )
+                    if output_dtype == SparseType.INT8
+                    else t.half().float()
                 )
-                if output_dtype == SparseType.INT8
-                else t.half().float()
                 for t in fp32_pooled_output_per_table
             ]
             cat_deq_lowp_pooled_output = torch.cat(

@@ -55,15 +55,13 @@ __global__ __launch_bounds__(kMaxThreads) void lxu_cache_flush_kernel(
     if constexpr (std::is_same_v<emb_t, uint8_t>) {
       D_emb += kINT8QparamsBytes;
     }
+    StochasticRoundingRNGState state;
     auto weight_row = WeightRow<emb_t, cache_t, at::acc_type<cache_t, true>>(
         &weights[weights_offset_current + idx_current * D_emb + 0],
         &lxu_cache_weights[b][0],
         D_current,
-        nullptr);
-
-    weight_row.set_stochastic_rounding(
-        stochastic_rounding,
-        stochastic_rounding_philox_args,
+        stochastic_rounding ? &state : nullptr,
+        &stochastic_rounding_philox_args,
         blockIdx.x * blockDim.x * blockDim.y + threadIdx.y * blockDim.x +
             threadIdx.x);
 
@@ -75,10 +73,8 @@ __global__ __launch_bounds__(kMaxThreads) void lxu_cache_flush_kernel(
         weight_row.store_qparams(qparams);
       }
     }
-    for (int32_t d = threadIdx.x; d * 4 < D_current; d += blockDim.x) {
-      Vec4T<at::acc_type<cache_t, true>> cache_weights_vec =
-          weight_row.load(d * 4, qparams);
-      weight_row.evict(cache_weights_vec, d * 4, qparams);
+    for (int32_t d = threadIdx.x * 4; d < D_current; d += blockDim.x * 4) {
+      weight_row.evict_cache(d, qparams);
     }
   }
 }
@@ -117,8 +113,14 @@ DLL_PUBLIC void lxu_cache_flush_cuda(
       lxu_cache_weights.scalar_type(),
       "lxu_cache_flush_kernel_2",
       ([&] {
+        // Stochastic rounding is required only when emb_t and cache_t are
+        // not the same type and emb_t is not float
+        const bool stochastic_rounding_ = stochastic_rounding &&
+            !std::is_same<emb_t, float>::value &&
+            !std::is_same<emb_t, cache_t>::value;
+
         at::PhiloxCudaState rng_engine_inputs;
-        if (stochastic_rounding && std::is_same<emb_t, at::Half>::value) {
+        if (stochastic_rounding_) {
           auto gen = at::cuda::detail::getDefaultCUDAGenerator();
           std::lock_guard<std::mutex> lock(gen.mutex());
           rng_engine_inputs = at::check_generator<at::CUDAGeneratorImpl>(gen)
@@ -139,7 +141,7 @@ DLL_PUBLIC void lxu_cache_flush_cuda(
                 MAKE_PTA_WITH_NAME(func_name, lxu_cache_state, int64_t, 2, 32),
                 MAKE_PTA_WITH_NAME(
                     func_name, lxu_cache_weights, cache_t, 2, 64),
-                stochastic_rounding,
+                stochastic_rounding_,
                 rng_engine_inputs);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
       }));

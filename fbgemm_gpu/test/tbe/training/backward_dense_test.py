@@ -26,19 +26,14 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
 )
 from hypothesis import assume, given, HealthCheck, settings, Verbosity
 
-from . import common  # noqa E402
-from .common import open_source
+from .. import common  # noqa E402
+from ..common import open_source
 
 if open_source:
     # pyre-ignore[21]
-    from test_utils import gpu_available, gradcheck, optests, TEST_WITH_ROCM
+    from test_utils import gradcheck, optests, use_cpu_strategy
 else:
-    from fbgemm_gpu.test.test_utils import (
-        gpu_available,
-        gradcheck,
-        optests,
-        TEST_WITH_ROCM,
-    )
+    from fbgemm_gpu.test.test_utils import gradcheck, optests, use_cpu_strategy
 
 
 VERBOSITY: Verbosity = Verbosity.verbose
@@ -63,11 +58,7 @@ class BackwardDenseTest(unittest.TestCase):
                 PoolingMode.NONE,
             ]
         ),
-        use_cpu=st.booleans()
-        if (gpu_available and not TEST_WITH_ROCM)
-        else st.just(False)
-        if (gpu_available and TEST_WITH_ROCM)
-        else st.just(True),
+        use_cpu=use_cpu_strategy(),
         output_dtype=st.sampled_from([SparseType.FP32, SparseType.FP16]),
     )
     @settings(
@@ -223,12 +214,18 @@ class BackwardDenseTest(unittest.TestCase):
         torch.testing.assert_close(
             fc2.float(),
             f.float(),
-            atol=5.0e-3
-            if weights_precision == SparseType.FP16 or output_dtype == SparseType.FP16
-            else 1.0e-5,
-            rtol=5.0e-3
-            if weights_precision == SparseType.FP16 or output_dtype == SparseType.FP16
-            else 1.0e-5,
+            atol=(
+                5.0e-3
+                if weights_precision == SparseType.FP16
+                or output_dtype == SparseType.FP16
+                else 1.0e-5
+            ),
+            rtol=(
+                5.0e-3
+                if weights_precision == SparseType.FP16
+                or output_dtype == SparseType.FP16
+                else 1.0e-5
+            ),
         )
         if do_pooling:
             goc = torch.cat([go.view(B, -1) for go in gos], dim=1)
@@ -238,12 +235,18 @@ class BackwardDenseTest(unittest.TestCase):
         torch.testing.assert_close(
             cc.weights.grad,
             grad_weights,
-            atol=5.0e-3
-            if weights_precision == SparseType.FP16 or output_dtype == SparseType.FP16
-            else 1.0e-4,
-            rtol=5.0e-3
-            if weights_precision == SparseType.FP16 or output_dtype == SparseType.FP16
-            else 1.0e-4,
+            atol=(
+                5.0e-3
+                if weights_precision == SparseType.FP16
+                or output_dtype == SparseType.FP16
+                else 1.0e-4
+            ),
+            rtol=(
+                5.0e-3
+                if weights_precision == SparseType.FP16
+                or output_dtype == SparseType.FP16
+                else 1.0e-4
+            ),
         )
 
         cc = DenseTableBatchedEmbeddingBagsCodegen(

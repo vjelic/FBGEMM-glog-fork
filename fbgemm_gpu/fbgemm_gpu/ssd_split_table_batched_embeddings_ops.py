@@ -213,6 +213,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             prefix="ssd_table_batched_embeddings", dir=ssd_storage_directory
         )
         # pyre-fixme[4]: Attribute must be annotated.
+        # pyre-ignore[16]
         self.ssd_db = torch.classes.fbgemm.EmbeddingRocksDBWrapper(
             ssd_directory,
             ssd_shards,
@@ -461,6 +462,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             indice_weights=per_sample_weights,
             feature_requires_grad=feature_requires_grad,
             lxu_cache_locations=lxu_cache_locations,
+            uvm_cache_stats=None,
             vbe_metadata=invokers.lookup_args.VBEMetadata(
                 B_offsets=None,
                 output_offsets_feature_rank=None,
@@ -770,6 +772,7 @@ class SSDIntNBitTableBatchedEmbeddingBags(nn.Module):
             prefix="ssd_table_batched_embeddings", dir=ssd_storage_directory
         )
         # pyre-fixme[4]: Attribute must be annotated.
+        # pyre-ignore[16]
         self.ssd_db = torch.classes.fbgemm.EmbeddingRocksDBWrapper(
             ssd_directory,
             ssd_shards,
@@ -794,8 +797,10 @@ class SSDIntNBitTableBatchedEmbeddingBags(nn.Module):
         self.ssd_set_end = torch.cuda.Event()
 
         # pyre-fixme[4]: Attribute must be annotated.
+        # pyre-ignore[16]
         self.timestep_counter = torch.classes.fbgemm.AtomicCounter()
         # pyre-fixme[4]: Attribute must be annotated.
+        # pyre-ignore[16]
         self.timestep_prefetch_size = torch.classes.fbgemm.AtomicCounter()
 
         self.weights_dev: torch.Tensor = torch.empty(

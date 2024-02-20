@@ -13,11 +13,11 @@ from typing import Optional, Tuple
 import hypothesis.strategies as st
 import numpy as np
 import torch
+from fbgemm_gpu.split_embedding_configs import SparseType
 
 from fbgemm_gpu.split_embedding_utils import (
     generate_requests,
     get_table_batched_offsets_from_dense,
-    round_up,
     to_device,
 )
 from fbgemm_gpu.split_table_batched_embeddings_ops_common import (
@@ -29,104 +29,21 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
     ComputeDevice,
     SplitTableBatchedEmbeddingBagsCodegen,
 )
-from hypothesis import given, settings, Verbosity
+from hypothesis import assume, given, settings
 
-from . import common  # noqa E402
-from .common import MAX_EXAMPLES, open_source
+from ..common import MAX_EXAMPLES  # noqa E402
 
-if open_source:
-    # pyre-ignore[21]
-    from test_utils import gpu_unavailable, optests
-else:
-    from fbgemm_gpu.test.test_utils import gpu_unavailable, optests
-
-
-VERBOSITY: Verbosity = Verbosity.verbose
+from .cache_common import (
+    assert_cache,
+    generate_cache_tbes,
+    gpu_unavailable,
+    optests,
+    VERBOSITY,
+)
 
 
 @optests.generate_opcheck_tests(fast=True)
 class CacheTest(unittest.TestCase):
-    def _generate_cache_tbes(
-        self,
-        T: int,
-        D: int,
-        B: int,
-        log_E: int,
-        L: int,
-        mixed: bool,
-        cache_algorithm: CacheAlgorithm = CacheAlgorithm.LRU,
-        prefetch_pipeline: bool = False,
-        use_int_weight: bool = False,
-    ) -> Tuple[
-        SplitTableBatchedEmbeddingBagsCodegen,
-        SplitTableBatchedEmbeddingBagsCodegen,
-        int,
-        int,
-    ]:
-        lr = 1.0 if use_int_weight else 0.02
-        E = int(10**log_E)
-        D = D * 4
-        if not mixed:
-            Ds = [D] * T
-            Es = [E] * T
-        else:
-            Ds = [
-                round_up(np.random.randint(low=int(0.25 * D), high=int(1.0 * D)), 4)
-                for _ in range(T)
-            ]
-            Es = [
-                np.random.randint(low=int(0.5 * E), high=int(2.0 * E)) for _ in range(T)
-            ]
-        managed = [EmbeddingLocation.MANAGED_CACHING] * T
-        if mixed:
-            average_D = sum(Ds) // T
-            for t, d in enumerate(Ds):
-                managed[t] = EmbeddingLocation.DEVICE if d < average_D else managed[t]
-        cc_ref = SplitTableBatchedEmbeddingBagsCodegen(
-            [
-                (
-                    E,
-                    D,
-                    EmbeddingLocation.DEVICE,
-                    ComputeDevice.CUDA,
-                )
-                for (E, D) in zip(Es, Ds)
-            ],
-            stochastic_rounding=False,
-            prefetch_pipeline=False,
-            learning_rate=lr,
-        )
-        cc = SplitTableBatchedEmbeddingBagsCodegen(
-            [(E, D, M, ComputeDevice.CUDA) for (E, D, M) in zip(Es, Ds, managed)],
-            cache_algorithm=cache_algorithm,
-            stochastic_rounding=False,
-            prefetch_pipeline=prefetch_pipeline,
-            learning_rate=lr,
-        )
-
-        if use_int_weight:
-            min_val = -20
-            max_val = +20
-            for param in cc_ref.split_embedding_weights():
-                p = torch.randint(
-                    int(min_val),
-                    int(max_val) + 1,
-                    size=param.shape,
-                    device=param.device,
-                )
-                param.data.copy_(p)
-
-        for t in range(T):
-            self.assertEqual(
-                cc.split_embedding_weights()[t].size(),
-                cc_ref.split_embedding_weights()[t].size(),
-            )
-            cc.split_embedding_weights()[t].data.copy_(
-                cc_ref.split_embedding_weights()[t]
-            )
-
-        return (cc, cc_ref, min(Es), sum(Ds))
-
     @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
     @given(
@@ -137,6 +54,8 @@ class CacheTest(unittest.TestCase):
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
         cache_algorithm=st.sampled_from(CacheAlgorithm),
+        weights_cache_precision=st.sampled_from([SparseType.FP32, SparseType.FP16]),
+        stochastic_rounding=st.booleans(),
     )
     @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_pipeline(
@@ -148,9 +67,18 @@ class CacheTest(unittest.TestCase):
         L: int,
         mixed: bool,
         cache_algorithm: CacheAlgorithm,
+        weights_cache_precision: SparseType,
+        stochastic_rounding: bool,
     ) -> None:
-        cc, cc_ref, min_Es, sum_Ds = self._generate_cache_tbes(
-            T, D, B, log_E, L, mixed, cache_algorithm
+        assume(weights_cache_precision == SparseType.FP16 or not stochastic_rounding)
+        cc, cc_ref, min_Es, sum_Ds = generate_cache_tbes(
+            T,
+            D,
+            log_E,
+            mixed,
+            cache_algorithm,
+            weights_cache_precision=weights_cache_precision,
+            stochastic_rounding=stochastic_rounding,
         )
         iters = 3
         requests = generate_requests(iters, B, T, L, min_Es, reuse=0.1)
@@ -159,13 +87,15 @@ class CacheTest(unittest.TestCase):
         for indices, offsets, _ in requests:
             output = cc(indices, offsets)
             output_ref = cc_ref(indices, offsets)
-            torch.testing.assert_close(output, output_ref)
+            assert_cache(output, output_ref, stochastic_rounding)
             output.backward(grad_output)
             output_ref.backward(grad_output)
         cc.flush()
         for t in range(T):
-            torch.testing.assert_close(
-                cc.split_embedding_weights()[t], cc_ref.split_embedding_weights()[t]
+            assert_cache(
+                cc.split_embedding_weights()[t],
+                cc_ref.split_embedding_weights()[t],
+                stochastic_rounding,
             )
 
     def _test_cache_prefetch_pipeline(  # noqa C901
@@ -178,6 +108,8 @@ class CacheTest(unittest.TestCase):
         mixed: bool,
         prefetch_location: str,
         prefetch_stream: Optional[torch.cuda.Stream],
+        weights_cache_precision: SparseType,
+        stochastic_rounding: bool,
     ) -> None:
         """
         test cache prefetch pipeline with prefetch_pipeline=True.
@@ -190,8 +122,16 @@ class CacheTest(unittest.TestCase):
         """
 
         assert prefetch_location in ["before_fwd", "between_fwd_bwd"]
-        cc, cc_ref, min_Es, sum_Ds = self._generate_cache_tbes(
-            T, D, B, log_E, L, mixed, CacheAlgorithm.LRU, True, True
+        cc, cc_ref, min_Es, sum_Ds = generate_cache_tbes(
+            T,
+            D,
+            log_E,
+            mixed,
+            CacheAlgorithm.LRU,
+            prefetch_pipeline=True,
+            use_int_weight=True,
+            weights_cache_precision=weights_cache_precision,
+            stochastic_rounding=stochastic_rounding,
         )
         iters = 5
         requests = generate_requests(iters, B, T, L, min_Es, reuse=0.1)
@@ -247,11 +187,13 @@ class CacheTest(unittest.TestCase):
             output_ref.backward(grad_output)
 
         for t in range(T):
-            torch.testing.assert_close(
-                cc.split_embedding_weights()[t], cc_ref.split_embedding_weights()[t]
+            assert_cache(
+                cc.split_embedding_weights()[t],
+                cc_ref.split_embedding_weights()[t],
+                stochastic_rounding,
             )
 
-        torch.testing.assert_close(output, output_ref)
+        assert_cache(output, output_ref, stochastic_rounding)
         self.assertTrue(torch.all(cc.lxu_cache_locking_counter == 0))
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
@@ -264,6 +206,8 @@ class CacheTest(unittest.TestCase):
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
         prefetch_location=st.sampled_from(["before_fwd", "between_fwd_bwd"]),
+        weights_cache_precision=st.sampled_from([SparseType.FP32, SparseType.FP16]),
+        stochastic_rounding=st.booleans(),
     )
     @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline(
@@ -275,6 +219,8 @@ class CacheTest(unittest.TestCase):
         L: int,
         mixed: bool,
         prefetch_location: str,
+        weights_cache_precision: SparseType,
+        stochastic_rounding: bool,
     ) -> None:
         self._test_cache_prefetch_pipeline(
             T,
@@ -285,6 +231,8 @@ class CacheTest(unittest.TestCase):
             mixed,
             prefetch_location,
             prefetch_stream=None,
+            weights_cache_precision=weights_cache_precision,
+            stochastic_rounding=stochastic_rounding,
         )
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
@@ -296,6 +244,8 @@ class CacheTest(unittest.TestCase):
         log_E=st.integers(min_value=3, max_value=5),
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
+        weights_cache_precision=st.sampled_from([SparseType.FP32, SparseType.FP16]),
+        stochastic_rounding=st.booleans(),
     )
     @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline_stream_1(
@@ -306,6 +256,8 @@ class CacheTest(unittest.TestCase):
         log_E: int,
         L: int,
         mixed: bool,
+        weights_cache_precision: SparseType,
+        stochastic_rounding: bool,
     ) -> None:
         self._test_cache_prefetch_pipeline(
             T,
@@ -316,6 +268,8 @@ class CacheTest(unittest.TestCase):
             mixed,
             prefetch_location="before_fwd",
             prefetch_stream=torch.cuda.Stream(),
+            weights_cache_precision=weights_cache_precision,
+            stochastic_rounding=stochastic_rounding,
         )
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
@@ -327,6 +281,8 @@ class CacheTest(unittest.TestCase):
         log_E=st.integers(min_value=3, max_value=5),
         L=st.integers(min_value=1, max_value=20),
         mixed=st.booleans(),
+        weights_cache_precision=st.sampled_from([SparseType.FP32, SparseType.FP16]),
+        stochastic_rounding=st.booleans(),
     )
     @settings(verbosity=VERBOSITY, max_examples=MAX_EXAMPLES, deadline=None)
     def test_cache_prefetch_pipeline_stream_2(
@@ -337,6 +293,8 @@ class CacheTest(unittest.TestCase):
         log_E: int,
         L: int,
         mixed: bool,
+        weights_cache_precision: SparseType,
+        stochastic_rounding: bool,
     ) -> None:
         self._test_cache_prefetch_pipeline(
             T,
@@ -347,6 +305,8 @@ class CacheTest(unittest.TestCase):
             mixed,
             prefetch_location="between_fwd_bwd",
             prefetch_stream=torch.cuda.Stream(),
+            weights_cache_precision=weights_cache_precision,
+            stochastic_rounding=stochastic_rounding,
         )
 
     @unittest.skipIf(*gpu_unavailable)
