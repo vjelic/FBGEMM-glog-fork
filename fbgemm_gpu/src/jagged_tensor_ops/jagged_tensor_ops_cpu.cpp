@@ -404,12 +404,8 @@ at::Tensor jagged_to_padded_dense_forward(
   Tensor padded_values_view =
       D_folded ? padded_values.unsqueeze(-1) : padded_values;
 
-  AT_DISPATCH_ALL_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      values.scalar_type(),
-      "jagged_to_padded_dense",
-      [&] {
+  FBGEMM_DISPATCH_ALL_TYPES(
+      values.scalar_type(), "jagged_to_padded_dense", [&] {
         jagged_dense_elementwise_dense_output_<scalar_t>(
             values_canonicalized,
             offsets,
@@ -440,9 +436,7 @@ at::Tensor jagged_to_padded_dense_backward(
   auto grad_values =
       at::zeros_symint({total_L, D}, grad_padded_values.options());
 
-  AT_DISPATCH_ALL_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
+  FBGEMM_DISPATCH_ALL_TYPES(
       grad_padded_values.scalar_type(),
       "jagged_2d_to_dense_backward_kernel",
       [&] {
@@ -474,19 +468,14 @@ Tensor dense_to_jagged_forward(
   auto values = at::empty_symint({total_L_computed, D}, dense.options());
   auto output = at::zeros_symint({total_L_computed, D}, dense.options());
 
-  AT_DISPATCH_ALL_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      values.scalar_type(),
-      "jagged_scalars",
-      [&] {
-        jagged_dense_elementwise_jagged_output_<scalar_t>(
-            values,
-            offsets,
-            dense,
-            output,
-            [](scalar_t /*unused*/, scalar_t y) -> scalar_t { return y; });
-      });
+  FBGEMM_DISPATCH_ALL_TYPES(values.scalar_type(), "jagged_scalars", [&] {
+    jagged_dense_elementwise_jagged_output_<scalar_t>(
+        values,
+        offsets,
+        dense,
+        output,
+        [](scalar_t /*unused*/, scalar_t y) -> scalar_t { return y; });
+  });
 
   return output;
 }
@@ -661,7 +650,7 @@ std::tuple<Tensor, Tensor> jagged_dense_elementwise_mul_backward(
     const Tensor& x_values) {
   Tensor x_values_grad = at::zeros_like(grad_output);
   Tensor y_grad = at::zeros_like(y);
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  FBGEMM_DISPATCH_FLOAT_AND_HALF(
       x_values.scalar_type(), "jagged_dense_elementwise_mul_backward", [&] {
         jagged_dense_elementwise_jagged_output_<scalar_t>(
             grad_output,
@@ -819,12 +808,8 @@ Tensor batched_dense_vec_jagged_2d_mul_forward(
   if (B > 0 && D > 0) {
     AT_DISPATCH_INDEX_TYPES(
         a_offsets.scalar_type(), "dense_vec_jagged_2d_bmm_kernel_1", [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
-              a_values.scalar_type(),
-              "dense_vec_jagged_2d_bmm_kernel_2",
-              [&] {
+          FBGEMM_DISPATCH_FLOATING_TYPES(
+              a_values.scalar_type(), "dense_vec_jagged_2d_bmm_kernel_2", [&] {
                 dense_vec_jagged_2d_bmm<index_t, scalar_t>(
                     v.accessor<scalar_t, 2>(),
                     a_values.accessor<scalar_t, 2>(),
@@ -854,9 +839,7 @@ std::tuple<Tensor, Tensor> batched_dense_vec_jagged_2d_mul_backward(
         a_offsets.scalar_type(),
         "dense_vec_jagged_2d_bmm_backward_kernel_1",
         [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
+          FBGEMM_DISPATCH_FLOATING_TYPES(
               grad_output.scalar_type(),
               "dense_vec_jagged_2d_bmm_backward_kernel_2",
               [&] {
@@ -890,12 +873,8 @@ Tensor jagged_1d_to_truncated_values_cpu(
   Tensor truncated_values;
   AT_DISPATCH_INDEX_TYPES(
       lengths.scalar_type(), "jagged_1d_to_truncated_values_cpu_kernel", [&] {
-        AT_DISPATCH_ALL_TYPES_AND2(
-            at::ScalarType::Half,
-            at::ScalarType::BFloat16,
-            values.scalar_type(),
-            "copy_values_and_truncate_cpu_kernel",
-            [&] {
+        FBGEMM_DISPATCH_ALL_TYPES(
+            values.scalar_type(), "copy_values_and_truncate_cpu_kernel", [&] {
               const index_t max_length_int =
                   static_cast<index_t>(max_truncated_length);
               const auto lengths_accessor = lengths.accessor<index_t, 1>();
@@ -942,12 +921,8 @@ std::tuple<Tensor, Tensor> masked_select_jagged_1d(
 
   AT_DISPATCH_INDEX_TYPES(
       lengths.scalar_type(), "mask_select_jagged_1d_kernel1", [&] {
-        AT_DISPATCH_ALL_TYPES_AND2(
-            at::ScalarType::Half,
-            at::ScalarType::BFloat16,
-            values.scalar_type(),
-            "mask_select_jagged_1d_kernel2",
-            [&] {
+        FBGEMM_DISPATCH_ALL_TYPES(
+            values.scalar_type(), "mask_select_jagged_1d_kernel2", [&] {
               const int32_t num_outputs = mask.sum().item<int32_t>();
               masked_values = at::empty({num_outputs}, values.options());
 
@@ -1127,12 +1102,8 @@ Tensor jagged_index_select_2d_forward_cpu(
       at::empty({num_dense_output_rows, num_cols}, values.options());
 
   if (num_dense_output_rows > 0) {
-    AT_DISPATCH_ALL_TYPES_AND2(
-        at::ScalarType::Half,
-        at::ScalarType::BFloat16,
-        values.scalar_type(),
-        "jagged_index_select_2d_kernel_wrapper_1",
-        [&] {
+    FBGEMM_DISPATCH_ALL_TYPES(
+        values.scalar_type(), "jagged_index_select_2d_kernel_wrapper_1", [&] {
           AT_DISPATCH_INDEX_TYPES(
               indices.scalar_type(),
               "jagged_index_select_2d_kernel_wrapper_2",
@@ -1159,9 +1130,13 @@ Tensor jagged_index_select_2d_forward_v2_impl(
     const Tensor& values,
     const Tensor& indices,
     const Tensor& input_offsets,
-    const Tensor& output_offsets) {
-  int64_t num_dense_output_rows =
-      output_offsets[output_offsets.numel() - 1].item<int64_t>();
+    const Tensor& output_offsets,
+    const c10::optional<int64_t> optional_num_dense_output_rows) {
+  // Intentionally not using optional::value_or here to avoid materializing
+  // .item() call when possible.
+  const auto num_dense_output_rows = optional_num_dense_output_rows.has_value()
+      ? optional_num_dense_output_rows.value()
+      : output_offsets[output_offsets.numel() - 1].item<int64_t>();
   static auto v1_op =
       c10::Dispatcher::singleton()
           .findSchemaOrThrow("fbgemm::jagged_index_select_2d_forward", "")
@@ -1185,9 +1160,14 @@ Tensor jagged_index_add_2d_forward_v2_impl(
     const Tensor& indices,
     const Tensor& input_offsets,
     const Tensor& output_offsets,
-    const int64_t num_output_rows) {
-  int64_t num_dense_output_rows =
-      input_offsets[input_offsets.numel() - 1].item<int64_t>();
+    const int64_t num_output_rows,
+    const c10::optional<int64_t> optional_num_dense_input_rows) {
+  // Intentionally not using optional::value_or here to avoid materializing
+  // .item() call when possible.
+  int64_t num_dense_input_rows = optional_num_dense_input_rows.has_value()
+      ? optional_num_dense_input_rows.value()
+      : input_offsets[input_offsets.numel() - 1].item<int64_t>();
+
   static auto v1_op =
       c10::Dispatcher::singleton()
           .findSchemaOrThrow("fbgemm::jagged_index_add_2d_forward", "")
@@ -1203,7 +1183,7 @@ Tensor jagged_index_add_2d_forward_v2_impl(
       indices,
       input_offsets,
       output_offsets,
-      num_dense_output_rows,
+      num_dense_input_rows,
       num_output_rows);
 }
 
@@ -1283,12 +1263,8 @@ Tensor jagged_index_add_2d_forward_cpu(
       "jagged_index_add_2d_forward_cpu supports only 2D inputs");
   auto num_cols = values.size(1);
   Tensor output = at::zeros({num_output_rows, num_cols}, values.options());
-  AT_DISPATCH_ALL_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      values.scalar_type(),
-      "jagged_index_add_2d_kernel_wrapper_1",
-      [&] {
+  FBGEMM_DISPATCH_ALL_TYPES(
+      values.scalar_type(), "jagged_index_add_2d_kernel_wrapper_1", [&] {
         AT_DISPATCH_INDEX_TYPES(
             indices.scalar_type(), "jagged_index_add_2d_kernel_wrapper_2", [&] {
               jagged_index_add_2d_kernel(
@@ -1350,12 +1326,8 @@ Tensor jagged_softmax_forward(
   if (B > 0 && D > 0) {
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_softmax_kernel_1", [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
-              values.scalar_type(),
-              "jagged_softmax_kernel_2",
-              [&] {
+          FBGEMM_DISPATCH_FLOATING_TYPES(
+              values.scalar_type(), "jagged_softmax_kernel_2", [&] {
                 jagged_softmax_kernel<index_t, scalar_t>(
                     values.accessor<scalar_t, 2>(),
                     offsets.accessor<index_t, 1>(),
@@ -1412,9 +1384,7 @@ Tensor jagged_softmax_backward(
   if (B > 0 && D > 0) {
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_backward_kernel_1", [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
+          FBGEMM_DISPATCH_FLOATING_TYPES(
               grad_output.scalar_type(),
               "jagged_softmax_backward_kernel_2",
               [&] {
@@ -1471,12 +1441,8 @@ Tensor jagged_jagged_bmm_forward(
   if (B > 0 && M > 0 && N > 0) {
     AT_DISPATCH_INDEX_TYPES(
         offsets.scalar_type(), "jagged_jagged_bmm_kernel_1", [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
-              x_values.scalar_type(),
-              "jagged_jagged_bmm_kernel_2",
-              [&] {
+          FBGEMM_DISPATCH_FLOATING_TYPES(
+              x_values.scalar_type(), "jagged_jagged_bmm_kernel_2", [&] {
                 jagged_jagged_bmm_kernel<index_t, scalar_t>(
                     x_values.accessor<scalar_t, 2>(),
                     y_values.accessor<scalar_t, 2>(),
@@ -1533,12 +1499,8 @@ Tensor jagged_dense_bmm_forward(
   if (B > 0 && M > 0 && N > 0) {
     AT_DISPATCH_INDEX_TYPES(
         x_offsets.scalar_type(), "jagged_dense_bmm_kernel_1", [&] {
-          AT_DISPATCH_FLOATING_TYPES_AND2(
-              at::ScalarType::Half,
-              at::ScalarType::BFloat16,
-              x_values.scalar_type(),
-              "jagged_dense_bmm_kernel_2",
-              [&] {
+          FBGEMM_DISPATCH_FLOATING_TYPES(
+              x_values.scalar_type(), "jagged_dense_bmm_kernel_2", [&] {
                 jagged_dense_bmm_kernel<index_t, scalar_t>(
                     x_values.accessor<scalar_t, 2>(),
                     x_offsets.accessor<index_t, 1>(),
@@ -1616,12 +1578,8 @@ Tensor jagged_slice_forward_cpu(
   auto output_offsets = asynchronous_exclusive_cumsum_cpu(output_lengths);
   auto input_offsets = asynchronous_exclusive_cumsum_cpu(x_lengths);
 
-  AT_DISPATCH_ALL_TYPES_AND2(
-      at::ScalarType::Half,
-      at::ScalarType::BFloat16,
-      x_values.scalar_type(),
-      "jagged_slice_wrapper_1",
-      [&] {
+  FBGEMM_DISPATCH_ALL_TYPES(
+      x_values.scalar_type(), "jagged_slice_wrapper_1", [&] {
         jagged_slice_forward_cpu_kernel<scalar_t>(
             output_values.accessor<scalar_t, 1>(),
             output_lengths.accessor<int64_t, 1>(),
@@ -1649,9 +1607,6 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   // SymInt is a new PyTorch 2.0 feature to support dynamic shape. See more
   // details at https://pytorch.org/get-started/pytorch-2.0/#dynamic-shapes. If
   // you find it doesn't compile, please pull the new PyTorch 2.0 code
-  m.impl_abstract_pystub(
-      "fbgemm_gpu.sparse_ops",
-      "//deeplearning/fbgemm/fbgemm_gpu:sparse_ops_py");
   m.def(
       "dense_to_jagged(Tensor dense, Tensor[] x_offsets, SymInt? total_L=None) -> (Tensor, Tensor[])",
       {PT2_COMPLIANT_TAG});
@@ -1716,17 +1671,17 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
       "batched_dense_vec_jagged_2d_mul_backward(Tensor grad_output, Tensor v, Tensor a_values, Tensor a_offsets) -> (Tensor, Tensor)",
       {PT2_COMPLIANT_TAG});
   m.def(
-      "jagged_index_select(Tensor values, Tensor lengths, Tensor indices) -> Tensor[]",
+      "jagged_index_select(Tensor values, Tensor lengths, Tensor indices, int? num_dense_output_rows=None) -> Tensor[]",
       {PT2_COMPLIANT_TAG});
   m.def(
       "jagged_index_select_2d_forward(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets, int num_dense_output_rows) -> Tensor");
   m.def(
-      "jagged_index_select_2d_forward_v2(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets) -> Tensor",
+      "jagged_index_select_2d_forward_v2(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets, int? num_dense_output_rows=None) -> Tensor",
       {PT2_COMPLIANT_TAG});
   m.def(
       "jagged_index_add_2d_forward(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets, int num_dense_input_rows, int num_output_rows) -> Tensor");
   m.def(
-      "jagged_index_add_2d_forward_v2(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets, SymInt num_output_rows) -> Tensor",
+      "jagged_index_add_2d_forward_v2(Tensor values, Tensor indices, Tensor input_offsets, Tensor output_offsets, SymInt num_output_rows, int? num_dense_input_rows) -> Tensor",
       {PT2_COMPLIANT_TAG});
   m.def(
       "jagged_1d_to_truncated_values(Tensor values, Tensor lengths, int max_truncated_length) -> Tensor");

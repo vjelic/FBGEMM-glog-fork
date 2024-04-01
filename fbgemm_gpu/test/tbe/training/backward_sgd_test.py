@@ -5,9 +5,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # pyre-ignore-all-errors[56]
 
-import copy
 import unittest
 
 import hypothesis.strategies as st
@@ -93,7 +94,6 @@ class BackwardSGDTest(unittest.TestCase):
                 weights_precision != SparseType.INT8
                 and output_dtype != SparseType.INT8
                 and not use_cpu
-                and not use_cache
                 and pooling_mode != PoolingMode.NONE
             )
         )
@@ -211,7 +211,6 @@ class BackwardSGDTest(unittest.TestCase):
 
         # Generate positional weights
         xws = [to_device(torch.randn(size=(b, L)), use_cpu) for b in Bs]
-        xws_acc_type = copy.deepcopy(xws)
 
         if weights_precision == SparseType.FP16:
             xws = [xw.half() for xw in xws]
@@ -234,6 +233,11 @@ class BackwardSGDTest(unittest.TestCase):
                 for (b, x, xw) in zip(bs, xs, xws)
             ]
         )
+
+        # Cast output type to output_dtype
+        if weights_precision != output_dtype:
+            fs = [f.to(output_dtype.as_dtype()) for f in fs]
+
         # Generate gradients
         gos = [torch.randn_like(f) for f in fs]
         # Run baseline's backward
@@ -263,7 +267,7 @@ class BackwardSGDTest(unittest.TestCase):
             cc.split_embedding_weights()[t].data.copy_(bs[t].weight)
 
         x = torch.cat([x.contiguous().flatten() for x in xs], dim=0)
-        xw = torch.cat([xw.contiguous().flatten() for xw in xws_acc_type], dim=0)
+        xw = torch.cat([xw.contiguous().flatten() for xw in xws], dim=0)
 
         (indices, offsets) = get_table_batched_offsets_from_dense(
             x, L, sum(Bs), use_cpu=use_cpu

@@ -35,8 +35,6 @@
   at::ScalarType _cache_t = ::detail::scalar_type(cache_enum_type);           \
   switch (_emb_t) {                                                           \
     PRIVATE_CASE_TYPE_EMB(                                                    \
-        at::ScalarType::Byte, _cache_t, uint8_t, NAME, __VA_ARGS__)           \
-    PRIVATE_CASE_TYPE_EMB(                                                    \
         at::ScalarType::Float, _cache_t, float, NAME, __VA_ARGS__)            \
     PRIVATE_CASE_TYPE_EMB(                                                    \
         at::ScalarType::Half, _cache_t, at::Half, NAME, __VA_ARGS__)          \
@@ -73,13 +71,6 @@
     at::ScalarType _output_t = ::detail::scalar_type(output_type); \
     switch (_output_t) {                                           \
       PRIVATE_CASE_TYPE_OUTPUT(                                    \
-          at::ScalarType::Byte,                                    \
-          emb_type,                                                \
-          cache_type,                                              \
-          uint8_t,                                                 \
-          NAME,                                                    \
-          __VA_ARGS__)                                             \
-      PRIVATE_CASE_TYPE_OUTPUT(                                    \
           at::ScalarType::Half,                                    \
           emb_type,                                                \
           cache_type,                                              \
@@ -91,6 +82,13 @@
           emb_type,                                                \
           cache_type,                                              \
           float,                                                   \
+          NAME,                                                    \
+          __VA_ARGS__)                                             \
+      PRIVATE_CASE_TYPE_OUTPUT(                                    \
+          at::ScalarType::BFloat16,                                \
+          emb_type,                                                \
+          cache_type,                                              \
+          at::BFloat16,                                            \
           NAME,                                                    \
           __VA_ARGS__)                                             \
       default:                                                     \
@@ -158,8 +156,6 @@
     using grad_t = grad_cxx_type;                                          \
     switch (_emb_t) {                                                      \
       PRIVATE_CASE_TYPE_EMB(                                               \
-          at::ScalarType::Byte, _cache_t, uint8_t, NAME, __VA_ARGS__)      \
-      PRIVATE_CASE_TYPE_EMB(                                               \
           at::ScalarType::Float, _cache_t, float, NAME, __VA_ARGS__)       \
       PRIVATE_CASE_TYPE_EMB(                                               \
           at::ScalarType::Half, _cache_t, at::Half, NAME, __VA_ARGS__)     \
@@ -183,38 +179,90 @@
           at::ScalarType::Float, _cache_t, _emb_t, float, NAME, __VA_ARGS__)   \
       PRIVATE_CASE_TYPE_CACHE_EMB(                                             \
           at::ScalarType::Half, _cache_t, _emb_t, at::Half, NAME, __VA_ARGS__) \
+      PRIVATE_CASE_TYPE_CACHE_EMB(                                             \
+          at::ScalarType::BFloat16,                                            \
+          _cache_t,                                                            \
+          _emb_t,                                                              \
+          at::BFloat16,                                                        \
+          NAME,                                                                \
+          __VA_ARGS__)                                                         \
       default:                                                                 \
         AT_ERROR(                                                              \
             #NAME, " not implemented for grad_t '", toString(_grad_t), "'");   \
     }                                                                          \
   }()
 
+////////////////////////////////////////////////////////////////////////////////
+/// Dispatch Helper Macros
+///
+/// These macros cover bundled dispatch cases, similar to AT_DISPATCH_*_CASE
+////////////////////////////////////////////////////////////////////////////////
+
+#define FBGEMM_DISPATCH_INTEGRAL_TYPES_CASE(...)     \
+  AT_DISPATCH_CASE(at::ScalarType::Int, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::Long, __VA_ARGS__)
+
+#define FBGEMM_DISPATCH_FLOATING_TYPES_CASE(...)       \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+
 #define FBGEMM_DISPATCH_FLOAT_AND_HALF_CASE(...)       \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 
-#define FBGEMM_DISPATCH_FLOAT_HALF_AND_CASE(TYPE, ...) \
-  FBGEMM_DISPATCH_FLOAT_AND_HALF_CASE(__VA_ARGS__)     \
+#define FBGEMM_DISPATCH_FLOAT_AND_BFLOAT16_CASE(...)   \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
 
-#define FBGEMM_DISPATCH_FLOAT_HALF_AND_BFLOAT16_CASE(...) \
-  FBGEMM_DISPATCH_FLOAT_HALF_AND_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+#define FBGEMM_DISPATCH_ALL_TYPES_BUT_HALF_CASE(...)      \
+  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
+  FBGEMM_DISPATCH_INTEGRAL_TYPES_CASE(__VA_ARGS__)
 
-#define FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE_CASE(...) \
-  FBGEMM_DISPATCH_FLOAT_HALF_AND_CASE(                \
-      at::ScalarType::at::ScalarType::Byte, __VA_ARGS__)
+////////////////////////////////////////////////////////////////////////////////
+/// Dispatch Macros
+///
+/// These macros are similar to AT_DISPATCH_*, but do not support
+/// at::ScalarType::Double
+////////////////////////////////////////////////////////////////////////////////
+
+#define FBGEMM_DISPATCH_FLOAT_ONLY(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                               \
+      TYPE, NAME, AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__))
 
 #define FBGEMM_DISPATCH_FLOAT_AND_HALF(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(                                   \
       TYPE, NAME, FBGEMM_DISPATCH_FLOAT_AND_HALF_CASE(__VA_ARGS__))
 
-#define FBGEMM_DISPATCH_FLOAT_HALF_AND_BFLOAT16(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(                                            \
-      TYPE, NAME, FBGEMM_DISPATCH_FLOAT_HALF_AND_BFLOAT16_CASE(__VA_ARGS__))
-
 #define FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(                                        \
-      TYPE, NAME, FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE_CASE(__VA_ARGS__))
+      TYPE,                                                  \
+      NAME,                                                  \
+      FBGEMM_DISPATCH_FLOAT_AND_HALF_CASE(__VA_ARGS__)       \
+          AT_DISPATCH_CASE(at::ScalarType::Byte, __VA_ARGS__))
+
+#define FBGEMM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                                   \
+      TYPE, NAME, FBGEMM_DISPATCH_FLOATING_TYPES_CASE(__VA_ARGS__))
+
+#define FBGEMM_DISPATCH_FLOATING_TYPES_AND(SCALARTYPE, TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                                                   \
+      TYPE,                                                             \
+      NAME,                                                             \
+      FBGEMM_DISPATCH_FLOATING_TYPES_CASE(__VA_ARGS__)                  \
+          AT_DISPATCH_CASE(SCALARTYPE, __VA_ARGS__))
+
+#define FBGEMM_DISPATCH_INTEGRAL_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(                                   \
+      TYPE, NAME, FBGEMM_DISPATCH_INTEGRAL_TYPES_CASE(__VA_ARGS__))
+
+#define FBGEMM_DISPATCH_ALL_TYPES(TYPE, NAME, ...)     \
+  AT_DISPATCH_SWITCH(                                  \
+      TYPE,                                            \
+      NAME,                                            \
+      FBGEMM_DISPATCH_FLOATING_TYPES_CASE(__VA_ARGS__) \
+          FBGEMM_DISPATCH_INTEGRAL_TYPES_CASE(__VA_ARGS__))
 
 // We can cleanup the following once fbgemm uses PyTorch 2.2 in January 2024.
 #ifndef PT2_COMPLIANT_TAG

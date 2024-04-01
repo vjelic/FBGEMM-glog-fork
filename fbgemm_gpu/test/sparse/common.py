@@ -5,6 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
 # pyre-ignore-all-errors[56]
 
 import os
@@ -31,7 +32,6 @@ if not open_source:
     torch.ops.load_library("//deeplearning/fbgemm/fbgemm_gpu/codegen:index_select_ops")
 
 suppressed_list: List[HealthCheck] = (
-    # pyre-fixme[16]: Module `HealthCheck` has no attribute `differing_executors`.
     [HealthCheck.differing_executors]
     if getattr(HealthCheck, "differing_executors", False)
     else []
@@ -127,18 +127,6 @@ def extend_test_class(
         "", os.path.dirname(__file__), "failures_dict.json"
     )
 
-    # pyre-ignore[24]: Generic type `Callable` expects 2 type parameters.
-    base_decorators: Dict[str, List[Callable]] = {
-        "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add": [
-            # This operator has been grandfathered in. We need to fix this test failure.
-            unittest.expectedFailure,
-        ],
-        "test_pt2_compliant_tag_fbgemm_jagged_dense_elementwise_add_jagged_output": [
-            # This operator has been grandfathered in. We need to fix this test failure.
-            unittest.expectedFailure,
-        ],
-    }
-
     additional_decorators = additional_decorators or {}
 
     # Only generate tests for PyTorch 2.2+
@@ -151,7 +139,8 @@ def extend_test_class(
             klass,
             ["fb", "fbgemm"],
             failures_dict_path,
-            {**base_decorators, **additional_decorators},
+            # pyre-ignore-errors[6]
+            additional_decorators,
             [
                 "test_schema",
                 "test_autograd_registration",

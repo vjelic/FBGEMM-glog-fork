@@ -34,7 +34,7 @@ void split_embedding_forward_cpu_kernel(
     Tensor weights,
     Tensor weights_offsets,
     Tensor D_offsets,
-    int64_t total_D,
+    c10::SymInt total_D,
     Tensor hash_size_cumsum,
     Tensor indices,
     Tensor offsets,
@@ -175,13 +175,14 @@ Tensor split_embedding_codegen_forward_cpu(
     Tensor weights,
     Tensor weights_offsets,
     Tensor D_offsets,
-    int64_t total_D,
+    c10::SymInt total_D_,
     Tensor hash_size_cumsum,
     Tensor indices,
     Tensor offsets,
     int64_t pooling_mode,
     Tensor indice_weights,
     int64_t output_dtype) {
+  const int64_t total_D = total_D_.guard_int(__FILE__, __LINE__);
   int64_t T = D_offsets.numel() - 1;
   TORCH_CHECK_GT(T, 0);
   // offsets = [T x B  + 1]
@@ -205,12 +206,8 @@ Tensor split_embedding_codegen_forward_cpu(
   FBGEMM_DISPATCH_FLOAT_AND_HALF(
       output.scalar_type(), "split_embedding_cpu_forward", [&]() {
         using output_t = scalar_t;
-        AT_DISPATCH_FLOATING_TYPES_AND2(
-            at::ScalarType::Half,
-            at::ScalarType::Byte,
-            weights.scalar_type(),
-            "split_embedding_cpu_forward",
-            [&] {
+        FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE(
+            weights.scalar_type(), "split_embedding_cpu_forward", [&] {
               using ind_weights_t = std::conditional<
                   std::is_same<scalar_t, double>::value,
                   double,
@@ -238,7 +235,7 @@ Tensor split_embedding_codegen_forward_cpu_meta(
     Tensor weights,
     Tensor weights_offsets,
     Tensor D_offsets,
-    int64_t total_D,
+    c10::SymInt total_D,
     Tensor hash_size_cumsum,
     Tensor indices,
     Tensor offsets,
@@ -662,7 +659,7 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
 
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(
-      "split_embedding_codegen_forward_cpu(Tensor weights, Tensor weights_offsets, Tensor D_offsets, int total_D, Tensor hash_size_cumsum, Tensor indices, Tensor offsets, int pooling_mode, Tensor indice_weights, int output_dtype) -> Tensor");
+      "split_embedding_codegen_forward_cpu(Tensor weights, Tensor weights_offsets, Tensor D_offsets, SymInt total_D, Tensor hash_size_cumsum, Tensor indices, Tensor offsets, int pooling_mode, Tensor indice_weights, int output_dtype) -> Tensor");
   DISPATCH_TO_CPU(
       "split_embedding_codegen_forward_cpu",
       split_embedding_codegen_forward_cpu);

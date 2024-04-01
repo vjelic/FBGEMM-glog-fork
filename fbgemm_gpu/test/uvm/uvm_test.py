@@ -5,6 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
 # pyre-ignore-all-errors[56]
 
 import random
@@ -21,9 +22,13 @@ open_source: bool = getattr(fbgemm_gpu, "open_source", False)
 
 if open_source:
     # pyre-ignore[21]
-    from test_utils import gpu_available, gpu_unavailable, skipIfRocm
+    from test_utils import gpu_available, gpu_unavailable, skipIfRocmLessThan
 else:
-    from fbgemm_gpu.test.test_utils import gpu_available, gpu_unavailable, skipIfRocm
+    from fbgemm_gpu.test.test_utils import (
+        gpu_available,
+        gpu_unavailable,
+        skipIfRocmLessThan,
+    )
 
 if gpu_available:
     # pyre-ignore[21]
@@ -66,7 +71,7 @@ class UvmTest(unittest.TestCase):
         # pyre-ignore[16]
         assert cudaMemoryAdvise.cudaMemAdviseSetAccessedBy.value == 5
 
-    @skipIfRocm()
+    @skipIfRocmLessThan(50700)
     @unittest.skipIf(*gpu_unavailable)
     @given(
         sizes=st.lists(
@@ -132,7 +137,7 @@ class UvmTest(unittest.TestCase):
 
         torch.cuda.synchronize(torch.device("cuda:0"))
 
-    @skipIfRocm()
+    @skipIfRocmLessThan(50700)
     @unittest.skipIf(*gpu_unavailable)
     @given(
         sizes=st.lists(
@@ -173,7 +178,7 @@ class UvmTest(unittest.TestCase):
             assert torch.ops.fbgemm.is_uvm_tensor(uvm_slice)
             assert torch.ops.fbgemm.uvm_storage(cpu_slice)
 
-    @skipIfRocm()
+    @skipIfRocmLessThan(50700)
     @unittest.skipIf(*gpu_unavailable)
     @given(
         sizes=st.lists(

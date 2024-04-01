@@ -42,7 +42,7 @@ __export_package_variant_info () {
   local package_variant_type_version="$1"
 
   local FALLBACK_VERSION_CUDA="12.1.1"
-  local FALLBACK_VERSION_ROCM="5.7.0"
+  local FALLBACK_VERSION_ROCM="6.0.2"
 
   if [ "$package_variant_type_version" == "cuda" ]; then
     # If "cuda", default to latest CUDA
@@ -80,7 +80,7 @@ __export_package_variant_info () {
       local rocm_version="${variant_version:-${FALLBACK_VERSION_ROCM}}"
       # shellcheck disable=SC2206
       local rocm_version_arr=(${rocm_version//./ })
-      # Convert, i.e. rocm 5.5.1 => rocm5.5
+      # Convert, i.e. rocm 5.6.1 => rocm5.6
       local variant_type="rocm"
       local variant_version="${rocm_version_arr[0]}.${rocm_version_arr[1]}"
 
@@ -186,7 +186,7 @@ install_from_pytorch_pip () {
 
   echo "[INSTALL] Attempting to install [${package_name}, ${package_version:-LATEST}] from PyTorch PIP using channel ${pip_channel} ..."
   # shellcheck disable=SC2086
-  (exec_with_retries 3 conda run ${env_prefix} pip install ${pip_package} --extra-index-url ${pip_channel}) || return 1
+  (exec_with_retries 3 conda run ${env_prefix} pip install ${pip_package} --index-url ${pip_channel}) || return 1
 
   # Check only applies to non-CPU variants
   if [ "$package_variant_type" != "cpu" ]; then
@@ -242,7 +242,7 @@ download_from_pytorch_pip () {
 
   echo "[DOWNLOAD] Attempting to download wheel [${package_name}, ${package_version:-LATEST}] from PyTorch PIP using channel ${pip_channel} ..."
   # shellcheck disable=SC2086
-  (exec_with_retries 3 conda run ${env_prefix} pip download ${pip_package} --extra-index-url ${pip_channel}) || return 1
+  (exec_with_retries 3 conda run ${env_prefix} pip download ${pip_package} --index-url ${pip_channel}) || return 1
 
   # Ensure that the package build is of the correct variant
   # This test usually applies to the nightly builds

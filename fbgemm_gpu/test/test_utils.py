@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import inspect
 import os
 import subprocess
@@ -29,6 +31,11 @@ gpu_unavailable: Tuple[bool, str] = (
 )
 # Used for `if` statements inside tests
 gpu_available: bool = not gpu_unavailable[0]
+
+running_on_sm70: Tuple[bool, str] = (
+    not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 8,
+    "Skip test if SM70, since the code is hardcoded to sm80+ support",
+)
 
 # Used for `@unittest.skipIf` for tests that pass in internal CI, but fail on the GitHub runners
 running_on_github: Tuple[bool, str] = (

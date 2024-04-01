@@ -38,11 +38,11 @@ Tensor split_embedding{{ ndesc }}_codegen_forward_{{ wdesc }}{{ vdesc }}_cuda(
     const Tensor& weights_placements,
     const Tensor& weights_offsets,
     {%- if nobag %}
-    const int64_t D,
+    const c10::SymInt D,
     {%- else %}
     const Tensor& D_offsets,
-    const int64_t total_D,
-    const int64_t max_D,
+    const c10::SymInt total_D,
+    const c10::SymInt max_D,
     {%- endif %}
     const Tensor& indices,
     const Tensor& offsets,
@@ -58,7 +58,7 @@ Tensor split_embedding{{ ndesc }}_codegen_forward_{{ wdesc }}{{ vdesc }}_cuda(
     {%- if vbe %}
     const Tensor& vbe_row_output_offsets,
     const Tensor& vbe_b_t_map,
-    const int64_t vbe_output_size,
+    const c10::SymInt vbe_output_size,
     const int64_t info_B_num_bits,
     const int64_t info_B_mask_int64,
     {%- endif %}
@@ -72,10 +72,10 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
     const Tensor& weights_placements,
     const Tensor& weights_offsets,
     {%- if nobag %}
-    const int64_t D,
+    const c10::SymInt D,
     {%- else %}
     const Tensor& D_offsets,
-    const int64_t max_D,
+    const c10::SymInt max_D,
     {%- endif %}
     const Tensor& hash_size_cumsum,
     const int64_t total_hash_size_bits,
@@ -115,7 +115,7 @@ Tensor split_embedding_codegen_grad_indice_weights{{ vdesc }}_cuda(
     const Tensor& weights_placements,
     const Tensor& weights_offsets,
     const Tensor& D_offsets,
-    const int64_t max_D,
+    const c10::SymInt max_D,
     const Tensor& indices,
     const Tensor& offsets,
     const Tensor& lxu_cache_locations,
@@ -152,10 +152,10 @@ class {{ autograd_func }} :
     const Tensor& weights_offsets,
     {%- if not nobag %}
     const Tensor& D_offsets,
-    const int64_t total_D,
-    const int64_t max_D,
+    const c10::SymInt total_D,
+    const c10::SymInt max_D,
     {%- else %}
-    const int64_t D,
+    const c10::SymInt D,
     {%- endif %}
     const Tensor& hash_size_cumsum,
     const int64_t total_hash_size_bits,
@@ -177,9 +177,9 @@ class {{ autograd_func }} :
     const c10::optional<Tensor>& B_offsets,
     const c10::optional<Tensor>& vbe_output_offsets_feature_rank,
     const c10::optional<Tensor>& vbe_B_offsets_rank_per_feature,
-    const int32_t max_B,
-    const int32_t max_B_feature_rank,
-    const int64_t vbe_output_size,
+    const c10::SymInt max_B,
+    const c10::SymInt max_B_feature_rank,
+    const c10::SymInt vbe_output_size,
     {%- endif %}
     const bool is_experimental,
     const bool use_uniq_cache_locations_bwd,
@@ -202,14 +202,28 @@ class {{ autograd_func }} :
     const auto uvm_cache_stats_ = uvm_cache_stats
       .value_or(at::empty({0}, uvm_weights.options().dtype(at::kInt)));
 
-    // TODO: don't guard here
-    auto [info_B_num_bits, info_B_mask] = adjust_info_B_num_bits(max_B_.guard_int(__FILE__, __LINE__), T.guard_int(__FILE__, __LINE__));
+    // Default values for Dynamo tracing
+    // SymInt does not support bitshifts operator
+    // Constanting info_B_num_bits, info_B_mask for Dynamo for now.
+    int32_t info_B_num_bits = DEFAULT_INFO_B_NUM_BITS;
+    uint32_t info_B_mask = (1u << info_B_num_bits) - 1;
+    if (max_B_.is_symbolic()) {
+      info_B_num_bits = 22;
+      info_B_mask = (1u << info_B_num_bits) - 1;
+
+      // TODO(ivankobzarev): Guarding Dynamo that T and B fits in constanted number of bits.
+      // TORCH_CHECK(max_B_ < 1u << info_B_num_bits)
+      // TORCH_CHECK(T < 1u << (DEFAULT_INFO_NUM_BITS - info_B_num_bits))
+    } else {
+      // TODO: don't guard here
+      std::tie(info_B_num_bits, info_B_mask) = adjust_info_B_num_bits(max_B_.guard_int(__FILE__, __LINE__), T.guard_int(__FILE__, __LINE__));
+    }
 
     {%- if vbe %}
     static auto generate_vbe_metadata_op =
         torch::Dispatcher::singleton()
             .findSchemaOrThrow("fbgemm::generate_vbe_metadata", "")
-            .typed<decltype(generate_vbe_metadata)>();
+            .typed<std::tuple<Tensor, Tensor>(const Tensor&, const Tensor&, const Tensor&, const Tensor&, const int64_t, const bool, const c10::SymInt, const int64_t, const c10::SymInt)>();
 
     auto [
         vbe_row_output_offsets,
@@ -230,7 +244,7 @@ class {{ autograd_func }} :
         {%- endif %}
         max_B_feature_rank,
         info_B_num_bits,
-        /*total_B=*/offsets.size(0) - 1
+        /*total_B=*/offsets.sym_size(0) - 1
         );
     {%- endif %}
 
@@ -394,10 +408,10 @@ class {{ autograd_func }} :
     {%- endfor %}
 
     {%- if not nobag %}
-    auto max_D = ctx->saved_data["max_D"].toInt();
+    auto max_D = ctx->saved_data["max_D"].toSymInt();
     auto pooling_mode = ctx->saved_data["pooling_mode"].toInt();
     {%- else %}
-    auto D = ctx->saved_data["D"].toInt();
+    auto D = ctx->saved_data["D"].toSymInt();
     {%- endif %}
     auto total_hash_size_bits = ctx->saved_data["total_hash_size_bits"].toInt();
 
@@ -433,17 +447,6 @@ class {{ autograd_func }} :
     {%- else %}
     auto& grad_output = grad_outputs[0];
     {%- endif %}
-
-    // FIXME: to support aligned memory access in Vec4T load/store function
-    // 16 for FP32 and 8 for FP16
-    if (grad_output.dim() > 1 &&
-        (reinterpret_cast<uint64_t>(grad_output.data_ptr()) % 16 != 0 ||
-        grad_output.stride(1) != 1 || grad_output.stride(0) % 4 != 0)) {
-        grad_output = grad_output.contiguous();
-    }
-    if (reinterpret_cast<uint64_t>(grad_output.data_ptr()) % 16 != 0) {
-        grad_output = at::empty_like(grad_output).copy_(grad_output);
-    }
 
     {%- if not nobag %}
     {%- if optimizer == "none" %}
@@ -664,8 +667,8 @@ Tensor split_embedding_codegen_lookup_{{ optimizer }}_function(
     const Tensor& weights_placements,
     const Tensor& weights_offsets,
     const Tensor& D_offsets,
-    const int64_t total_D,
-    const int64_t max_D,
+    const c10::SymInt total_D,
+    const c10::SymInt max_D,
     const Tensor& hash_size_cumsum,
     const int64_t total_hash_size_bits,
     const Tensor& indices,
@@ -684,9 +687,9 @@ Tensor split_embedding_codegen_lookup_{{ optimizer }}_function(
     const c10::optional<Tensor>& B_offsets = c10::optional<Tensor>(),
     const c10::optional<Tensor>& vbe_output_offsets_feature_rank = c10::optional<Tensor>(),
     const c10::optional<Tensor>& vbe_B_offsets_rank_per_feature = c10::optional<Tensor>(),
-    const int64_t max_B = -1,
-    const int64_t max_B_feature_rank = -1,
-    const int64_t vbe_output_size = -1,
+    const c10::SymInt max_B = -1,
+    const c10::SymInt max_B_feature_rank = -1,
+    const c10::SymInt vbe_output_size = -1,
     const bool is_experimental = false,
     const bool use_uniq_cache_locations_bwd = false,
     const bool use_homogeneous_placements = false,
@@ -775,13 +778,14 @@ Tensor split_embedding_codegen_lookup_{{ optimizer }}_function(
 TORCH_LIBRARY_FRAGMENT({{ lib_name }}, m) {
     m.def("split_embedding_codegen_lookup_{{ optimizer }}_function("
           "    Tensor placeholder_autograd_tensor, "
-          "    Tensor dev_weights, Tensor uvm_weights, "
+          "    Tensor dev_weights, "
+          "    Tensor uvm_weights, "
           "    Tensor lxu_cache_weights, "
           "    Tensor weights_placements, "
           "    Tensor weights_offsets, "
           "    Tensor D_offsets, "
-          "    int total_D, "
-          "    int max_D, "
+          "    SymInt total_D, "
+          "    SymInt max_D, "
           "    Tensor hash_size_cumsum, "
           "    int total_hash_size_bits, "
           "    Tensor indices, "
@@ -800,9 +804,9 @@ TORCH_LIBRARY_FRAGMENT({{ lib_name }}, m) {
           "    Tensor? B_offsets=None, "
           "    Tensor? vbe_output_offsets_feature_rank=None, "
           "    Tensor? vbe_B_offsets_rank_per_feature=None, "
-          "    int max_B=-1, "
-          "    int max_B_feature_rank=-1, "
-          "    int vbe_output_size=-1, "
+          "    SymInt max_B=-1, "
+          "    SymInt max_B_feature_rank=-1, "
+          "    SymInt vbe_output_size=-1, "
           "    bool is_experimental=False, "
           "    bool use_uniq_cache_locations_bwd=False, "
           "    bool use_homogeneous_placements=False, "

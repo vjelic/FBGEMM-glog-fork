@@ -5,9 +5,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # pyre-ignore-all-errors[56]
 
-import copy
 import random
 import unittest
 from typing import Callable, Dict, List, Optional, Tuple
@@ -233,7 +234,8 @@ class NBitFowardTest(unittest.TestCase):
                 scale_shift.copy_(ref_scale_shift)
 
         requests = generate_requests(1, B, T, L, min(Es), reuse=0.1)
-        for indices, offsets, _ in requests:
+        for req in requests:
+            indices, offsets = req.unpack_2()
             lowp_pooled_output = op(
                 indices=indices.int(),
                 offsets=offsets.int(),
@@ -400,11 +402,9 @@ class NBitFowardTest(unittest.TestCase):
         xs = [to_device(torch.randint(low=0, high=e, size=(B, L)), use_cpu) for e in Es]
         xws = [to_device(torch.randn(size=(B, L)), use_cpu) for _ in range(T)]
 
-        xws_acc_type = copy.deepcopy(xws)
-
         if do_pruning:
             x = torch.cat([x.view(1, B, L) for x in xs], dim=0)
-            xw = torch.cat([xw.view(1, B, L) for xw in xws_acc_type], dim=0)
+            xw = torch.cat([xw.view(1, B, L) for xw in xws], dim=0)
 
             (indices, offsets) = get_table_batched_offsets_from_dense(
                 x, use_cpu=use_cpu
@@ -437,7 +437,7 @@ class NBitFowardTest(unittest.TestCase):
         else:
             index_remappings_array = [torch.arange(E, dtype=torch.int32) for E in Es]
             x = torch.cat([x.view(1, B, L) for x in xs], dim=0)
-            xw = torch.cat([xw.view(1, B, L) for xw in xws_acc_type], dim=0)
+            xw = torch.cat([xw.view(1, B, L) for xw in xws], dim=0)
             (indices, offsets) = get_table_batched_offsets_from_dense(
                 x, use_cpu=use_cpu
             )
@@ -842,7 +842,8 @@ class NBitFowardTest(unittest.TestCase):
 
         requests = generate_requests(iters, B, T, L, min(Es), reuse=0.1)
 
-        for indices, offsets, _ in requests:
+        for req in requests:
+            indices, offsets = req.unpack_2()
             indices = indices.int()
             offsets = offsets.int()
             output = cc(indices, offsets)
@@ -1010,16 +1011,29 @@ class NBitFowardTest(unittest.TestCase):
             device="cpu",
             output_dtype=output_dtype,
         )
-        dequant_cc.initialize_weights()
-        embedding_weights_base = quant_cc.split_embedding_weights()
-        # we mimic 1.0 scale, 0.0 bias for better results comparison
-        embedding_weights: List[Tuple[torch.Tensor, Optional[torch.Tensor]]] = [
-            (table_weight, torch.tensor([1, 0], dtype=torch.float16).view(torch.uint8))
-            for table_weight, _ in embedding_weights_base
-        ]
-        # Initialize the random weights for int8 nbit table split embedding bag
-        dequant_cc.assign_embedding_weights(embedding_weights)
-        quant_cc.assign_embedding_weights(embedding_weights)
+        dequant_cc.fill_random_weights()
+        split_weights = quant_cc.split_embedding_weights()
+        ref_split_weights = dequant_cc.split_embedding_weights()
+        for t in range(T):
+            (weights, scale_shift) = split_weights[t]
+            (ref_weights, ref_scale_shift) = ref_split_weights[t]
+            self.assertEqual(weights.size(), ref_weights.size())
+            element_size = SparseType.INT8.bit_rate() / 8.0
+            rand_tensor = torch.rand(
+                ref_weights.shape[0], int(ref_weights.shape[1] / element_size)
+            )
+            rand_weights, rand_scale_shift = quantize_embs(
+                rand_tensor,
+                SparseType.INT8,
+            )
+            ref_weights.copy_(rand_weights)
+            weights.copy_(ref_weights)
+            if rand_scale_shift is not None:
+                self.assertIsNotNone(scale_shift)
+                self.assertIsNotNone(ref_scale_shift)
+                ref_scale_shift.copy_(rand_scale_shift)
+                scale_shift.copy_(ref_scale_shift)
+
         lengths_list = [
             torch.randint(
                 1,
