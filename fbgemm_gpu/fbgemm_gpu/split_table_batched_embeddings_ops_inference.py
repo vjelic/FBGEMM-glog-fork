@@ -5,6 +5,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # pyre-ignore-all-errors[56]
 
 import logging
@@ -265,7 +267,11 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
 
         def max_ty_D(ty: SparseType) -> int:
             return max(
-                [dim for dim, weight_ty in zip(dims, weights_tys) if weight_ty == ty],
+                [
+                    dim
+                    for dim, weight_ty in zip(dims, weights_tys)
+                    if weight_ty == ty or weight_ty.value == ty.value
+                ],
                 default=0,
             )
 
@@ -314,8 +320,8 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             0, device=self.current_device, dtype=torch.uint8
         )
 
-        self.weights_uvm: torch.Tensor = torch.empty(0, dtype=torch.uint8).to(
-            self.current_device
+        self.weights_uvm: torch.Tensor = torch.empty(
+            0, device=self.current_device, dtype=torch.uint8
         )
 
         cached_dims = [
@@ -880,6 +886,63 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             for spec in self.embedding_specs
         ]
 
+    def recompute_module_buffers(self) -> None:
+        """
+        Compute module buffers that're on meta device and are not materialized in reset_weights_placements_and_offsets().
+        Currently those buffers are `weights_tys`, `rows_per_table`, `D_offsets` and `bounds_check_warning`.
+        Pruning related or uvm related buffers are not computed right now.
+        """
+        if (
+            self.weights_tys.device == self.current_device
+            or self.current_device.type == "meta"
+        ):
+            return
+
+        weights_tys_int = [e[3].as_int() for e in self.embedding_specs]
+        self.weights_tys = torch.tensor(
+            [weights_tys_int[t] for t in self.feature_table_map],
+            device=self.current_device,
+            dtype=torch.uint8,
+        )
+        rows = [e[1] for e in self.embedding_specs]
+        self.rows_per_table = torch.tensor(
+            [rows[t] for t in self.feature_table_map],
+            device=self.current_device,
+            dtype=torch.int64,
+        )
+        dims = [e[2] for e in self.embedding_specs]
+        D_offsets_list = [dims[t] for t in self.feature_table_map]
+        D_offsets_list = [0] + list(accumulate(D_offsets_list))
+        self.D_offsets = torch.tensor(
+            D_offsets_list, device=self.current_device, dtype=torch.int32
+        )
+        self.bounds_check_warning = torch.tensor(
+            [0], device=self.current_device, dtype=torch.int64
+        )
+
+        # For pruning related or uvm related buffers, we just set them as empty tensors.
+        self.index_remapping_hash_table = torch.empty_like(
+            self.index_remapping_hash_table, device=self.current_device
+        )
+        self.index_remapping_hash_table_offsets = torch.empty_like(
+            self.index_remapping_hash_table_offsets, device=self.current_device
+        )
+        self.index_remappings_array = torch.empty_like(
+            self.index_remappings_array, device=self.current_device
+        )
+        self.index_remappings_array_offsets = torch.empty_like(
+            self.index_remappings_array_offsets, device=self.current_device
+        )
+        self.lxu_cache_weights = torch.empty_like(
+            self.lxu_cache_weights, device=self.current_device
+        )
+        self.original_rows_per_table = torch.empty_like(
+            self.original_rows_per_table, device=self.current_device
+        )
+        self.table_wise_cache_miss = torch.empty_like(
+            self.table_wise_cache_miss, device=self.current_device
+        )
+
     def _apply_split(
         self,
         dev_size: int,
@@ -1394,15 +1457,16 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             device=self.current_device,
             dtype=torch.int64,
         )
-        if self.index_remappings_array_offsets[-1] == 0:
+
+        index_remappings_filter_nones = []
+        for mapping in index_remapping:
+            if mapping is not None:
+                index_remappings_filter_nones.append(mapping)
+        if len(index_remappings_filter_nones) == 0:
             self.index_remappings_array = torch.empty(
                 0, dtype=torch.int32, device=self.current_device
             )
         else:
-            index_remappings_filter_nones = []
-            for mapping in index_remapping:
-                if mapping is not None:
-                    index_remappings_filter_nones.append(mapping)
             self.index_remappings_array = torch.cat(index_remappings_filter_nones).to(
                 self.current_device
             )

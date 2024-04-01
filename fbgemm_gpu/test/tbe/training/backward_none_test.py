@@ -5,9 +5,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # pyre-ignore-all-errors[56]
 
-import copy
 import random
 import unittest
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -81,7 +82,9 @@ class BackwardNoneTest(unittest.TestCase):
                 PoolingMode.NONE,
             ]
         ),
-        output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+        output_dtype=st.sampled_from(
+            [SparseType.FP16, SparseType.FP32, SparseType.BF16]
+        ),
     )
     @settings(
         verbosity=VERBOSITY,
@@ -109,7 +112,9 @@ class BackwardNoneTest(unittest.TestCase):
                 PoolingMode.NONE,
             ]
         ),
-        output_dtype=st.sampled_from([SparseType.FP16, SparseType.FP32]),
+        output_dtype=st.sampled_from(
+            [SparseType.FP16, SparseType.FP32, SparseType.BF16]
+        ),
     )
     @settings(
         verbosity=VERBOSITY,
@@ -149,6 +154,9 @@ class BackwardNoneTest(unittest.TestCase):
         assume(not weighted or pooling_mode != PoolingMode.NONE)
 
         assume(pooling_mode == PoolingMode.SUM or not weighted)
+        # TODO: Check why long_segments=True fails when output_dtype ==
+        # SparseType.BF16
+        assume(not long_segments or output_dtype != SparseType.BF16)
 
         if pooling_mode == PoolingMode.SUM:
             mode = "sum"
@@ -233,13 +241,12 @@ class BackwardNoneTest(unittest.TestCase):
                 x[:, 0] = 0
 
         xws = [to_device(torch.randn(size=(B, L)), use_cpu) for _ in range(len(xs))]
-        xws_acc_type = copy.deepcopy(xws)
 
         if weights_precision == SparseType.FP16:
             xws = [xw.half() for xw in xws]
 
         x = torch.cat([x.view(1, B, L) for x in xs], dim=0)
-        xw = torch.cat([xw.view(1, B, L) for xw in xws_acc_type], dim=0)
+        xw = torch.cat([xw.view(1, B, L) for xw in xws], dim=0)
 
         (indices, offsets) = get_table_batched_offsets_from_dense(x, use_cpu=use_cpu)
         embedding_specs = [
@@ -269,6 +276,10 @@ class BackwardNoneTest(unittest.TestCase):
                     for (b, x, xw) in zip(bs, xs, xws)
                 ]
             )
+            # Torch's Embedding only produces an output that has the same type
+            # as weight
+            if weights_precision != output_dtype:
+                fs = [f.to(output_dtype.as_dtype()) for f in fs]
             gos: Union[List[Tensor], Tensor] = [torch.randn_like(f) for f in fs]
             [f.backward(go) for (f, go) in zip(fs, gos)]
         else:

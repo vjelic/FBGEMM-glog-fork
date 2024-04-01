@@ -5,9 +5,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 # pyre-ignore-all-errors[56]
 
-import copy
 import random
 import unittest
 from typing import Callable, Dict, List
@@ -107,7 +108,6 @@ class ForwardTest(unittest.TestCase):
                 weights_precision != SparseType.INT8
                 and output_dtype != SparseType.INT8
                 and not use_cpu
-                and not use_cache
                 and pooling_mode != PoolingMode.NONE
             )
         )
@@ -204,8 +204,6 @@ class ForwardTest(unittest.TestCase):
         ]
         # Generate positional weights
         xws = [to_device(torch.randn(size=(b, L)), use_cpu) for b in Bs]
-        xws_acc_type = copy.deepcopy(xws)
-
         if weights_precision == SparseType.FP16:
             xws = [xw.half() for xw in xws]
 
@@ -270,7 +268,7 @@ class ForwardTest(unittest.TestCase):
             )
 
         x = torch.cat([x.contiguous().flatten() for x in xs], dim=0)
-        xw = torch.cat([xw.contiguous().flatten() for xw in xws_acc_type], dim=0)
+        xw = torch.cat([xw.contiguous().flatten() for xw in xws], dim=0)
 
         (indices, offsets) = get_table_batched_offsets_from_dense(
             x, L, sum(Bs), use_cpu
@@ -394,7 +392,7 @@ class ForwardTest(unittest.TestCase):
             False,  # use_experimental_tbe
         )
 
-    @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(True, "INT8 support is disabled")
     def test_forward_gpu_no_cache_int8(
         self,
     ) -> None:
@@ -570,7 +568,7 @@ class ForwardTest(unittest.TestCase):
             use_experimental_tbe,
         )
 
-    @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(True, "INT8 support is disabled")
     @given(
         cache_algorithm=st.sampled_from(CacheAlgorithm),
     )
@@ -605,6 +603,7 @@ class ForwardTest(unittest.TestCase):
             [
                 SparseType.FP32,
                 SparseType.FP16,
+                SparseType.BF16,
             ]
         )
         if pooling_mode == PoolingMode.NONE:
@@ -671,13 +670,17 @@ class ForwardTest(unittest.TestCase):
             [
                 SparseType.FP32,
                 SparseType.FP16,
+                SparseType.BF16,
             ]
         )
         if pooling_mode == PoolingMode.NONE:
             mixed = False
+            mixed_B = False
         else:
             mixed = random.choice([True, False])
-        mixed_B = False
+            mixed_B = (
+                random.choice([True, False]) if not use_experimental_tbe else False
+            )
         if pooling_mode == PoolingMode.SUM:
             weighted = random.choice([True, False])
         else:
@@ -737,13 +740,17 @@ class ForwardTest(unittest.TestCase):
             [
                 SparseType.FP32,
                 SparseType.FP16,
+                SparseType.BF16,
             ]
         )
         if pooling_mode == PoolingMode.NONE:
             mixed = False
+            mixed_B = False
         else:
             mixed = random.choice([True, False])
-        mixed_B = False
+            mixed_B = (
+                random.choice([True, False]) if not use_experimental_tbe else False
+            )
         if pooling_mode == PoolingMode.SUM:
             weighted = random.choice([True, False])
         else:
@@ -773,7 +780,7 @@ class ForwardTest(unittest.TestCase):
         B=st.integers(min_value=1, max_value=128),
         log_E=st.integers(min_value=3, max_value=5),
         L=st.integers(min_value=0, max_value=20),
-        output_dtype=st.sampled_from([SparseType.FP16, SparseType.INT8]),
+        output_dtype=st.sampled_from([SparseType.FP16]),
     )
     @settings(
         verbosity=VERBOSITY,
@@ -831,7 +838,8 @@ class ForwardTest(unittest.TestCase):
 
         requests = generate_requests(2, B, T, L, min(Es), reuse=0.1)
 
-        for indices, offsets, _ in requests:
+        for req in requests:
+            indices, offsets = req.unpack_2()
             lowp_pooled_output = op(
                 indices=indices,
                 offsets=offsets,

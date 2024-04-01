@@ -5,6 +5,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# pyre-strict
+
 import enum
 from typing import Any, Dict  # noqa: F401
 
@@ -29,7 +31,7 @@ class EmbOptimType(enum.Enum):
     ROWWISE_ADAGRAD = "row_wise_adagrad"
     SHAMPOO = "shampoo"  # not currently supported for sparse embedding tables
     MADGRAD = "madgrad"
-    EXACT_ROWWISE_WEIGHTED_ADAGRAD = "exact_row_wise_weighted_adagrad"
+    EXACT_ROWWISE_WEIGHTED_ADAGRAD = "exact_row_wise_weighted_adagrad"  # deprecated
     NONE = "none"
 
     def __str__(self) -> str:

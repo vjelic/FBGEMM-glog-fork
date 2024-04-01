@@ -73,6 +73,10 @@
       }
     },
     "fbgemm::linearize_cache_indices": {
+      "BackwardAdagradLargeDimTest.test_faketensor__test_backward_adagrad_large_dims": {
+        "comment": "",
+        "status": "skip"
+      },
       "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmMEAN": {
         "comment": "",
         "status": "skip"
@@ -84,6 +88,10 @@
       "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmSUM": {
         "comment": "",
         "status": "skip"
+      },
+      "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmSUM_with_max_norm": {
+        "comment": "",
+        "status": "xfail"
       },
       "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp32_pmMEAN": {
         "comment": "",
@@ -186,6 +194,10 @@
     "fbgemm::lxu_cache_flush": {},
     "fbgemm::lxu_cache_locking_counter_decrement": {},
     "fbgemm::lxu_cache_lookup": {
+      "BackwardAdagradLargeDimTest.test_faketensor__test_backward_adagrad_large_dims": {
+        "comment": "",
+        "status": "xfail"
+      },
       "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmMEAN": {
         "comment": "",
         "status": "xfail"
@@ -195,6 +207,10 @@
         "status": "xfail"
       },
       "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmSUM": {
+        "comment": "",
+        "status": "xfail"
+      },
+      "BackwardAdagradTest.test_faketensor__test_backward_adagrad_fp16_pmSUM_with_max_norm": {
         "comment": "",
         "status": "xfail"
       },

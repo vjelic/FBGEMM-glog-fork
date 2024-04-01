@@ -340,6 +340,9 @@ Tensor int_nbit_split_embedding_codegen_lookup_function(
         fp8_exponent_bits ? *fp8_exponent_bits : -1,
         fp8_exponent_bias ? *fp8_exponent_bias : -1);
   }
+  // Force casting indice_weights to float (doing this in the backend to avoid
+  // JIT issue)
+  const auto indice_weights_ = indice_weights->to(at::kFloat);
   return int_nbit_split_embedding_codegen_forward_weighted_cuda(
       dev_weights,
       uvm_weights,
@@ -357,7 +360,7 @@ Tensor int_nbit_split_embedding_codegen_lookup_function(
       offsets,
       pooling_mode,
       row_alignment ? *row_alignment : 16,
-      *indice_weights,
+      indice_weights_,
       output_dtype,
       lxu_cache_weights.value_or(at::empty({0, 0}, at::kByte)),
       lxu_cache_locations.value_or(at::empty({0}, at::kInt)),
@@ -429,7 +432,11 @@ Tensor int_nbit_split_embedding_uvm_caching_codegen_lookup_function(
 
     // Linearize indices.
     auto linear_cache_indices = linearize_cache_indices_cuda(
-        cache_hash_size_cumsum.value(), indices, offsets);
+        cache_hash_size_cumsum.value(),
+        indices,
+        offsets,
+        /*B_offsets=*/c10::optional<Tensor>(),
+        /*max_B=*/-1);
 
     bool gather_uvm_stats = false;
     // populate_uvm_stats indicates whether to calculate cache related ratios,
