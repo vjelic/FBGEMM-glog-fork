@@ -126,8 +126,8 @@ __device__ void split_tbe_backward_hip_kernel(
     const int64_t* p_sorted_linear_indices_run,
     const int32_t* p_sorted_linear_indices_cumulative_run_lengths,
     const int32_t* p_sorted_linear_indices_num_runs,
-    const int32_t* p_long_run_ids,
-    const int32_t* p_num_long_run_ids,
+    // const int32_t* p_long_run_ids,  // unused
+    // const int32_t* p_num_long_run_ids, // unused
     const int32_t* p_sorted_infos,
     magic_div_u32_t batch_mdiv,
     uint32_t max_segment_length_per_warp,
@@ -150,9 +150,9 @@ __device__ void split_tbe_backward_hip_kernel(
 
     if(run_id >= p_sorted_linear_indices_num_runs[0])
         return;
-    
+
     const int64_t linear_index  = p_sorted_linear_indices_run[run_id];
-    
+
     const int32_t segment_start = p_sorted_linear_indices_cumulative_run_lengths[run_id];
     const int32_t segment_end   = p_sorted_linear_indices_cumulative_run_lengths[run_id + 1];
 
@@ -399,6 +399,126 @@ L_tail_grad_acc:
 // PR23: for the reference, the template is
 // hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc }}_kernel_warp_per_row_1(
 
+template <
+    typename emb_t,
+    typename grad_t,
+    typename cache_t,
+    int32_t kFixedMaxVecsPerThread,
+    int32_t kThreadGroupSize,
+    bool kUseVecBlocking,
+    int32_t embedding_dim>
+//__global__ __launch_bounds__(kBackwardMaxThreads) void
+__global__ void
+// {%- if is_index_select %}
+// batch_index_select_dim0_codegen_backward_kernel_warp_per_row(
+// {%- else %}
+split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc }}_kernel_warp_per_row_1(
+// {%- endif %}
+    const pta::PackedTensorAccessor64<grad_t, {{ "1" if is_index_select else "2" }}, at::RestrictPtrTraits> grad_output,
+    {%- if optimizer != "none" %}
+    pta::PackedTensorAccessor64<emb_t, 1, at::RestrictPtrTraits> dev_weights,
+    {%- if not dense %}
+    pta::PackedTensorAccessor64<emb_t, 1, at::RestrictPtrTraits> uvm_weights,
+    pta::PackedTensorAccessor64<cache_t, 2, at::RestrictPtrTraits> lxu_cache_weights,
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
+    {%- endif %}
+    {%- endif %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> weights_offsets,
+    {%- if not nobag or is_index_select %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> D_offsets,
+    {%- else %}
+    int64_t D,
+    {%- endif %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> hash_size_cumsum,
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> sorted_linear_indices_run,
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> sorted_linear_indices_cumulative_run_lengths,
+    {%- if not nobag %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> sorted_infos,
+    {%- else %}
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> sorted_infos,
+    {%- endif %}
+    {%- if not dense %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> sorted_lxu_cache_locations,
+    const bool use_uniq_cache_locations,
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> table_unique_indices_offsets,
+    {%- endif %}
+    {%- if weighted %}
+    const pta::PackedTensorAccessor32<at::acc_type<cache_t, true>, 1, at::RestrictPtrTraits> sorted_indice_weights,
+    {%- endif %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> sorted_linear_indices_num_runs,
+    int32_t max_segment_length_per_warp,
+    {%- if not dense and optimizer != "none" %}
+    bool stochastic_rounding,
+    at::PhiloxCudaState stochastic_rounding_philox_args,
+    {%- else %}
+    pta::PackedTensorAccessor64<emb_t, 1, at::RestrictPtrTraits> grad_dev_weights,
+    {%- endif %} // if not dense and optimizer != "none"
+    {%- if not nobag and vbe %}
+    const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> B_offsets,
+    const pta::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> row_output_offsets,
+    {%- endif %}
+    {%- if not nobag %}
+    const int32_t info_B_num_bits,
+    const uint32_t info_B_mask,
+    {%- endif %}
+    const int32_t max_D,
+    const int32_t max_vecs_per_thread,
+    magic_div_u32_t batch_mdiv, // PR23 extra
+    const int32_t batch, // PR23 extra
+    const int32_t num_rows, // PR23 extra
+    const int32_t num_tables, // PR23 extra
+    // {%- if is_index_select %}
+    // const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> grad_offsets,
+    // const bool permute_output_dim_0_1
+    // {%- else %}
+    {{ args.split_kernel_args | replace_pta_namespace() | join(",\n    ") }}
+    // {%- endif %}
+) {
+    // WIP: test the build system
+#if 0
+    auto p_output_grad = grad_output.data();
+    auto p_emb_table = dev_weights.data();
+    auto p_hash_size_cumsum = hash_size_cumsum.data();
+    auto p_sorted_linear_indices_run = sorted_linear_indices_run.data();
+    auto p_sorted_linear_indices_cumulative_run_lengths = sorted_linear_indices_cumulative_run_lengths.data();
+    auto p_sorted_linear_indices_num_runs = sorted_linear_indices_num_runs.data();
+    p_sorted_infos = sorted_infos.data();
+    // max_segment_length_per_warp = max_segment_length_per_warp;
+    // indice_weights_sorted = indice_weights_sorted.packed_accessor32<float, 1, at::RestrictPtrTraits>().data();
+    auto emb_dim = embedding_dim;
+    // TODO
+    // num_rows = dev_weights.numel() / T / max_D;
+    // num_tables = T;
+    split_tbe_backward_hip_kernel<
+        {{optimizer}}_t<cache_t, emb_t, embedding_dim, /* weight_decay_mode */ 0>,
+        {{optimizer}}_kernel_arg_t,
+        emb_t,
+        cache_t, // cache_t
+        grad_t,
+        BLOCK_SIZE,
+        embedding_dim,
+        segment_prefetch,
+        segment_unroll,
+        segment_split,
+        false>(p_output_grad,
+               p_emb_table,
+               p_hash_size_cumsum,
+               p_sorted_linear_indices_run,
+               p_sorted_linear_indices_cumulative_run_lengths,
+               p_sorted_linear_indices_num_runs,
+               // p_long_run_ids,  // unused
+               // p_num_long_run_ids,  // unused
+               p_sorted_infos,
+               batch_mdiv,
+               max_segment_length_per_warp,
+               emb_dim,
+               batch,
+               num_rows,
+               num_tables,
+               opt_karg);
+#endif
+}
+
 #if 0  // Upstream moved to a differnet approach
 #define __SPLIT_TBE_BWD_KERNEL(optimizer,                                                                                            \
                                           weight_decay_mode,                                                                         \
@@ -528,7 +648,7 @@ L_tail_grad_acc:
     SPLIT_TBE_BWD_KERNEL_ALL_WDM(optimizer, segment_split, fp32, float, fp32, float, embedding_dim, 2, 8) \
     SPLIT_TBE_BWD_KERNEL_ALL_WDM(optimizer, segment_split, fp32, float, fp16,  half, embedding_dim, 2, 8) \
     SPLIT_TBE_BWD_KERNEL_ALL_WDM(optimizer, segment_split, fp16,  half, fp32, float, embedding_dim, 2, 8) \
-    SPLIT_TBE_BWD_KERNEL_ALL_WDM(optimizer, segment_split, fp16,  half, fp16,  half, embedding_dim, 2, 8) 
+    SPLIT_TBE_BWD_KERNEL_ALL_WDM(optimizer, segment_split, fp16,  half, fp16,  half, embedding_dim, 2, 8)
 
 // warp per row
 SPLIT_TBE_BWD_KERNEL(rowwise_adagrad, 0, 64)
