@@ -768,7 +768,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                         {{ hip_kernel }}                        \
                             <emb_t,                             \
                              grad_t,                            \
-                             cache_t,                           \
+                             float, /* FIXME: fp16 cache_t */   \
                              kFixedMaxVecsPerThread,            \
                              kThreadGroupSize,                  \
                              kUseVecBlocking,                   \
@@ -785,7 +785,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                             {%- if not dense %}
                             MAKE_PTA_WITH_NAME(func_name4, dev_weights, emb_t, 1, 64),                                          \
                             MAKE_PTA_WITH_NAME(func_name4, uvm_weights, emb_t, 1, 64),                                          \
-                            MAKE_PTA_WITH_NAME(func_name4, lxu_cache_weights, cache_t, 2, 64),                                  \
+                            MAKE_PTA_WITH_NAME(func_name4, lxu_cache_weights, float, 2, 64),  /* FIXME: fp16 cache_t */         \
                             MAKE_PTA_WITH_NAME(func_name4, weights_placements, int32_t, 1, 32),                                 \
                             {%- else %}
                             MAKE_PTA_WITH_NAME(func_name4, dev_weights, emb_t, 1, 64),                                          \
@@ -1135,6 +1135,10 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     get_max_thread_blocks_());
 
                 // PR23: Call accelerated kernel if suitable
+                static bool once_file = [](){
+                    std::cout << "Calling Kernel at file" << __FILE__ << " Line: " << __LINE__ << std::endl;
+                    return true;
+                } ();
 
                 {%- if is_rocm and not is_index_select and not nobag %}
                 bool hip_opt_kernel_supported = false;      // TODO: figure out support range
@@ -1142,6 +1146,10 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                 if (dev_weights.scalar_type() == at::ScalarType::Half || dev_weights.scalar_type() == at::ScalarType::Float) {
                     const static std::set<int> D_emb_s {64, 128, 192, 256};
                     hip_opt_kernel_supported = (D_emb_s.find(max_D) != D_emb_s.end());
+                }
+                // FIXME: support half as cache_t
+                if (lxu_cache_weights.scalar_type() != at::ScalarType::Float) {
+                    hip_opt_kernel_supported = false;
                 }
                 if (hip_opt_kernel_supported) {
                     auto batch_mdiv = [](uint32_t d) -> magic_div_u32_t {
@@ -1170,6 +1178,11 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     opt_karg.weight_decay = 0;
                     {%- endif %}
 
+                    // DEBUG
+                    static bool once = [](){
+                        std::cout << "Calling HIP Perf Kernel" << std::endl;
+                        return true;
+                    } ();
                     if (max_D == 64) {
                         ASSIGN_BACKWARD_WARP_PER_ROW_KERNEL(64);
                         INVOKE_BACKWARD_WARP_PER_ROW_KERNEL();
