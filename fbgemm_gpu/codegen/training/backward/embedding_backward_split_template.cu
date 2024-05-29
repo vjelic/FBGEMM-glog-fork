@@ -178,7 +178,8 @@ split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc 
 );
 
 // PR23
-{%- if is_rocm and optimizer == "rowwise_adagrad" and not dense and not is_index_select %}
+// TODO: support nobag (Notably int64_t sorted_infos)
+{%- if is_rocm and optimizer == "rowwise_adagrad" and not dense and not is_index_select and not nobag %}
 #include "fbgemm_gpu/hip_split_tbe_common.h"
 template <
     typename emb_t,
@@ -252,7 +253,7 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
     // const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> grad_offsets,
     // const bool permute_output_dim_0_1
     // {%- else %}
-    {{ args.split_kernel_args | replace_pta_namespace() | join(",\n    ") }}
+    {{optimizer}}_kernel_arg_t opt_karg
     // {%- endif %}
 );
 {%- endif %}
@@ -838,7 +839,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                             grad_offsets.packed_accessor32<int64_t, 1, at::RestrictPtrTraits>(),                                \
                             permute_output_dim_0_1                                                                              \
                             {%- else %}
-                            {{ args.split_kernel_arg_constructors | make_pta_acc_format("func_name4") | join(",                 \\\n                            ") }}  \
+                            opt_karg /* unlike CUDA, we pass these arguments in packed way */                                   \
                             {%- endif %}
                     );                                                                                                          \
                 } while(0)
@@ -1135,7 +1136,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
 
                 // PR23: Call accelerated kernel if suitable
 
-                {%- if is_rocm and not is_index_select %}
+                {%- if is_rocm and not is_index_select and not nobag %}
                 bool hip_opt_kernel_supported = false;      // TODO: figure out support range
                 {%- if optimizer == "rowwise_adagrad" and not dense %}
                 if (dev_weights.scalar_type() == at::ScalarType::Half || dev_weights.scalar_type() == at::ScalarType::Float) {

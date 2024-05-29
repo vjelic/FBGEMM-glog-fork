@@ -443,11 +443,94 @@ split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc 
 
 {%- endif %}
 
-{%- if is_rocm and not is_index_select and optimizer == "rowwise_adagrad" and not dense %}
+{%- if is_rocm and not is_index_select and optimizer == "rowwise_adagrad" and not dense and not nobag %}
 // PR23: ROCM
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "fbgemm_gpu/hip_split_tbe_common.h"
+
+template <typename cache_t, typename emb_t, int32_t embedding_dim, int32_t weight_decay_mode>
+struct rowwise_adagrad_optimizer_t
+{
+    __device__ rowwise_adagrad_optimizer_t(const rowwise_adagrad_kernel_arg_t& karg_)
+        : karg(karg_)
+    {
+    }
+
+    // template<int32_t acc_length>
+    // __device__ static void precompute(float * acc){
+    //     // compute per row square sum
+    // }
+    template <int32_t thread_length, int32_t segment_split>
+    __device__ void update(cache_t* acc, emb_t* weight, uint32_t row_index)
+    {
+        if constexpr(segment_split == 0)
+        {
+            cache_t * p_momentum = reinterpret_cast<cache_t*>(karg.p_momentum);
+            cache_t momentum = p_momentum[row_index]; // should be s_load
+            // compute per row square sum
+            cache_t local_sum_squre = .0f;
+            if constexpr(weight_decay_mode == 1)
+            {
+#pragma unroll
+                for(auto i = 0; i < thread_length; i++)
+                {
+                    cache_t w = static_cast<cache_t>(weight[i]);
+                    cache_t a = acc[i] + w * karg.weight_decay;
+                    local_sum_squre += a * a;
+                }
+            }
+            else
+            {
+#pragma unroll
+                for(auto i = 0; i < thread_length; i++)
+                {
+                    cache_t a = acc[i];
+                    local_sum_squre += a * a;
+                }
+            }
+
+            cache_t avg_square =
+                wave_reduce<reduce_op_sum_t<cache_t>, cache_t, AMDGCN_WAVE_SIZE>(local_sum_squre) /
+                embedding_dim;
+
+            cache_t momentum_new = momentum + avg_square;
+
+            cache_t multiplier = karg.learning_rate / (sqrtf(momentum_new) + karg.eps);
+            cache_t correction;
+
+            if constexpr(weight_decay_mode == 1)
+            {
+                correction = 1.0 - multiplier * karg.weight_decay;
+            }
+            else if constexpr(weight_decay_mode == 2)
+            {
+                correction = 1.0 - karg.learning_rate * karg.weight_decay;
+            }
+            else
+            {
+                correction = 1.0;
+            }
+
+// update new weight value
+#pragma unroll
+            for(auto i = 0; i < thread_length; i++)
+            {
+                cache_t w = static_cast<cache_t>(weight[i]);
+                cache_t a = acc[i];
+                w         = correction * w - multiplier * a;
+                weight[i] = static_cast<emb_t>(w);
+            }
+
+            // printf("momentum_new:%f, avg_square:%f, row_index:%d, momentum:%f\n",  momentum_new,  avg_square, row_index, momentum);
+            // printf("momentum_new:%f",  momentum_new);
+
+            p_momentum[row_index] = momentum_new;
+        }
+    }
+
+    rowwise_adagrad_kernel_arg_t karg;
+};
 
 template <typename optimizer_t,
           typename optimizer_karg_t,
@@ -469,7 +552,7 @@ __device__ void split_tbe_backward_hip_kernel(
     const int32_t* p_sorted_linear_indices_num_runs,
     // const int32_t* p_long_run_ids,  // unused
     // const int32_t* p_num_long_run_ids, // unused
-    const int32_t* p_sorted_infos,
+    const int32_t* p_sorted_infos,  // FIXME: this is for not nobag, TODO support nobag
     magic_div_u32_t batch_mdiv,
     uint32_t max_segment_length_per_warp,
     uint32_t emb_dim,
@@ -497,6 +580,7 @@ __device__ void split_tbe_backward_hip_kernel(
     const int32_t segment_start = p_sorted_linear_indices_cumulative_run_lengths[run_id];
     const int32_t segment_end   = p_sorted_linear_indices_cumulative_run_lengths[run_id + 1];
 
+    // PR23 FIXME: support nobag
     int32_t info_0 = p_sorted_infos[segment_start];
     uint32_t t_0 = magic_div_u32_run(batch_mdiv, info_0);
     int64_t hash_size = p_hash_size_cumsum[t_0];
@@ -812,26 +896,29 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
     // const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> grad_offsets,
     // const bool permute_output_dim_0_1
     // {%- else %}
-    {{ args.split_kernel_args | replace_pta_namespace() | join(",\n    ") }}
+    {{optimizer}}_kernel_arg_t opt_karg
     // {%- endif %}
 ) {
     // WIP: test the build system
-#if 0
+#if 1
     auto p_output_grad = grad_output.data();
     auto p_emb_table = dev_weights.data();
     auto p_hash_size_cumsum = hash_size_cumsum.data();
     auto p_sorted_linear_indices_run = sorted_linear_indices_run.data();
     auto p_sorted_linear_indices_cumulative_run_lengths = sorted_linear_indices_cumulative_run_lengths.data();
     auto p_sorted_linear_indices_num_runs = sorted_linear_indices_num_runs.data();
-    p_sorted_infos = sorted_infos.data();
+    auto p_sorted_infos = sorted_infos.data();
     // max_segment_length_per_warp = max_segment_length_per_warp;
     // indice_weights_sorted = indice_weights_sorted.packed_accessor32<float, 1, at::RestrictPtrTraits>().data();
     auto emb_dim = embedding_dim;
+    constexpr int32_t segment_prefetch = 2; // always 2 in split_bwd.hip
+    constexpr int32_t segment_unroll = 8;   // always 8 in split_bwd.hip
+    constexpr int32_t segment_split = 0;    // always 0 in split_bwd.hip
     // TODO
     // num_rows = dev_weights.numel() / T / max_D;
     // num_tables = T;
     split_tbe_backward_hip_kernel<
-        {{optimizer}}_t<cache_t, emb_t, embedding_dim, /* weight_decay_mode */ 0>,
+        {{optimizer}}_optimizer_t<cache_t, emb_t, embedding_dim, /* weight_decay_mode */ 0>,
         {{optimizer}}_kernel_arg_t,
         emb_t,
         cache_t, // cache_t
@@ -937,7 +1024,7 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
     // const at::PackedTensorAccessor32<int64_t, 1, at::RestrictPtrTraits> grad_offsets,
     // const bool permute_output_dim_0_1
     // {%- else %}
-    {{ args.split_kernel_args | replace_pta_namespace() | join(",\n    ") | replace("cache_t", cache_type) }}
+    {{optimizer}}_kernel_arg_t opt_karg
     // {%- endif %}
 );
 {%- endmacro %}
@@ -945,7 +1032,7 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
 {%- macro hip_bulk_template_instantiations(kFixedMaxVecsPerThread, kThreadGroupSize, kUseVecBlocking) %}
     {%- for grad_type in ['float', 'at::Half', 'at::BFloat16'] %}
     {%- for emb_type in ['float', 'at::Half'] %}
-    {%- for cache_type in ['float', 'at::Half'] %}
+    {%- for cache_type in ['float'] %}
     {%- for kEmbeddingDim in [64, 128, 192, 256] %}
         {{ hip_template_instantiation(
             emb_type,
