@@ -447,7 +447,7 @@ split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc 
 // PR23: ROCM
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
-#include "fbgemm_gpu/hip_split_tbe_common.h"
+#include "fbgemm_gpu/hip_kernel_inc/split_tbe_common.h"
 
 template <typename cache_t, typename emb_t, int32_t embedding_dim, int32_t weight_decay_mode>
 struct rowwise_adagrad_optimizer_t
