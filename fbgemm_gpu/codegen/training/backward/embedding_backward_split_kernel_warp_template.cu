@@ -846,7 +846,8 @@ template <
     int32_t kFixedMaxVecsPerThread,
     int32_t kThreadGroupSize,
     bool kUseVecBlocking,
-    int32_t embedding_dim>
+    int32_t embedding_dim,
+    int64_t weight_decay_mode>
 //__global__ __launch_bounds__(kBackwardMaxThreads) void
 __global__ void
 // {%- if is_index_select %}
@@ -938,7 +939,7 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
     // avbokovoy: num_rows and num_tables should come from outside
     // num_rows = dev_weights.numel() / T / max_D;
     split_tbe_backward_hip_kernel{{ndesc}}<
-        {{optimizer}}_optimizer_t<cache_t, emb_t, embedding_dim, /* weight_decay_mode */ 0>,
+        {{optimizer}}_optimizer_t<cache_t, emb_t, embedding_dim, weight_decay_mode>,
         {{optimizer}}_kernel_arg_t,
         emb_t,
         cache_t, // cache_t
@@ -978,7 +979,8 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
       kFixedMaxVecsPerThread,
       kThreadGroupSize,
       kUseVecBlocking,
-      kEmbeddingDim
+      kEmbeddingDim,
+      kWeighDecayMode
     )
 %}
 template __global__ __launch_bounds__(kBackwardMaxThreads) void
@@ -989,7 +991,8 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
   {{ kFixedMaxVecsPerThread }},
   {{ kThreadGroupSize }},
   {{ kUseVecBlocking }},
-  {{ kEmbeddingDim }}
+  {{ kEmbeddingDim }},
+  {{ kWeighDecayMode }}
 > (
     const pta::PackedTensorAccessor64<{{ grad_type }}, {{ "1" if is_index_select else "2" }}, at::RestrictPtrTraits> grad_output,
     {%- if optimizer != "none" %}
@@ -1058,6 +1061,7 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
     {%- for emb_type in ['float', 'at::Half'] %}
     {%- for cache_type in ['float'] %}
     {%- for kEmbeddingDim in [64, 128, 192, 256] %}
+    {%- for kWeighDecayMode in [0, 1, 2] %}
         {{ hip_template_instantiation(
             emb_type,
             grad_type,
@@ -1065,9 +1069,11 @@ hip_split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vd
             kFixedMaxVecsPerThread,
             kThreadGroupSize,
             kUseVecBlocking,
-            kEmbeddingDim
+            kEmbeddingDim,
+            kWeighDecayMode
           )
         }}
+    {%- endfor %}
     {%- endfor %}
     {%- endfor %}
     {%- endfor %}
