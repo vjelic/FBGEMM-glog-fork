@@ -182,7 +182,7 @@ split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}{{ vdesc 
 // TODO: support nobag (Notably int64_t sorted_infos)
 // avbokovoy: WIP
 {%- if is_rocm and optimizer == "rowwise_adagrad" and not dense and not is_index_select %}
-#include "fbgemm_gpu/hip_kernel_inc/split_tbe_common.h"
+#include "fbgemm_gpu/hip_kernel_inc/split_embeddings_common.h"
 template <
     typename emb_t,
     typename grad_t,
