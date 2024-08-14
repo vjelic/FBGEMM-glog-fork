@@ -1139,7 +1139,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     get_max_thread_blocks_());
 
                 // PR23: Call accelerated kernel if suitable
-                    std::cout << "Calling Kernel at file" << __FILE__ << " Line: " << __LINE__ << std::endl;
+                std::cout << "Calling Kernel at file" << __FILE__ << " Line: " << __LINE__ << std::endl;
 
                 {%- if is_rocm and not is_index_select %}
                 bool hip_opt_kernel_supported = false;      // TODO: figure out support range
@@ -1179,7 +1179,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     opt_karg.weight_decay = weight_decay;
                     {%- endif %}
 
-                        std::cout << "Calling HIP Perf Kernel" << std::endl;
+                    std::cout << "Calling HIP Perf Kernel" << std::endl;
                     {%- if nobag %}
                     std::cout << "[DEBUG]: Calling nobag Perf Kernel" << std::endl;
                     {%- endif %}
