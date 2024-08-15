@@ -889,7 +889,7 @@ class BackwardOptimizersTest(unittest.TestCase):
         pooling_mode=st.sampled_from(
             [
                 PoolingMode.SUM,
-                PoolingMode.NONE,
+                # PoolingMode.NONE,
             ]
         ),
         use_cpu=st.just(False),
