@@ -771,7 +771,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                         {{ hip_kernel }}                        \
                             <emb_t,                             \
                              grad_t,                            \
-                             float, /* FIXME: fp16 cache_t */   \
+                             cache_t,                           \
                              kFixedMaxVecsPerThread,            \
                              kThreadGroupSize,                  \
                              kUseVecBlocking,                   \
@@ -789,7 +789,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                             {%- if not dense %}
                             MAKE_PTA_WITH_NAME(func_name4, dev_weights, emb_t, 1, 64),                                          \
                             MAKE_PTA_WITH_NAME(func_name4, uvm_weights, emb_t, 1, 64),                                          \
-                            MAKE_PTA_WITH_NAME(func_name4, lxu_cache_weights, float, 2, 64),  /* FIXME: fp16 cache_t */         \
+                            MAKE_PTA_WITH_NAME(func_name4, lxu_cache_weights, cache_t, 2, 64),                                  \
                             MAKE_PTA_WITH_NAME(func_name4, weights_placements, int32_t, 1, 32),                                 \
                             {%- else %}
                             MAKE_PTA_WITH_NAME(func_name4, dev_weights, emb_t, 1, 64),                                          \
@@ -1151,10 +1151,7 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     const static std::set<int> D_emb_s {64, 128, 192, 256};
                     hip_opt_kernel_supported = (D_emb_s.find(max_D) != D_emb_s.end());
                 }
-                // FIXME: support half as cache_t
-                if (lxu_cache_weights.scalar_type() != at::ScalarType::Float) {
-                    hip_opt_kernel_supported = false;
-                }
+
                 if (hip_opt_kernel_supported) {
                     auto batch_mdiv = [](uint32_t d) -> magic_div_u32_t {
                         assert(d >= 1 && d <= INT32_MAX);
