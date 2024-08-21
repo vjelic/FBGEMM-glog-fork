@@ -1059,17 +1059,14 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
 #ifdef FBGEMM_GPU_MEMCHECK
                 const auto func_name4 = "{{ warp_kernel }}";
 #endif
-#ifdef USE_ROCM
-                constexpr int segments_per_workgroup = 4;
-                const int32_t warp_per_row_grid_size = div_round_up(sorted_linear_indices_run.numel(), segments_per_workgroup);
-                const auto blockSize = dim3(256);
-#else
-                const int32_t num_warp_per_row_groups = kBackwardMaxThreads / kThreadGroupSize;
-                const int32_t warp_per_row_grid_size = std::min(
+                // avbokovoy: Note, this values will be overwritten if optimized
+                // hip kernel called
+                int32_t num_warp_per_row_groups = kBackwardMaxThreads / kThreadGroupSize;
+                int32_t warp_per_row_grid_size = std::min(
                     div_round_up(total_unique_indices, num_warp_per_row_groups),
                     get_max_thread_blocks_());
-                const auto blockSize = dim3(kThreadGroupSize, num_warp_per_row_groups);
-#endif
+                auto blockSize = dim3(kThreadGroupSize, num_warp_per_row_groups);
+
                 // PR23: Call accelerated kernel if suitable
                 std::cout << "Calling Kernel at file" << __FILE__ << " Line: " << __LINE__ << std::endl;
 
@@ -1084,6 +1081,19 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                          kUseVecBlocking>;
 
                 int32_t warp_per_row_smem_bytes = 0;
+                // Compute shared memory size for warp_per_row
+                if (kUseVecBlocking) {
+                  warp_per_row_smem_bytes = compute_num_groups_and_dynamic_smem_bytes(
+                      &num_warp_per_row_groups,
+                      // Use max_D to compute shmem_bytes (for smem_grad_sum)
+                      // instead of using kMaxVecsPerThread to minimize the
+                      // shared memory allocation
+                      [&] (int32_t num_groups) {
+                          return max_D * num_groups * kCacheAccBytes;
+                      },
+                      backward_warp_per_row_kernel,
+                      used_shared_bytes);
+                }
 #ifdef USE_ROCM
                 {%- if is_rocm and not is_index_select and optimizer == "rowwise_adagrad" and not dense%}
                 bool hip_opt_kernel_supported = false;      // TODO: figure out support range
@@ -1093,6 +1103,11 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                 }
                 if(hip_opt_kernel_supported)
                 {
+                    constexpr int segments_per_workgroup = 4;
+                    warp_per_row_grid_size = div_round_up(sorted_linear_indices_run.numel(), segments_per_workgroup);
+                    blockSize = dim3(256);
+                    warp_per_row_smem_bytes = 0;
+
                     if (weight_decay_mode == 1) {
                         constexpr int32_t WDM = 1;
                         if (max_D == 64) {
@@ -1133,21 +1148,8 @@ Tensor split_embedding{{ ndesc }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_e
                     {%- endif %}
                 }
                 {%- endif %}
-#else
-                // Compute shared memory size for warp_per_row
-                if (kUseVecBlocking) {
-                  warp_per_row_smem_bytes = compute_num_groups_and_dynamic_smem_bytes(
-                      &num_warp_per_row_groups,
-                      // Use max_D to compute shmem_bytes (for smem_grad_sum)
-                      // instead of using kMaxVecsPerThread to minimize the
-                      // shared memory allocation
-                      [&] (int32_t num_groups) {
-                          return max_D * num_groups * kCacheAccBytes;
-                      },
-                      backward_warp_per_row_kernel,
-                      used_shared_bytes);
-                }
 #endif
+
                 backward_warp_per_row_kernel
                     <<<warp_per_row_grid_size,
                         blockSize,
