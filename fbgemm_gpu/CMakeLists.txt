@@ -78,7 +78,34 @@ include(${CMAKEMODULES}/PyTorchSetup.cmake)
 include(${CMAKEMODULES}/CudaSetup.cmake)
 
 # ROCm and HIPify Setup
-include(${CMAKEMODULES}/RocmSetup.cmake)
+################################################################################
+
+if(USE_ROCM)
+  # Load CMake modules
+  list(APPEND CMAKE_MODULE_PATH
+    "${PROJECT_SOURCE_DIR}/cmake"
+    "${THIRDPARTY}/hipify_torch/cmake")
+  include(Hip)
+  include(Hipify)
+
+  # Configure compiler for HIP
+  list(APPEND HIP_HCC_FLAGS
+    " \"-Wno-#pragma-messages\" "
+    " \"-Wno-#warnings\" "
+    -fclang-abi-compat=17
+    -Wno-cuda-compat
+    -Wno-deprecated-declarations
+    -Wno-format
+    -Wno-ignored-attributes
+    -Wno-unused-result)
+
+  BLOCK_PRINT(
+    "HIP found: ${HIP_FOUND}"
+    "HIPCC compiler flags:"
+    ""
+    "${HIP_HCC_FLAGS}"
+  )
+endif()
 
 
 ################################################################################
