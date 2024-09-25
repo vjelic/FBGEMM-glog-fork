@@ -1479,7 +1479,7 @@ void compressed_indices_remap(
 
   const inst_set_t isa = fbgemmInstructionSet();
   if (isZmm(isa)) {
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
     if (weights == nullptr) {
       internal::compressed_indices_remap_avx512<IndexType, false>(
           offsets_len,

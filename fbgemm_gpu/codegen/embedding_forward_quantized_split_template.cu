@@ -297,7 +297,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
     }
     // equivalent to fence + wait.
     cp_async_wait<0>();
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     // Performance - replace a block level __syncthreads with per CU __threadfence_block
     // __threadfence_block is fine replacement for __syncwarp on AMD GPUs, it is because
     // a. memory fencing: __threadfence_block ops. at CU level, same as __syncwarp at SM
@@ -491,7 +491,7 @@ __global__ __launch_bounds__(kMaxThreads) void int_nbit_split_embedding_codegen_
 
     const uint32_t subwarp_id = threadIdx.x / 4;
     const uint32_t subwarp_tid = threadIdx.x % 4;
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     const uint64_t subwarp_mask = static_cast<uint64_t>(0xF) << (4 * subwarp_id);
 #else
     const uint32_t subwarp_mask = static_cast<uint32_t>(0xF) << (4 * subwarp_id);

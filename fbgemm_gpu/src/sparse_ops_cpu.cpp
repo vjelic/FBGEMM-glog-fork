@@ -57,7 +57,7 @@ namespace fbgemm_gpu {
 Tensor native_empty_like(const Tensor& self) {
   return at::native::empty_like(
       self,
-      optTypeMetaToScalarType(self.options().dtype_opt()),
+      at::optTypeMetaToScalarType(self.options().dtype_opt()),
       self.options().layout_opt(),
       self.options().device_opt(),
       self.options().pinned_memory_opt(),

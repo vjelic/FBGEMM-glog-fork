@@ -21,7 +21,7 @@
 
 #define SHFL_SYNC(val, srcLane) shfl_sync(val, srcLane, kThreadGroupSize, shfl_sync_mask)
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #include "hip_kernel/split_tbe_fwd.hip.hpp"
 #endif
 
@@ -522,7 +522,7 @@ Tensor {{ "dense" if dense else "split" }}_embedding{{ "_nobag" if nobag else ""
         return output;
     }
 
-#ifdef __HIP_PLATFORM_HCC__  // HIP Optimal Kernel
+#ifdef USE_ROCM  // HIP Optimal Kernel
     /*
      * current limitations
      1. sparse, and bag

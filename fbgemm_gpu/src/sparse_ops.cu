@@ -26,11 +26,11 @@
 #include "fbgemm_gpu/fbgemm_cuda_utils.cuh"
 #include "fbgemm_gpu/split_embeddings_utils.cuh"
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #include <hipblas.h>
 #endif
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #define LDG(ptr) (*(ptr))
 #else
 #define LDG(ptr) (__ldg(ptr))
@@ -2138,7 +2138,7 @@ Tensor permute102_baddbmm_permute102_cuda(
   // C (m, b, n) = A (m, b, k) * B (b, k, n) ---> row major
   // C (m, b, n) = (B^T (b, k, n) * A^T (m, b, k))^T ---> column major
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
   float alpha = 1.0f;
   float beta = 1.0f;
 

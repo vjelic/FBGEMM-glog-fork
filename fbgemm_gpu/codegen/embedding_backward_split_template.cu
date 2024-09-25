@@ -865,7 +865,7 @@ split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_
 
     // V100: 96 KB; A100: 160 KB.
     int max_shared_bytes = 0;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
     cudaDeviceGetAttribute(&max_shared_bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev_weights.get_device());
 #else
     // MI100 has 64 KB local memory (shared memory) per workgroup
@@ -874,7 +874,7 @@ split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     int shared_kb = max_shared_bytes >> 10;
     // V100: 64 KB; A100: 96 KB.
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
     // Use 2/3 of the available GPU shared mem; leave rooms for L1$.
     int used_shared_kb = round_down(shared_kb * 2 / 3, 16);
     TORCH_CHECK(used_shared_kb > 0);
@@ -1112,7 +1112,7 @@ split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_
             // must use dynamic shared memory (rather than statically sized
             // arrays) and require an explicit opt-in using cudaFuncSetAttribute()".
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
             cudaFuncSetAttribute(
                 split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_kernel_cta_per_row_1<
                 {% if not dense %}
@@ -1218,7 +1218,7 @@ split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_
                     {% endif %},
                     true>) * 4 * kWarpSize *
                     kMaxVecsPerThread;
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
                 cudaFuncSetAttribute(
                     split_embedding{{ "_nobag" if nobag else "" }}_backward_codegen_{{ optimizer }}_{{ wdesc }}_kernel_warp_per_row_1<
                     {% if not dense %}
