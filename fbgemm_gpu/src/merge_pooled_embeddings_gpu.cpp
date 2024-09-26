@@ -15,7 +15,7 @@
 #include <c10/util/irange.h>
 #include <torch/library.h>
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #include "hip/hip_runtime.h"
 #include "rocm_smi/rocm_smi.h"
 

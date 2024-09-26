@@ -425,7 +425,7 @@ __global__ __launch_bounds__(kMaxThreads) void lru_cache_find_uncached_kernel(
       lru_state[cache_set][slot] = time_stamp;
     }
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     if (!__any_sync(0xFFFFFFFFFFFFFFFF, found)) {
 #else
     if (!__any_sync(0xFFFFFFFF, found)) {
@@ -474,7 +474,7 @@ __launch_bounds__(kMaxThreads) void direct_mapped_lru_cache_find_uncached_kernel
       cache_sets[n] = -1; // default value
     } else {
       // There is no atomicMax for int64_t...
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
       auto addr = reinterpret_cast<unsigned long long*>(
           &lxu_cache_miss_timestamp[cache_set][0]);
       auto val = static_cast<unsigned long long>(time_stamp);
@@ -1504,7 +1504,7 @@ __global__ __launch_bounds__(kMaxThreads) void lfu_cache_find_uncached_kernel(
     const auto slot = threadIdx.x;
     const bool found = __ldg((&lxu_cache_state[cache_set][0]) + slot) == idx;
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     if (!__any_sync(0xFFFFFFFFFFFFFFFF, found)) {
 #else
     if (!__any_sync(0xFFFFFFFF, found)) {
@@ -2208,7 +2208,7 @@ __global__ __launch_bounds__(kMaxThreads) void lxu_cache_lookup_kernel(
     }
     const int32_t cache_set = cache_slot(idx, C);
     const bool found = (__ldg((&lxu_cache_state[cache_set][0]) + slot) == idx);
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     // FIXME: __ballot_sync with mask isn't supported by HIP yet.
     // See https://fburl.com/fvy7j0lq for the similar context.
     // assert false here with https://fburl.com/pfm7enw2

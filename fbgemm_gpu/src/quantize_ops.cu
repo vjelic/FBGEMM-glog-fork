@@ -7,7 +7,7 @@
 #include <ATen/TensorIterator.h>
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef USE_ROCM
 #include <math_constants.h>
 #endif
 
@@ -113,7 +113,7 @@ __global__ inline void _float_to_fused8bitrowwise_cuda_kernel(
 template <typename T>
 __device__ inline __attribute__((always_inline)) T
 quantize_ops_shfl_xor(const T val, int laneMask, int width) {
-#if defined(__HIP_PLATFORM_HCC__) || CUDA_VERSION < 9000
+#if defined(USE_ROCM) || CUDA_VERSION < 9000
   return __shfl_xor(val, laneMask, width);
 #else
   return __shfl_xor_sync(0xffffffff, val, laneMask, width);
@@ -133,7 +133,7 @@ __global__ inline void _get_8bit_qparam_cuda_kernel(
   const int output_columns = ncols_aligned + 2 * sizeof(float);
 
   // starting values for future reductions
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #define HIPRT_INF_F __int_as_float(0x7f800000)
   float minimum_element = HIPRT_INF_F;
   float maximum_element = -HIPRT_INF_F;

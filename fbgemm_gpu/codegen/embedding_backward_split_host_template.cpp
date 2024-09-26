@@ -191,7 +191,7 @@ class Split{{ "NoBag" if nobag else "" }}LookupFunction_{{ optimizer }}_Op :
     {% endfor %}
 
     {% if not nobag %}
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     constexpr int32_t BT_block_size = 64;
 #else
     constexpr int32_t BT_block_size = 32;
@@ -264,7 +264,7 @@ class Split{{ "NoBag" if nobag else "" }}LookupFunction_{{ optimizer }}_Op :
 
     TORCH_CHECK(grad_outputs.size() == 1);
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     constexpr int32_t BT_block_size = 64;
     constexpr int32_t max_segment_length_per_warp = 64;
 #else

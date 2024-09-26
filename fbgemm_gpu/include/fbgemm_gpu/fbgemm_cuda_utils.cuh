@@ -13,7 +13,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
-#if !defined(__HIP_PLATFORM_HCC__) && defined(CUDA_VERSION) && \
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && \
     CUDA_VERSION >= 9000
 #define FBGEMM_USE_SUBWARP_SHUFFLE
 #endif
@@ -32,7 +32,7 @@ enum class PrimitiveType : uint8_t { FP = 0, INT = 1, BF = 2 };
 #define DEVICE_INLINE __device__ inline __attribute__((always_inline))
 
 // Warp size
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 static constexpr int32_t kWarpSize = 64;
 #else
 static constexpr int32_t kWarpSize = 32;
@@ -53,7 +53,7 @@ struct Half4 {
   half2 b;
 
   __device__ inline void store(at::Half* p) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     p[0] = __low2half(a);
     p[1] = __high2half(a);
     p[2] = __low2half(b);
@@ -101,7 +101,7 @@ struct Vec4T<float> {
   }
 
   DEVICE_INLINE Vec4T(const at::Half* p) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     union U {
       half2 h[2];
       uint2 ui;
@@ -235,7 +235,7 @@ struct Vec4T<at::Half> {
   }
 
   DEVICE_INLINE Vec4T(const at::Half* p) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     union U {
       half2 h[2];
       uint2 ui;
@@ -329,7 +329,7 @@ struct Vec4T<at::Half> {
   }
 
   DEVICE_INLINE static void copy(const at::Half* src, at::Half* dst) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     dst[0] = src[0];
     dst[1] = src[1];
     dst[2] = src[2];
@@ -429,7 +429,7 @@ struct Vec4T<at::BFloat16> {
   }
 
   DEVICE_INLINE Vec4T(const at::Half* p) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     union U {
       half2 h[2];
       uint2 ui;
@@ -589,7 +589,7 @@ struct Vec4T<double> {
   }
 
   DEVICE_INLINE Vec4T(const at::Half* p) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     union U {
       half2 h[2];
       uint2 ui;
@@ -734,7 +734,7 @@ DEVICE_INLINE T shfl_xor(
     int laneMask,
     int width = kWarpSize,
     unsigned shfl_sync_mask = 0xffffffffu) {
-#if defined(__HIP_PLATFORM_HCC__) || CUDA_VERSION < 9000
+#if defined(USE_ROCM) || CUDA_VERSION < 9000
   return __shfl_xor(val, laneMask, width);
 #else
   return __shfl_xor_sync(shfl_sync_mask, val, laneMask, width);
@@ -747,7 +747,7 @@ DEVICE_INLINE T shfl_sync(
     int srcLane = 0,
     int width = kWarpSize,
     unsigned shfl_sync_mask = 0xffffffffu) {
-#if defined(__HIP_PLATFORM_HCC__) || CUDA_VERSION < 9000
+#if defined(USE_ROCM) || CUDA_VERSION < 9000
   return __shfl(val, srcLane, width);
 #else
   return __shfl_sync(shfl_sync_mask, val, srcLane, width);
@@ -841,7 +841,7 @@ inline __device__ void warpBitonicMergeLE16(K& k, V& v) {
 template <typename K, typename V, bool Dir, typename Comp>
 struct BitonicSort {
   static inline __device__ void sort(K k[1], V v[1]) {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     static_assert(fbgemm_gpu::kWarpSize == 64, "unexpected warp size");
 #else
     static_assert(fbgemm_gpu::kWarpSize == 32, "unexpected warp size");
@@ -1432,7 +1432,7 @@ DEVICE_INLINE float_16 make_zero_float_16() {
 __forceinline__ __device__ __half2
 hfma2(const __half2 a, const __half2 b, const __half2 c) {
 #if (__CUDA_ARCH__ >= 530 && __CUDA_ARCH__ != 610) || \
-    defined(__HIP_PLATFORM_HCC__)
+    defined(USE_ROCM)
   return __hfma2(a, b, c);
 #else
   float2 fa, fb, fc;
@@ -1447,7 +1447,7 @@ hfma2(const __half2 a, const __half2 b, const __half2 c) {
 
 __forceinline__ __device__ half hmul(half a, half b) {
 #if (__CUDA_ARCH__ >= 530 && __CUDA_ARCH__ != 610) || \
-    defined(__HIP_PLATFORM_HCC__)
+    defined(USE_ROCM)
   return __hmul(a, b);
 #else
   return __float2half(__half2float(a) * __half2float(b));
@@ -2620,7 +2620,7 @@ DEVICE_INLINE float float16_min(float_16 val) {
 // ROCm does not natively support __any_sync(). Using __ballot()
 // (https://rocmdocs.amd.com/en/latest/Programming_Guides/Kernel_language.html)
 // to implement __any_sync(). Note: the "warp-size" of AMD GPU is 64.
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 __device__ int __any_sync(uint64_t mask, int predicate) {
   uint64_t predicate_bit_pattern = __ballot(predicate);
   return (predicate_bit_pattern & mask) > 0;

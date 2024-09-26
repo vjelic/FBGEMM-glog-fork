@@ -112,7 +112,7 @@ class SplitLookupFunction_Dense_Op
     ctx->saved_data["total_hash_size_bits"] = total_hash_size_bits;
     ctx->saved_data["pooling_mode"] = pooling_mode;
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     constexpr int32_t BT_block_size = 64;
 #else
     constexpr int32_t BT_block_size = 32;
@@ -164,7 +164,7 @@ class SplitLookupFunction_Dense_Op
 
     TORCH_CHECK(grad_outputs.size() == 1);
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
     constexpr int32_t BT_block_size = 64;
     constexpr int32_t max_segment_length_per_warp = 64;
 #else

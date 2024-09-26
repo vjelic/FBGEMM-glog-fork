@@ -6,7 +6,7 @@
 #include <algorithm>
 
 // clang-format off
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 #define HIPCUB_ARCH 1
 #include <hipcub/backend/rocprim/block/block_scan.hpp>
 #else
@@ -24,7 +24,7 @@ constexpr int NUM_THREADS_PER_BLOCK = 256;
 
 namespace fbgemm_gpu {
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 namespace cub = hipcub;
 #endif
 

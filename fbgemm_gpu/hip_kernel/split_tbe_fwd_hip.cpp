@@ -20,7 +20,7 @@
  * THE SOFTWARE.
  *
  ******************************************************************************/
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef USE_ROCM
 
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
