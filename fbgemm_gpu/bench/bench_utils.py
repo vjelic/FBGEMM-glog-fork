@@ -183,38 +183,51 @@ def benchmark_requests(
     else:
         start_events = []
         end_events = []
-
+    
+    from rpdTracerControl import rpdTracerControl
+    from hipScopedMarker import hipScopedMarker
+    profile = rpdTracerControl()      #######
+    profile.setPythonTrace(True)
+    # prof = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+    
+    if bwd_only:
+        profile.start()
     for it, req in enumerate(requests):
-        indices, offsets, weights = req.unpack_3()
-        if bwd_only:
-            # Run forward before profiling if does backward only
-            out = func(indices, offsets, weights)
-        start_time = time.time()
-        if torch.cuda.is_available():
-            if flush_gpu_cache_size_mb:
-                _ = torch.rand(
-                    flush_gpu_cache_size_mb * 1024 * 1024 // 4,
-                    dtype=torch.float,
-                    device="cuda",
-                )
-            start_events[it].record()
+        with torch.autograd.profiler.record_function(f"iteration {it}"):
+            indices, offsets, weights = req.unpack_3()
+            if bwd_only:
+                # Run forward before profiling if does backward only
+                out = func(indices, offsets, weights)
+            start_time = time.time()
+            if torch.cuda.is_available():
+                if flush_gpu_cache_size_mb:
+                    _ = torch.rand(
+                        flush_gpu_cache_size_mb * 1024 * 1024 // 4,
+                        dtype=torch.float,
+                        device="cuda",
+                    )
+                start_events[it].record()
 
-        if nvtx_range:
-            torch.cuda.nvtx.range_push(f"{nvtx_range}-{it}")
+            if nvtx_range:
+                torch.cuda.nvtx.range_push(f"{nvtx_range}-{it}")
+            # hipScopedMarker.emitMarker("Backward start")
+            
+            if bwd_only:
+                out.backward(grad)
+            else:
+                func(indices, offsets, weights)
+            # hipScopedMarker.emitMarker("Backward end")
+            if nvtx_range:
+                torch.cuda.nvtx.range_pop()
 
-        if bwd_only:
-            out.backward(grad)
-        else:
-            func(indices, offsets, weights)
-
-        if nvtx_range:
-            torch.cuda.nvtx.range_pop()
-
-        if torch.cuda.is_available():
-            end_events[it].record()
-        else:
-            it_time = time.time() - start_time
-            times.append(it_time)
+            if torch.cuda.is_available():
+                end_events[it].record()
+                
+            else:
+                it_time = time.time() - start_time
+                times.append(it_time)
+    if bwd_only:
+        profile.stop()
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
