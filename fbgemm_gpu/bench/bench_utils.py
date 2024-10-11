@@ -188,10 +188,10 @@ def benchmark_requests(
     from hipScopedMarker import hipScopedMarker
     profile = rpdTracerControl()      #######
     profile.setPythonTrace(True)
-    # prof = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+    # prof = torch.autograd.profiler.emit_nvtx()
     
-    if bwd_only:
-        profile.start()
+    # if bwd_only:
+        # profile.start()
     for it, req in enumerate(requests):
         with torch.autograd.profiler.record_function(f"iteration {it}"):
             indices, offsets, weights = req.unpack_3()
@@ -206,48 +206,54 @@ def benchmark_requests(
                         dtype=torch.float,
                         device="cuda",
                     )
-                start_events[it].record()
+                # start_events[it].record()
 
-            if nvtx_range:
-                torch.cuda.nvtx.range_push(f"{nvtx_range}-{it}")
+            # if nvtx_range:
+            #     torch.cuda.nvtx.range_push(f"{nvtx_range}-{it}")
             # hipScopedMarker.emitMarker("Backward start")
             
             if bwd_only:
-                out.backward(grad)
+                with torch.cuda.profiler.profile():
+                    with torch.autograd.profiler.emit_nvtx():
+                        profile.start()
+                        out.backward(grad)
+                        torch.cuda.synchronize()
+                        profile.stop()
             else:
                 func(indices, offsets, weights)
+        
             # hipScopedMarker.emitMarker("Backward end")
-            if nvtx_range:
-                torch.cuda.nvtx.range_pop()
+            # if nvtx_range:
+            #     torch.cuda.nvtx.range_pop()
 
-            if torch.cuda.is_available():
-                end_events[it].record()
+            # if torch.cuda.is_available():
+                # end_events[it].record()
                 
-            else:
-                it_time = time.time() - start_time
-                times.append(it_time)
-    if bwd_only:
-        profile.stop()
+            # else:
+                # it_time = time.time() - start_time
+                # times.append(it_time)
+    # if bwd_only:
+        # profile.stop()
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-        times = [
-            start.elapsed_time(end) * 1.0e-3
-            for start, end in zip(start_events, end_events)
-        ]
+    # if torch.cuda.is_available():
+    #     torch.cuda.synchronize()
+    #     times = [
+    #         start.elapsed_time(end) * 1.0e-3
+    #         for start, end in zip(start_events, end_events)
+    #     ]
 
-    if periodic_logs:
-        for it in range(100, num_iters + 1, 100):
-            times_ = times[0:it]
-            avg_time = sum(times_) / len(times_) * 1.0e6
-            last_100_avg = sum(times_[-100:]) / 100 * 1.0e6
-            logging.info(
-                f"Iteration [{it}/{len(requests)}]: Last 100: {last_100_avg:.2f} us, Running avg: {avg_time:.2f} us"
-            )
+    # if periodic_logs:
+    #     for it in range(100, num_iters + 1, 100):
+    #         times_ = times[0:it]
+    #         avg_time = sum(times_) / len(times_) * 1.0e6
+    #         last_100_avg = sum(times_[-100:]) / 100 * 1.0e6
+    #         logging.info(
+    #             f"Iteration [{it}/{len(requests)}]: Last 100: {last_100_avg:.2f} us, Running avg: {avg_time:.2f} us"
+    #         )
 
-    avg_time = sum(times) / len(requests)
-    median_time = statistics.median(times)
-    return median_time if check_median else avg_time
+    # avg_time = sum(times) / len(requests)
+    # median_time = statistics.median(times)
+    return 1.
 
 
 def benchmark_requests_refer(
