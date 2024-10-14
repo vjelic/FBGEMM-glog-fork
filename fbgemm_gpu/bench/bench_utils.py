@@ -216,7 +216,8 @@ def benchmark_requests(
                 with torch.cuda.profiler.profile():
                     with torch.autograd.profiler.emit_nvtx():
                         profile.start()
-                        out.backward(grad)
+                        with torch.autograd.profiler.record_function("backward_label"):
+                            out.backward(grad)
                         torch.cuda.synchronize()
                         profile.stop()
             else:
