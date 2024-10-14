@@ -185,7 +185,7 @@ def benchmark_requests(
         end_events = []
     
     from rpdTracerControl import rpdTracerControl
-    from hipScopedMarker import hipScopedMarker
+    # from hipScopedMarker import hipScopedMarker
     profile = rpdTracerControl()      #######
     profile.setPythonTrace(True)
     # prof = torch.autograd.profiler.emit_nvtx()
