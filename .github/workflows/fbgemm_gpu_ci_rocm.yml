@@ -31,12 +31,6 @@ on:
   # Manual Trigger
   #
   workflow_dispatch:
-    inputs:
-      publish_to_pypi:
-        description: Publish Artifact to PyPI
-        type: boolean
-        required: false
-        default: false
 
 concurrency:
   # Cancel previous runs in the PR if a new commit is pushed
@@ -45,7 +39,7 @@ concurrency:
 
 jobs:
   # Build on CPU hosts and upload to GHA
-  build_artifact:
+  build_and_test:
     runs-on: ${{ matrix.host-machine.instance }}
     container:
       image: rocm/dev-ubuntu-20.04:${{ matrix.rocm-version }}-complete
@@ -64,7 +58,6 @@ jobs:
         host-machine: [
           { arch: x86, instance: "gfx90a" },
         ]
-        container-image: [ "ubuntu:20.04" ]
         python-version: [ "3.12" ]
         rocm-version: [ "6.2" ]
         compiler: [ "gcc", "clang" ]
