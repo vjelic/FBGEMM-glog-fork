@@ -13,12 +13,14 @@ on:
   pull_request:
     branches:
       - main
+      - 09132024_upstream_main
 
   # Push Trigger (enable to catch errors coming out of multiple merges)
   #
   push:
     branches:
       - main
+      - 09132024_upstream_main
 
   # Cron Trigger (UTC)
   #
@@ -31,12 +33,6 @@ on:
   # Manual Trigger
   #
   workflow_dispatch:
-    inputs:
-      publish_to_pypi:
-        description: Publish Artifact to PyPI
-        type: boolean
-        required: false
-        default: false
 
 concurrency:
   # Cancel previous runs in the PR if a new commit is pushed
@@ -45,10 +41,10 @@ concurrency:
 
 jobs:
   # Build on CPU hosts and upload to GHA
-  build_artifact:
+  build_and_test:
     runs-on: ${{ matrix.host-machine.instance }}
     container:
-      image: ${{ matrix.container-image }}
+      image: rocm/dev-ubuntu-20.04:${{ matrix.rocm-version }}-complete
       options: --user root
     defaults:
       run:
@@ -63,8 +59,7 @@ jobs:
         host-machine: [
           { arch: x86, instance: "gfx90a" },
         ]
-        container-image: [ "ubuntu:20.04" ]
-        python-version: [ "3.9", "3.10", "3.11", "3.12" ]
+        python-version: [ "3.12" ]
         rocm-version: [ "6.2" ]
         compiler: [ "gcc", "clang" ]
 
@@ -115,85 +110,8 @@ jobs:
     - name: Build FBGEMM_GPU Wheel
       run: . $PRELUDE; cd fbgemm_gpu; build_fbgemm_gpu_package $BUILD_ENV nightly rocm
 
-    - name: Upload Built Wheel as GHA Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: fbgemm_gpu_nightly_rocm_${{ matrix.host-machine.arch }}_${{ matrix.compiler }}_py${{ matrix.python-version }}_rocm${{ matrix.rocm-version }}.whl
-        path: fbgemm_gpu/dist/*.whl
-        if-no-files-found: error
-
-
-  # Download the built artifact from GHA, test on GPU, and push to PyPI
-  test_and_publish_artifact:
-    runs-on: ${{ matrix.host-machine.instance }}
-    container:
-      image: "rocm/dev-ubuntu-20.04:${{ matrix.rocm-version }}-complete"
-      options: --user root --device=/dev/kfd --device=/dev/dri --ipc=host --shm-size 16G --group-add video --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
-    defaults:
-      run:
-        shell: bash
-    env:
-      PRELUDE: .github/scripts/setup_env.bash
-      BUILD_ENV: build_binary
-      BUILD_VARIANT: rocm
-      ENFORCE_ROCM_DEVICE: 1
-    strategy:
-      fail-fast: false
-      matrix:
-        host-machine: [
-          { arch: x86, instance: "gfx90a" },
-        ]
-        # ROCm machines are limited, so we only test a subset of Python versions
-        python-version: [ "3.12" ]
-        rocm-version: [ "6.2" ]
-        compiler: [ "gcc", "clang" ]
-    needs: build_artifact
-
-    steps:
-    - name: Setup Build Container
-      run: |
-        apt update -y
-        apt install -y git wget
-        git config --global --add safe.directory '*'
-
-    - name: Checkout the Repository
-      uses: actions/checkout@v3
-
-    - name: Download Wheel Artifact from GHA
-      uses: actions/download-artifact@v4
-      with:
-        name: fbgemm_gpu_nightly_rocm_${{ matrix.host-machine.arch }}_${{ matrix.compiler }}_py${{ matrix.python-version }}_rocm${{ matrix.rocm-version }}.whl
-
-    - name: Display System Info
-      run: . $PRELUDE; print_system_info
-
-    - name: Display GPU Info
-      run: . $PRELUDE; print_gpu_info
-
-    - name: Free Disk Space
-      run: . $PRELUDE; free_disk_space
-
-    - name: Setup Miniconda
-      run: . $PRELUDE; setup_miniconda $HOME/miniconda
-
-    - name: Create Conda Environment
-      run: . $PRELUDE; create_conda_environment $BUILD_ENV ${{ matrix.python-version }}
-
-    - name: Install ROCm AMD-SMI
-      run: . $PRELUDE; install_rocm_amdsmi_ubuntu $BUILD_ENV
-
-    - name: Install PyTorch-ROCm Nightly
-      run:  . $PRELUDE; install_pytorch_pip $BUILD_ENV nightly rocm/${{ matrix.rocm-version }}
-
-    - name: Collect PyTorch Environment Info
-      if: ${{ success() || failure() }}
-      run: if . $PRELUDE && which conda; then collect_pytorch_env_info $BUILD_ENV; fi
-
-    - name: Prepare FBGEMM_GPU Build
-      run: . $PRELUDE; cd fbgemm_gpu; prepare_fbgemm_gpu_build $BUILD_ENV
-
     - name: Install FBGEMM_GPU Wheel
-      run: . $PRELUDE; install_fbgemm_gpu_wheel $BUILD_ENV *.whl
+      run: . $PRELUDE; install_fbgemm_gpu_wheel $BUILD_ENV fbgemm_gpu/dist/*.whl
 
     - name: Test with PyTest
       timeout-minutes: 20
