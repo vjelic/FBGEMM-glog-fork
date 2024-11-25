@@ -139,6 +139,7 @@ def cli() -> None:
     "--ssd-prefix", type=str, default="/tmp/ssd_benchmark", help="SSD directory prefix"
 )
 @click.option("--cache-load-factor", default=0.2)
+@click.option("--use_experimental_tbe", default=True)
 def device(  # noqa C901
     alpha: float,
     bag_size: int,
@@ -169,6 +170,7 @@ def device(  # noqa C901
     ssd: bool,
     ssd_prefix: str,
     cache_load_factor: float,
+    use_experimental_tbe: bool,
 ) -> None:
     assert not ssd or not dense, "--ssd cannot be used together with --dense"
     np.random.seed(42)
@@ -285,6 +287,7 @@ def device(  # noqa C901
             cache_precision=weights_precision,
             cache_algorithm=CacheAlgorithm.LRU,
             cache_load_factor=cache_load_factor,
+            use_experimental_tbe=use_experimental_tbe,
             **common_split_args,
         )
     emb = emb.to(get_device())
@@ -458,6 +461,7 @@ def uvm(
     # Simulate a UVM cache with a cache conflict miss rate of 100%
     all_conflict_misses: bool,
     uvm_host_mapped: bool,
+    use_experimental_tbe: bool,
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -506,6 +510,7 @@ def uvm(
         cache_algorithm=cache_alg,
         enforce_hbm=enforce_hbm,
         uvm_host_mapped=uvm_host_mapped,
+        use_experimental_tbe=use_experimental_tbe
     ).cuda()
 
     if weights_precision == SparseType.INT8:
@@ -524,6 +529,7 @@ def uvm(
             ],
             weights_precision=weights_precision,
             stochastic_rounding=stoc,
+            use_experimental_tbe=use_experimental_tbe,
         ).cuda()
 
         if weights_precision == SparseType.INT8:
@@ -549,6 +555,7 @@ def uvm(
             cache_algorithm=cache_alg,
             enforce_hbm=enforce_hbm,
             uvm_host_mapped=uvm_host_mapped,
+            use_experimental_tbe=use_experimental_tbe,
         ).cuda()
 
         if weights_precision == SparseType.INT8:
@@ -779,6 +786,7 @@ def cache(  # noqa C901
     requests_data_file: Optional[str],
     tables: Optional[str],
     uvm_host_mapped: bool,
+    use_experimental_tbe: bool,
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -812,6 +820,7 @@ def cache(  # noqa C901
         weights_precision=weights_precision,
         stochastic_rounding=stoc,
         uvm_host_mapped=uvm_host_mapped,
+        use_experimental_tbe=use_experimental_tbe,
     ).cuda()
 
     if weights_precision == SparseType.INT8:
@@ -833,6 +842,7 @@ def cache(  # noqa C901
         cache_load_factor=cache_load_factor,
         cache_algorithm=cache_alg,
         uvm_host_mapped=uvm_host_mapped,
+        use_experimental_tbe=use_experimental_tbe,
     ).cuda()
 
     if weights_precision == SparseType.INT8:
@@ -3105,6 +3115,7 @@ def device_with_spec(  # noqa C901
     bounds_check_mode: int,
     flush_gpu_cache_size_mb: int,
     output_dtype: SparseType,
+    use_experimental_tbe: bool,
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -3185,6 +3196,7 @@ def device_with_spec(  # noqa C901
         output_dtype=output_dtype,
         pooling_mode=pooling_mode,
         bounds_check_mode=BoundsCheckMode(bounds_check_mode),
+        use_experimental_tbe=use_experimental_tbe,
     )
     emb = emb.to(get_device())
 
@@ -3334,6 +3346,8 @@ def _to_offsets(lengths: torch.Tensor) -> torch.Tensor:
 @click.option("--num-tables", default=20)
 @click.option("--compressed-tables", default=10)
 @click.option("--iters", default=100)
+@click.option("--use_experimental_tbe", default=True)
+
 def vbe(
     batch_size: int,
     compressed_batch_size: int,
@@ -3343,6 +3357,7 @@ def vbe(
     num_tables: int,
     compressed_tables: int,
     iters: int,
+    use_experimental_tbe: bool,
 ) -> None:
     # TODO: Add warmup_runs
     torch.manual_seed(42)
@@ -3380,6 +3395,7 @@ def vbe(
         output_dtype=SparseType.FP32,
         pooling_mode=pooling_mode,
         bounds_check_mode=BoundsCheckMode(BoundsCheckMode.NONE.value),
+        use_experimental_tbe=use_experimental_tbe,
     ).to(get_device())
 
     compressed_batch_sizes = ([cB] * cT) + ([B] * (T - cT))
