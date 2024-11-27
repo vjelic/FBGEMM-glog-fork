@@ -42,7 +42,7 @@ jobs:
   build_and_test:
     runs-on: ${{ matrix.host-machine.instance }}
     container:
-      image: rocm/dev-ubuntu-20.04:${{ matrix.rocm-version }}-complete
+      image: rocm/dev-ubuntu-22.04:${{ matrix.rocm-version }}-complete
       options: --user root
     defaults:
       run:
