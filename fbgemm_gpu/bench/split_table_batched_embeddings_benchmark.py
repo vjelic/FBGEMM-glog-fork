@@ -426,6 +426,7 @@ def device(  # noqa C901
 @click.option("--enforce-hbm", is_flag=True, default=False)
 @click.option("--no-conflict-misses", is_flag=True, default=False)
 @click.option("--all-conflict-misses", is_flag=True, default=False)
+@click.option("--use_experimental_tbe", default=True)
 @click.option(
     "--uvm-host-mapped",
     is_flag=True,
@@ -765,6 +766,7 @@ def uvm(
     default=False,
     help="Use host mapped UVM buffers in SSD-TBE (malloc+cudaHostRegister)",
 )
+@click.option("--use_experimental_tbe", default=True)
 def cache(  # noqa C901
     alpha: float,
     bag_size: int,
@@ -3096,6 +3098,7 @@ def emb_inplace_update(  # noqa C901
 @click.option("--bounds-check-mode", type=int, default=BoundsCheckMode.NONE.value)
 @click.option("--flush-gpu-cache-size-mb", default=0)
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP32)
+@click.option("--use_experimental_tbe", default=True)
 def device_with_spec(  # noqa C901
     alpha: float,
     bag_size_list: str,
