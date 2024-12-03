@@ -158,6 +158,9 @@ __configure_fbgemm_gpu_build_rocm () {
   # shellcheck disable=SC2086
   print_exec conda env config vars set ${env_prefix} PYTORCH_ROCM_ARCH="${arch_list}"
 
+  # shellcheck disable=SC2086
+  print_exec conda env config vars set ${env_prefix} HIPCC_VERBOSE=1
+
   echo "[BUILD] Setting ROCm build args ..."
   build_args=(
     --package_variant=rocm
