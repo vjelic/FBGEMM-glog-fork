@@ -152,7 +152,7 @@ __conda_install_clang () {
   local env_prefix=$(env_name_or_prefix "${env_name}")
 
   # shellcheck disable=SC2155
-  local llvm_version="${LLVM_VERSION:-17.0.6}"
+  local llvm_version="${LLVM_VERSION:-18.1.1}"
 
   echo "[INSTALL] Installing Clang (${llvm_version}, ${archname}) and relevant libraries through Conda ..."
   # NOTE: libcxx from conda-forge is outdated for linux-aarch64, so we cannot
