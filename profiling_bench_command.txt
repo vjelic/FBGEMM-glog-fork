@@ -1,0 +1,6 @@
+DLM command:
+./tools/run_models.py --tags pyt_fbgemm_inference_2024 --additionalContext "{'guest_os':'UBUNTU'}" --timeout 0 --liveOutput --keepAlive --skipModelRun
+
+One has to build rpd-tracer before running the following command https://github.com/ROCm/rocmProfileData
+Running command:
+python3 /workspace/FBGEMM_local/fbgemm_gpu/bench/split_table_batched_embeddings_benchmark.py nbit-device --num-embeddings 100 --batch-size 2048 --bag-size 1 --num-tables 100 --embedding-dim 64 --iters 20 --runs-of-iters 1 --warmup-runs 0  --weights-precision int4 --alpha 1.0 --managed device

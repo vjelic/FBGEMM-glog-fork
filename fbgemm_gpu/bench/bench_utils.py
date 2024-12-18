@@ -149,7 +149,7 @@ def benchmark_requests(
     func: Callable[[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
     flush_gpu_cache_size_mb: int = 0,
     check_median: bool = False,
-    num_warmups: int = 0,
+    num_warmups: int = 400,
     bwd_only: bool = False,
     grad: Optional[torch.Tensor] = None,
     # Used to label benchmark iterations differently in nsys profile result
@@ -186,6 +186,18 @@ def benchmark_requests(
         start_events = []
         end_events = []
 
+
+    from rpdTracerControl import rpdTracerControl
+    profile = rpdTracerControl()      #######
+    profile.setPythonTrace(True)
+    prof = torch.autograd.profiler.emit_nvtx()
+
+    profile.start()
+    prof.__enter__()
+    
+    print("=" * 80)
+    print("Start to benchmark requests...")
+
     for it, req in enumerate(requests):
         indices, offsets, weights = req.unpack_3()
         if bwd_only:
@@ -217,6 +229,9 @@ def benchmark_requests(
         else:
             it_time = time.time() - start_time
             times.append(it_time)
+
+    prof.__exit__(None, None, None)
+    profile.stop()
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()

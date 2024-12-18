@@ -1269,6 +1269,8 @@ def nbit_device(  # noqa C901
 
     times = []
     for i in range(runs_of_iters):
+        # print("=" * 80)
+        # print(f"Run {i}")
         requests = generate_requests(
             iters,
             B,
@@ -1325,65 +1327,65 @@ def nbit_device(  # noqa C901
     )
 
     # Get trace for one run of iter
-    tbe_type: str = "split"
+    # tbe_type: str = "split"
 
-    def _kineto_trace_handler(p: profile, phase: str) -> None:
-        p.export_chrome_trace(
-            trace_url.format(tbe_type=tbe_type, phase=phase, ospid=os.getpid())
-        )
+    # def _kineto_trace_handler(p: profile, phase: str) -> None:
+    #     p.export_chrome_trace(
+    #         trace_url.format(tbe_type=tbe_type, phase=phase, ospid=os.getpid())
+    #     )
 
-    # pyre-ignore[3]
-    def context_factory(on_trace_ready: Callable[[profile], None]):
-        return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
+    # # pyre-ignore[3]
+    # def context_factory(on_trace_ready: Callable[[profile], None]):
+    #     return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
 
-    requests = generate_requests(
-        iters,
-        B,
-        T,
-        L,
-        E,
-        reuse=reuse,
-        alpha=alpha,
-        weighted=weighted,
-        requests_data_file=requests_data_file,
-        tables=tables,
-    )
-    requests = [
-        TBERequest(req.indices.int(), req.offsets.int(), req.per_sample_weights)
-        for req in requests
-    ]
+    # requests = generate_requests(
+    #     iters,
+    #     B,
+    #     T,
+    #     L,
+    #     E,
+    #     reuse=reuse,
+    #     alpha=alpha,
+    #     weighted=weighted,
+    #     requests_data_file=requests_data_file,
+    #     tables=tables,
+    # )
+    # requests = [
+    #     TBERequest(req.indices.int(), req.offsets.int(), req.per_sample_weights)
+    #     for req in requests
+    # ]
 
-    with context_factory(lambda p: _kineto_trace_handler(p, "fwd")):
-        # forward
-        time_per_iter = benchmark_requests(
-            requests,
-            lambda indices, offsets, per_sample_weights: emb.forward(
-                indices.int(),
-                offsets.int(),
-                per_sample_weights,
-            ),
-            check_median=check_median,
-        )
-    # free up GPU memory
-    del requests
+    # with context_factory(lambda p: _kineto_trace_handler(p, "fwd")):
+    #     # forward
+    #     time_per_iter = benchmark_requests(
+    #         requests,
+    #         lambda indices, offsets, per_sample_weights: emb.forward(
+    #             indices.int(),
+    #             offsets.int(),
+    #             per_sample_weights,
+    #         ),
+    #         check_median=check_median,
+    #     )
+    # # free up GPU memory
+    # del requests
 
-    if report_aibench and haveAIBench:
-        print(
-            emitMetric(
-                type="NET",
-                metric=f"bandwidth_{weights_precision}",
-                unit="scalar",
-                value=str(bandwidth),
-            )
-        )
-        print(
-            emitMetric(
-                type="NET",
-                metric=f"time_per_iter_{weights_precision}",
-                unit="scalar",
-                value=str(time_per_iter * 1.0e6),
-            )
-        )
+    # if report_aibench and haveAIBench:
+    #     print(
+    #         emitMetric(
+    #             type="NET",
+    #             metric=f"bandwidth_{weights_precision}",
+    #             unit="scalar",
+    #             value=str(bandwidth),
+    #         )
+    #     )
+    #     print(
+    #         emitMetric(
+    #             type="NET",
+    #             metric=f"time_per_iter_{weights_precision}",
+    #             unit="scalar",
+    #             value=str(time_per_iter * 1.0e6),
+    #         )
+    #     )
 
     if run_reference:
         times = []
