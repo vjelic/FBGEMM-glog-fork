@@ -114,8 +114,8 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   }
   constexpr size_t kOutputsPerThread = {{ (32 // emb_weight_type.bit_width) }};
 
-  constexpr uint32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4);
-  const uint32_t uint4_loads_per_row = div_round_up(D_bytes, sizeof(uint4));
+  constexpr uint32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint32_t);
+  const uint32_t uint4_loads_per_row = div_round_up(D_bytes, sizeof(uint32_t));
 
   {% if not nobag %}
   VecNT<{{ (32 // emb_weight_type.bit_width) }}, PrimitiveType::{{ emb_weight_type.primitive_type }}> accumulators[OutputRowsPerThread][MaxNum128BRows];
@@ -124,7 +124,8 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
     uint32_t input_rows_in_flight = min(static_cast<uint32_t>(InputRowsInFlight), max_Ls - L_start);
 
-    typedef uint4 AllBuffers[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight][NumUint4LoadsPerRow];
+    // typedef uint4 AllBuffers[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight][NumUint4LoadsPerRow];
+    typedef uint AllBuffers[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight][NumUint4LoadsPerRow];
     __shared__ AllBuffers buffers;
 
     {% if weighted %}
@@ -143,8 +144,8 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
 
       #pragma unroll
       for (uint32_t outer_i = 0; outer_i < OutputRowsPerThread - OutputRowsPerThread % kRowUnroll; outer_i += kRowUnroll) {
-        uint4 row_data_v[kRowUnroll];
-        const uint4* row_v[kRowUnroll];
+        uint32_t row_data_v[kRowUnroll];
+        const uint32_t* row_v[kRowUnroll];
         int32_t idx_v[kRowUnroll];
         int32_t cache_idx_v[kRowUnroll];
         #pragma unroll
@@ -164,12 +165,12 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           bool cache_valid = !DeviceOnly && (placement == PlacementType::MANAGED_CACHING && valid);
           valid = valid && (idx_v[inner_i] != -1);
           if (!DeviceOnly && cache_valid && cache_idx_v[inner_i] != kCacheLocationMissing) {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx_v[inner_i])][0]);
+            row_v[inner_i] = reinterpret_cast<const uint32_t*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx_v[inner_i])][0]);
           } else
           if (valid) {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&weights[static_cast<int64_t>(idx_v[inner_i]) * D_bytes]);
+            row_v[inner_i] = reinterpret_cast<const uint32_t*>(&weights[static_cast<int64_t>(idx_v[inner_i]) * D_bytes]);
           } else {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&weights[0]);
+            row_v[inner_i] = reinterpret_cast<const uint32_t*>(&weights[0]);
           }
         }
         #pragma unroll
@@ -177,12 +178,13 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           uint32_t i = outer_i + inner_i;
           row_data_v[inner_i] = row_v[inner_i][row_load_idx];
         }
-        uint4 zeros = {0, 0, 0, 0};
+        // uint4 zeros = {0, 0, 0, 0};
         #pragma unroll
         for (uint32_t inner_i = 0; inner_i < kRowUnroll; inner_i++) {
           uint32_t i = outer_i + inner_i;
           bool valid = load_idx_valid && (L_start + input_row_idx < Ls[i]) && (idx_v[inner_i] != -1);
-          uint4 data = valid ? row_data_v[inner_i] : zeros;
+          // uint4 data = valid ? row_data_v[inner_i] : zeros;
+          uint32_t data = valid ? row_data_v[inner_i] : 0;
           buffers[warp_idx][i][input_row_idx][row_load_idx] = data;
           {% if weighted %}
           buffers_indice_weights[warp_idx][i][input_row_idx] = valid ? indice_weights[indices_starts[i] + L_start + input_row_idx] : 0.0;
@@ -205,15 +207,15 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
         int32_t idx = valid ? indices_[indices_starts[i] + L_start + input_row_idx] : -1;
         int32_t cache_idx = (!DeviceOnly && cache_valid) ? lxu_cache_locations[indices_starts[i] + L_start + input_row_idx] : -1;
         valid = valid && (idx != -1);
-        const uint4* row;
+        const uint32_t* row;
         if (!DeviceOnly && cache_valid && cache_idx != kCacheLocationMissing) {
-          row = reinterpret_cast<const uint4*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx)][0]);
+          row = reinterpret_cast<const uint32_t*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx)][0]);
         } else if (valid) {
-          row = reinterpret_cast<const uint4*>(&weights[static_cast<int64_t>(idx) * D_bytes]);
+          row = reinterpret_cast<const uint32_t*>(&weights[static_cast<int64_t>(idx) * D_bytes]);
         } else {
-          row = reinterpret_cast<const uint4*>(&weights[0]);
+          row = reinterpret_cast<const uint32_t*>(&weights[0]);
         }
-        cp_async_zfill_cg<sizeof(uint4)>(&buffers[warp_idx][i][input_row_idx][row_load_idx], &row[row_load_idx], valid);
+        cp_async_zfill_cg<sizeof(uint32_t)>(&buffers[warp_idx][i][input_row_idx][row_load_idx], &row[row_load_idx], valid);
 
         {% if weighted %}
         buffers_indice_weights[warp_idx][i][input_row_idx] = valid ? indice_weights[indices_starts[i] + L_start + input_row_idx] : 0.0;
