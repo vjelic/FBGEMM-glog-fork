@@ -309,9 +309,14 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
         if (max_int8_128b_rows > 2) {
           Y(2, 4, 2, 4);
         }
+        {%- if is_rocm %}
+        if (max_int8_128b_rows > 4) {
+          Y(1, 4, 4, 8);
+        }
+        {%- else %}
         if (max_int8_128b_rows > 4) {
           Y(2, 4, 4, 8);
-        }
+        {%- endif %}
         if (max_int8_128b_rows > 8) {
           Y(2, 2, 8, 16);
         }
