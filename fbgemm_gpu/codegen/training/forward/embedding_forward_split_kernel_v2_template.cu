@@ -772,6 +772,7 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
       const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, (kWarpSize/2));
       {%- else %}
       const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, kWarpSize);
+      {% endif %}
       if (table_warp_id >= num_warps_per_row * B) {
         return;
       }
@@ -816,7 +817,7 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
     const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, (kWarpSize/2));
     {%- else %}
     const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, kWarpSize);
-
+    {% endif %}
     if (table_warp_id >= num_warps_per_row * (is_small_L ? num_warps_for_small_L : B)) {
       return;
     }
