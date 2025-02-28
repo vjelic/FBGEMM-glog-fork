@@ -17,7 +17,7 @@ using Tensor = at::Tensor;
 namespace nbit {
 
 // TODO: increase code sharing (templates for accumulator_ty, accumulation, outputs per thread, etc?)
-template<typename index_t, typename output_t, size_t OutputRowsPerThread, size_t WarpsPerBlock, size_t InputRowsInFlight, size_t MinNum128BRows, size_t MaxNum128BRows, bool DeviceOnly, bool PackedMode>
+template<typename index_t, typename output_t, size_t OutputRowsPerThread, size_t WarpsPerBlock, size_t InputRowsInFlight, size_t MinNum128BRows, size_t MaxNum128BRows, bool DeviceOnly, bool PackedMode, typename FetchType>
 __launch_bounds__(WarpsPerBlock * kWarpSize)
 __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{{ wdesc }}_kernel_small_L(
   const pta::PackedTensorAccessor64<uint8_t, 1, at::RestrictPtrTraits> dev_weights,
@@ -97,8 +97,8 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   int32_t max_Ls = 0;
   constexpr size_t kOutputsPerThread = {{ (32 // emb_weight_type.bit_width) }};
 
-  constexpr uint32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4);
-  const uint32_t uint4_loads_per_row = div_round_up(D_bytes, sizeof(uint4));
+  constexpr uint32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(FetchType);
+  const uint32_t uint4_loads_per_row = div_round_up(D_bytes, sizeof(FetchType));
 
   for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
     const uint32_t packed_bag_idx = PackedMode ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
@@ -127,7 +127,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
     uint32_t input_rows_in_flight = min(static_cast<uint32_t>(InputRowsInFlight), max_Ls - L_start);
 
-    typedef uint4 AllBuffers[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight][NumUint4LoadsPerRow];
+    typedef FetchType AllBuffers[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight][NumUint4LoadsPerRow];
     __shared__ AllBuffers buffers;
 
     {% if weighted %}
@@ -149,8 +149,8 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
 
       #pragma unroll
       for (uint32_t outer_i = 0; outer_i < OutputRowsPerThread - OutputRowsPerThread % kRowUnroll; outer_i += kRowUnroll) {
-        uint4 row_data_v[kRowUnroll];
-        const uint4* row_v[kRowUnroll];
+        FetchType row_data_v[kRowUnroll];
+        const FetchType* row_v[kRowUnroll];
         int32_t idx_v[kRowUnroll];
         int32_t cache_idx_v[kRowUnroll];
         #pragma unroll
@@ -170,12 +170,12 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           bool cache_valid = !DeviceOnly && (placement == PlacementType::MANAGED_CACHING && valid);
           valid = valid && (idx_v[inner_i] != -1);
           if (!DeviceOnly && cache_valid && cache_idx_v[inner_i] != kCacheLocationMissing) {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx_v[inner_i])][0]);
+            row_v[inner_i] = reinterpret_cast<const FetchType*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx_v[inner_i])][0]);
           } else
           if (valid) {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&weights[static_cast<int64_t>(idx_v[inner_i]) * D_bytes]);
+            row_v[inner_i] = reinterpret_cast<const FetchType*>(&weights[static_cast<int64_t>(idx_v[inner_i]) * D_bytes]);
           } else {
-            row_v[inner_i] = reinterpret_cast<const uint4*>(&weights[0]);
+            row_v[inner_i] = reinterpret_cast<const FetchType*>(&weights[0]);
           }
         }
         #pragma unroll
@@ -183,12 +183,12 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
           uint32_t i = outer_i + inner_i;
           row_data_v[inner_i] = row_v[inner_i][row_load_idx];
         }
-        uint4 zeros = {0, 0, 0, 0};
+        FetchType zeros{};// = {0, 0, 0, 0};
         #pragma unroll
         for (uint32_t inner_i = 0; inner_i < kRowUnroll; inner_i++) {
           uint32_t i = outer_i + inner_i;
           bool valid = load_idx_valid && (L_start + input_row_idx < Ls[i]) && (idx_v[inner_i] != -1);
-          uint4 data = valid ? row_data_v[inner_i] : zeros;
+          FetchType data = valid ? row_data_v[inner_i] : zeros;
           if constexpr (PackedMode) {
             buffers[warp_idx][i][input_row_idx][row_load_idx + uint4_loads_per_row * packed_bag_idx] = data;
           } else {
@@ -215,18 +215,18 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
         int32_t idx = valid ? indices_[indices_starts[i] + L_start + input_row_idx] : -1;
         int32_t cache_idx = (!DeviceOnly && cache_valid) ? lxu_cache_locations[indices_starts[i] + L_start + input_row_idx] : -1;
         valid = valid && (idx != -1);
-        const uint4* row;
+        const FetchType* row;
         if (!DeviceOnly && cache_valid && cache_idx != kCacheLocationMissing) {
-          row = reinterpret_cast<const uint4*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx)][0]);
+          row = reinterpret_cast<const FetchType*>(&lxu_cache_weights[static_cast<int64_t>(cache_idx)][0]);
         } else if (valid) {
-          row = reinterpret_cast<const uint4*>(&weights[static_cast<int64_t>(idx) * D_bytes]);
+          row = reinterpret_cast<const FetchType*>(&weights[static_cast<int64_t>(idx) * D_bytes]);
         } else {
-          row = reinterpret_cast<const uint4*>(&weights[0]);
+          row = reinterpret_cast<const FetchType*>(&weights[0]);
         }
         if constexpr (PackedMode) {
-          cp_async_zfill_cg<sizeof(uint4)>(&buffers[warp_idx][i][input_row_idx][row_load_idx + uint4_loads_per_row * packed_bag_idx], &row[row_load_idx], valid);
+          cp_async_zfill_cg<sizeof(FetchType)>(&buffers[warp_idx][i][input_row_idx][row_load_idx + uint4_loads_per_row * packed_bag_idx], &row[row_load_idx], valid);
         } else {
-          cp_async_zfill_cg<sizeof(uint4)>(&buffers[warp_idx][i][input_row_idx][row_load_idx], &row[row_load_idx], valid);
+          cp_async_zfill_cg<sizeof(FetchType)>(&buffers[warp_idx][i][input_row_idx][row_load_idx], &row[row_load_idx], valid);
         }
         {% if weighted %}
         buffers_indice_weights[warp_idx][i][input_row_idx][packed_bag_idx] = valid ? indice_weights[indices_starts[i] + L_start + input_row_idx] : 0.0;
@@ -239,7 +239,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     // equivalent to fence + wait.
     cp_async_wait<0>();
     syncwarp();
-    const int32_t uints_per_row = 4 * uint4_loads_per_row;
+    const int32_t uints_per_row = sizeof(FetchType) / 4 * uint4_loads_per_row;
     const int32_t packed_bag_idx = PackedMode ? (threadIdx.x / uints_per_row) % num_packed_bags : 0;
     if constexpr (PackedMode) {
       input_rows_in_flight = shfl_sync(input_rows_in_flight, packed_bag_idx * uint4_loads_per_row);
@@ -338,7 +338,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   {% if not nobag %}
   #pragma unroll OutputRowsPerThread
   for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
-    const int32_t num_stores_with_padding_per_row = 4 * uint4_loads_per_row; 
+    const int32_t num_stores_with_padding_per_row = sizeof(FetchType) / 4 * uint4_loads_per_row; 
     const int32_t packed_bag_idx = PackedMode ? threadIdx.x / num_stores_with_padding_per_row : 0;
     const uint32_t b = min(static_cast<uint32_t>(bb * num_packed_bags * OutputRowsPerThread + i * num_packed_bags + packed_bag_idx), static_cast<uint32_t>(B - 1));
     const float inv_L = (mean_pooling && Ls[i] != 0) ? static_cast<float>(1.0) / Ls[i] : static_cast<float>(1.0);
@@ -405,6 +405,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
 // kWarpsPerBlock is defined in embedding_forward_quantized_split_nbit_host_template.cu
 {% set warps_per_block = '4' %}
 
+{% for fetch_type in ['uint4', 'uint32_t', 'uint64_t'] %}
 {% for packed_mode in ['true', 'false'] %}
 {% for device_only in ['true', 'false'] %}
 {% for output_type in ['at::Half', 'at::BFloat16', 'float', 'uint8_t'] %}
@@ -427,7 +428,8 @@ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if nobag else ""
   {{ params.min_128b_rows }},
   {{ params.max_128b_rows }},
   {{ device_only }},
-  {{ packed_mode }} > (
+  {{ packed_mode }},
+  {{ fetch_type }} > (
   const pta::PackedTensorAccessor64<uint8_t, 1, at::RestrictPtrTraits> dev_weights,
   const pta::PackedTensorAccessor64<uint8_t, 1, at::RestrictPtrTraits> uvm_weights,
   const pta::PackedTensorAccessor32<int32_t, 1, at::RestrictPtrTraits> weights_placements,
@@ -467,6 +469,7 @@ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if nobag else ""
 {% endfor %} // for output_type in [True, False]
 {% endfor %} // device_only in [True, False]
 {% endfor %} // packed_bags in ['true', 'false']
+{% endfor %} // fetch_type in ['uint4', 'uint32_t', 'uint64_t']
 
 }
 
