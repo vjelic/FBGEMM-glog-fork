@@ -59,7 +59,7 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
 
 }
 
-using FetchType = uint64_t;
+using FetchType = uint32_t;
 
 {%- macro define_kernel_invocation(emb_weight_type) %}
     {%- set func_name = "nbit::" + emb_weight_type + "_split_embedding" + ("_nobag" if nobag else "") + "_codegen_forward_" + wdesc + "_kernel_small_L" %}
