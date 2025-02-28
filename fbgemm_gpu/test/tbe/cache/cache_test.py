@@ -43,6 +43,7 @@ from .cache_common import (
     generate_cache_tbes,
     gpu_unavailable,
     optests,
+    running_on_github,
     running_on_rocm,
     TestingStatsReporter,
     TestingStatsReporterConfig,
@@ -77,6 +78,7 @@ class CacheTest(unittest.TestCase):
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*running_on_github)
     @unittest.skipIf(*running_on_rocm)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -349,6 +351,8 @@ class CacheTest(unittest.TestCase):
             torch.cuda.synchronize()
             assert cc.bwd_wait_prefetch_timer, "Timer must have been set"
             cc.bwd_wait_prefetch_timer._lazy_report()
+            assert cc.prefetch_duration_timer, "Timer must have been set"
+            cc.prefetch_duration_timer._lazy_report()
 
             self.assertIsInstance(cc.stats_reporter, TestingStatsReporter)
             stats_reporter: TestingStatsReporter = cast(
@@ -391,6 +395,7 @@ class CacheTest(unittest.TestCase):
             # On the other side, if a reporting event happens after forward(), it'll
             # have step timestamp 0 ~ 4, so only 1, 3 steps will be in.
             assert_event_exist("bwd_wait_for_prefetch", [1, 3, 5], [])
+            assert_event_exist("total_prefetch_duration", [1, 3], [])
             # commented out to not break AMD CI
             # assert_event_exist(
             #     "tbe.total_hbm_usage",
@@ -447,6 +452,7 @@ class CacheTest(unittest.TestCase):
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*running_on_github)
     @unittest.skipIf(*running_on_rocm)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -475,6 +481,7 @@ class CacheTest(unittest.TestCase):
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*running_on_github)
     @unittest.skipIf(*running_on_rocm)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -504,6 +511,7 @@ class CacheTest(unittest.TestCase):
 
     @optests.dontGenerateOpCheckTests("Serial OOM")
     @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*running_on_github)
     @unittest.skipIf(*running_on_rocm)
     @given(
         T=st.integers(min_value=1, max_value=5),
@@ -585,6 +593,7 @@ class CacheTest(unittest.TestCase):
         self.assertTrue(torch.equal(torch.full_like(output_tensor, 1), output_tensor))
 
     @unittest.skipIf(*gpu_unavailable)
+    @unittest.skipIf(*running_on_github)
     @given(
         L=st.integers(min_value=0, max_value=16),
         H=st.integers(min_value=512, max_value=1024),

@@ -103,7 +103,13 @@ template <
     ck::BlockGemmPipelineScheduler LOOP_SCHED,
     ck::BlockGemmPipelineVersion PIPELINE_VERSION,
     ck::tensor_operation::device::GemmSpecialization GEMM_SPEC =
-        ck::tensor_operation::device::GemmSpecialization::MNPadding>
+        ck::tensor_operation::device::GemmSpecialization::MNPadding,
+    ck::index_t AReadVecLength = 16,
+    ck::index_t BReadVecLength = 16,
+    ck::index_t ADstVecLength = 16,
+    ck::index_t BDstVecLength = 16,
+    int AK1 = 16,
+    int BK1 = 16>
 using DeviceGemmHelper =
     ck::tensor_operation::device::DeviceGemmMultiD_Xdl_CShuffle_V3<
         ALayout,
@@ -124,8 +130,8 @@ using DeviceGemmHelper =
         MBLOCK, // M per Block
         NBLOCK, // N per Block
         KBLOCK, // K per Block
-        16, // AK1
-        16, // BK1
+        AK1,
+        BK1,
         WAVE_TILE_M, // M per Xdl
         WAVE_TILE_N, // N per Xdl
         WAVE_MAP_M, // Mxdl per Wave
@@ -134,15 +140,15 @@ using DeviceGemmHelper =
         S<1, 0, 2>,
         S<1, 0, 2>,
         2,
-        16,
-        16,
+        AReadVecLength,
+        ADstVecLength,
         0,
         BBLOCK_TRANSFER,
         S<1, 0, 2>,
         S<1, 0, 2>,
         2,
-        16,
-        16,
+        BReadVecLength,
+        BDstVecLength,
         0,
         CSHUFFLE_MX_PER_WAVE_PERSHUFFLE,
         CSHUFFLE_NX_PER_WAVE_PERSHUFFLE,
@@ -158,11 +164,12 @@ at::Tensor f8f8bf16_rowwise_impl(
     at::Tensor WQ,
     at::Tensor x_scale,
     at::Tensor w_scale,
-    at::Tensor Y) {
+    at::Tensor Y,
+    int KBatch = 1) {
   // Get input information.
-  int M = XQ.size(0);
+  int M = size_to_dim_(XQ.dim() - 1, XQ.sizes());
   int N = WQ.size(0);
-  int K = XQ.size(1);
+  int K = WQ.size(1);
 
   int StrideA = K;
   int StrideB = K;
@@ -192,7 +199,7 @@ at::Tensor f8f8bf16_rowwise_impl(
       StrideB,
       std::array<ck::index_t, NumDTensor>{0, 0},
       StrideE,
-      1,
+      KBatch,
       a_element_op,
       b_element_op,
       cde_element_op);

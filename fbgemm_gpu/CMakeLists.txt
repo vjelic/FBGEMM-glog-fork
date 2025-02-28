@@ -8,15 +8,16 @@
 # CMake Prelude
 ################################################################################
 
-cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 set(CMAKEMODULES ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/modules)
+set(FBGEMM_GPU ${CMAKE_CURRENT_SOURCE_DIR})
 set(FBGEMM ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(THIRDPARTY ${FBGEMM}/external)
 
 include(${CMAKEMODULES}/Utilities.cmake)
 
-set(CMAKE_VERBOSE_MAKEFILE on)
+set(CMAKE_VERBOSE_MAKEFILE ON)
 
 ################################################################################
 # FBGEMM_GPU Build Options
@@ -109,6 +110,19 @@ set(fbgemm_sources_include_directories
 
 
 ################################################################################
+# Build Library Dependencies
+################################################################################
+
+# These dependencies should be declared and built before building FBGEMM_GPU
+
+# Target: `asmjit`
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Asmjit.cmake)
+
+# Target: `fbgemm`
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Fbgemm.cmake)
+
+
+################################################################################
 # TBE Code Generation
 ################################################################################
 
@@ -138,9 +152,9 @@ foreach(script
 endforeach()
 
 
-# ################################################################################
+################################################################################
 # HIP Code Generation
-# ################################################################################
+################################################################################
 
 if(USE_ROCM)
   set(include_dirs_for_hipification
@@ -151,7 +165,10 @@ if(USE_ROCM)
     ${CMAKE_CURRENT_SOURCE_DIR}/experimental/gen_ai)
 
   # HIPify all .CU and .CUH sources under the current directory (`/fbgemm_gpu`)
-  # .H sources are not automatically HIPified, so they need #ifdef USE_ROCM guards
+  #
+  # Note that .H sources are not automatically HIPified, so if they reference
+  # CUDA-specific code, e.g. `#include <c10/cuda/CUDAStream.h>`, they will need
+  # to be updated with `#ifdef USE_ROCM` guards.
   hipify(
     CUDA_SOURCE_DIR
       ${PROJECT_SOURCE_DIR}
@@ -169,6 +186,41 @@ if(USE_ROCM)
   )
 endif()
 
+function(get_tbe_sources_list variable_name)
+  # Set the genfiles script path
+  set(genfiles_script ${CMAKE_CURRENT_SOURCE_DIR}/cmake/tbe_sources.py)
+
+  # Execute the script to load the generated files list to memory,
+  # and print the desired variable to stdout
+  execute_process(
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      -c
+      "exec(open('${genfiles_script}').read()); print(';'.join(${variable_name}))"
+    WORKING_DIRECTORY
+      "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE
+      tempvar
+    RESULT_VARIABLE
+      resvar
+    ERROR_VARIABLE
+      errvar)
+
+  # Exit if executing the script fails
+  if(NOT "${resvar}" EQUAL "0")
+    message(ERROR
+      "Failed to execute Python (${PYTHON_EXECUTABLE})\n"
+      "Result: ${resvar}\n"
+      "Error: ${errvar}\n")
+  endif()
+
+  # Clean out the string
+  string(REPLACE "\n" "" tempvar "${tempvar}")
+
+  # Set the output variable
+  set(${variable_name} ${tempvar} PARENT_SCOPE)
+endfunction()
+
 
 ################################################################################
 # Build FBGEMM_GPU (Main) Module
@@ -184,11 +236,11 @@ endif()
 ################################################################################
 
 if(NOT FBGEMM_CPU_ONLY AND NOT USE_ROCM)
-  # TODO: Figure out NCCL/RCCL integration with ROCm
   add_subdirectory(experimental/example)
 endif()
 
 if(NOT FBGEMM_CPU_ONLY)
+  # Package Triton GEMM (GenAI) kernels
   add_subdirectory(experimental/gemm)
 endif()
 

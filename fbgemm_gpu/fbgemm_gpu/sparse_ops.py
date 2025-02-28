@@ -900,13 +900,14 @@ def keyed_jagged_index_select_dim1_forward_cuda_impl_abstract(
     lengths: torch.Tensor,
     offsets: torch.Tensor,
     indices: torch.Tensor,
-    batch_size: int,
+    batch_size: torch.SymInt,
     weights: Optional[torch.Tensor] = None,
-    selected_lengths_sum: Optional[int] = None,
+    selected_lengths_sum: Optional[torch.SymInt] = None,
 ) -> List[torch.Tensor]:
-    num_batches = len(lengths) // batch_size
-    torch._check(len(lengths) + 1 == len(offsets))
-    torch._check(len(lengths) % batch_size == 0)
+    num_batches = lengths.size(0) // batch_size
+    torch._check(lengths.size(0) + 1 == offsets.size(0))
+    # pyre-ignore
+    torch._check(lengths.size(0) % batch_size == 0)
 
     if weights is not None:
         # weights must have the same shape as values
@@ -1015,6 +1016,111 @@ def fused_nbit_rowwise_quantized_sb_half_to_float_or_half(
         )
 
 
+def fused_8_bit_rowwise_quantized_to_float_or_half(
+    input_t: Tensor,
+    output_dtype: int = 0,
+    scale_bias_last: bool = True,
+    quant_padding_float_type: bool = True,
+) -> Tensor:
+    torch._check(
+        output_dtype
+        in [
+            SparseType.FP32.as_int(),
+            SparseType.FP16.as_int(),
+            SparseType.BF16.as_int(),
+        ]
+    )
+    torch._check(quant_padding_float_type or not scale_bias_last)
+    torch._check(input_t.dim() >= 2)
+    last_dim = input_t.dim() - 1
+    output_shape = list(input_t.shape)
+    ncols = input_t.size(last_dim)
+    quant_padding_size = 4 if quant_padding_float_type else 2
+    ncols_aligned = (
+        (ncols + quant_padding_size - 1) // quant_padding_size * quant_padding_size
+    )
+    output_columns = ncols_aligned - 2 * quant_padding_size
+    output_shape[last_dim] = output_columns
+    if output_dtype == SparseType.FP32.as_int():
+        return torch.empty(output_shape, dtype=torch.float32, device=input_t.device)
+    elif output_dtype == SparseType.FP16.as_int():
+        return torch.empty(output_shape, dtype=torch.float16, device=input_t.device)
+    else:  # output_dtype is SparseType.BF16
+        return torch.empty(output_shape, dtype=torch.bfloat16, device=input_t.device)
+
+
+def float_or_half_to_fused_8_bit_rowwise(
+    input_t: Tensor,
+) -> Tensor:
+    torch._check(input_t.dim() >= 2)
+    last_dim = input_t.dim() - 1
+    output_shape = list(input_t.shape)
+    ncols = input_t.size(last_dim)
+    ncols_aligned = (ncols + 4 - 1) // 4 * 4
+    output_columns = ncols_aligned + 2 * 4
+    output_shape[last_dim] = output_columns
+    return torch.empty(output_shape, dtype=torch.uint8, device=input_t.device)
+
+
+def fused_8_bit_rowwise_quantized_to_float(
+    input_t: Tensor,
+    scale_bias_last: bool = True,
+    quant_padding_float_type: bool = True,
+) -> Tensor:
+    torch._check(quant_padding_float_type or not scale_bias_last)
+    torch._check(input_t.dim() >= 2)
+    last_dim = input_t.dim() - 1
+    output_shape = list(input_t.shape)
+    ncols = input_t.size(last_dim)
+    quant_padding_size = 4 if quant_padding_float_type else 2
+    ncols_aligned = (
+        (ncols + quant_padding_size - 1) // quant_padding_size * quant_padding_size
+    )
+    output_columns = ncols_aligned - 2 * quant_padding_size
+    output_shape[last_dim] = output_columns
+    return torch.empty(output_shape, dtype=torch.float32, device=input_t.device)
+
+
+def fused_8_bit_rowwise_quantized_to_half(
+    input_t: Tensor,
+    scale_bias_last: bool = True,
+    quant_padding_float_type: bool = True,
+) -> Tensor:
+    torch._check(quant_padding_float_type or not scale_bias_last)
+    torch._check(input_t.dim() >= 2)
+    last_dim = input_t.dim() - 1
+    output_shape = list(input_t.shape)
+    ncols = input_t.size(last_dim)
+    quant_padding_size = 4 if quant_padding_float_type else 2
+    ncols_aligned = (
+        (ncols + quant_padding_size - 1) // quant_padding_size * quant_padding_size
+    )
+    output_columns = ncols_aligned - 2 * quant_padding_size
+    output_shape[last_dim] = output_columns
+    return torch.empty(output_shape, dtype=torch.float16, device=input_t.device)
+
+
+def generic_histogram_binning_calibration_by_feature(
+    logit: Tensor,
+    segment_value: Tensor,
+    segment_lengths: Tensor,
+    num_segments: int,
+    bin_num_examples: Tensor,
+    bin_num_positives: Tensor,
+    bin_boundaries: Tensor,
+    positive_weight: float,
+    bin_ctr_in_use_after: int,
+    bin_ctr_weight_value: float,
+) -> Tuple[Tensor, Tensor]:
+    torch._check(bin_num_examples.numel() == bin_num_positives.numel())
+    torch._check(
+        bin_num_examples.numel() == (num_segments + 1) * (bin_boundaries.numel() + 1)
+    )
+    return torch.empty_like(logit), torch.empty(
+        [logit.numel()], dtype=torch.int64, device=logit.device
+    )
+
+
 def _setup() -> None:
     # pyre-ignore[16]
     _setup.done = getattr(_setup, "done", False)
@@ -1105,12 +1211,12 @@ def _setup() -> None:
             batch_index_select_dim0_tensor_backward_cuda_impl_abstract,
         )
         impl_abstract(
-            "fbgemm::keyed_jagged_index_select_dim1",
-            keyed_jagged_index_select_dim1_abstract,
-        )
-        impl_abstract(
             "fbgemm::batch_index_select_dim0_backward_cuda_impl",
             batch_index_select_dim0_backward_cuda_impl_abstract,
+        )
+        impl_abstract(
+            "fbgemm::keyed_jagged_index_select_dim1",
+            keyed_jagged_index_select_dim1_abstract,
         )
         impl_abstract(
             "fbgemm::batch_index_select_dim0_forward_cpu_impl",
@@ -1149,6 +1255,10 @@ def _setup() -> None:
             histogram_binning_calibration_abstract,
         )
         impl_abstract(
+            "fbgemm::generic_histogram_binning_calibration_by_feature",
+            generic_histogram_binning_calibration_by_feature,
+        )
+        impl_abstract(
             "fbgemm::FloatToHFP8Quantized",
             float_to_hfp8_quantized,
         )
@@ -1164,7 +1274,30 @@ def _setup() -> None:
             "fbgemm::FusedNBitRowwiseQuantizedSBHalfToFloatOrHalf",
             fused_nbit_rowwise_quantized_sb_half_to_float_or_half,
         )
-
+        impl_abstract(
+            "fbgemm::Fused8BitRowwiseQuantizedToFloatOrHalf",
+            fused_8_bit_rowwise_quantized_to_float_or_half,
+        )
+        impl_abstract(
+            "fbgemm::FloatToFused8BitRowwiseQuantized",
+            float_or_half_to_fused_8_bit_rowwise,
+        )
+        impl_abstract(
+            "fbgemm::FloatOrHalfToFused8BitRowwiseQuantized",
+            float_or_half_to_fused_8_bit_rowwise,
+        )
+        impl_abstract(
+            "fbgemm::HalfToFused8BitRowwiseQuantized",
+            float_or_half_to_fused_8_bit_rowwise,
+        )
+        impl_abstract(
+            "fbgemm::Fused8BitRowwiseQuantizedToFloat",
+            fused_8_bit_rowwise_quantized_to_float,
+        )
+        impl_abstract(
+            "fbgemm::Fused8BitRowwiseQuantizedToHalf",
+            fused_8_bit_rowwise_quantized_to_half,
+        )
         _setup.done = True
 
 

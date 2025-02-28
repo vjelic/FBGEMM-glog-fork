@@ -525,6 +525,7 @@ class BlockBucketizeTest(unittest.TestCase):
         torch.testing.assert_close(
             new_indices.cpu(), new_indices_ref, msg=f"{new_indices=}"
         )
+        assert new_weights is None and new_pos is None
         if unbucketize_permute is not None:
             torch.testing.assert_close(
                 unbucketize_permute.cpu(),
@@ -1363,7 +1364,7 @@ class BlockBucketizeTest(unittest.TestCase):
         has_weight=st.booleans(),
         bucketize_pos=st.booleans(),
         sequence=st.booleans(),
-        my_size=st.sampled_from([3, 194, 256]),
+        my_size=st.sampled_from([3, 194, 256, 1024]),
     )
     @settings(verbosity=Verbosity.verbose, max_examples=32, deadline=None)
     def test_block_bucketize_sparse_features_large(

@@ -52,7 +52,7 @@ class FbgemmGpuBuild:
         parser.add_argument(
             "--package_variant",
             type=str,
-            choices=["cpu", "cuda", "rocm", "genai"],
+            choices=["docs", "cpu", "cuda", "rocm", "genai"],
             default="cuda",
             help="The FBGEMM_GPU variant to build.",
         )
@@ -166,7 +166,15 @@ class FbgemmGpuBuild:
         elif self.args.package_variant == "rocm":
             if torch.version.hip is not None:
                 rocm_version = torch.version.hip.split(".")
-                pkg_vver = f"+rocm{rocm_version[0]}.{rocm_version[1]}"
+                # NOTE: Unlike CUDA-based releases, which ignores the minor patch version,
+                # ROCm-based releases may use the full version string.
+                # See https://download.pytorch.org/whl/nightly/torch/ for examples.
+                if len(rocm_version) > 2:
+                    pkg_vver = (
+                        f"+rocm{rocm_version[0]}.{rocm_version[1]}.{rocm_version[2]}"
+                    )
+                else:
+                    pkg_vver = f"+rocm{rocm_version[0]}.{rocm_version[1]}"
             else:
                 sys.exit(
                     "[SETUP.PY] The installed PyTorch variant is not ROCm; cannot determine the ROCm version!"
@@ -237,7 +245,9 @@ class FbgemmGpuBuild:
                 value = int(torch._C._GLIBCXX_USE_CXX11_ABI)
             except ImportError:
                 value = 0
-            return "-DGLIBCXX_USE_CXX11_ABI=" + str(value)
+            # NOTE: The correct spelling for the flag is
+            # `_GLIBCXX_USE_CXX11_ABI`, not `GLIBCXX_USE_CXX11_ABI`
+            return f"-D_GLIBCXX_USE_CXX11_ABI={value}"
 
         torch_root = os.path.dirname(torch.__file__)
         os.environ["CMAKE_BUILD_PARALLEL_LEVEL"] = str(os.cpu_count() // 2)
@@ -260,7 +270,16 @@ class FbgemmGpuBuild:
             # https://stackoverflow.com/questions/44284275/passing-compiler-options-in-cmake-command-line
             cxx_flags.extend(["-DTORCH_USE_CUDA_DSA", "-DTORCH_USE_HIP_DSA"])
 
-        if self.args.package_variant == "cpu":
+        if self.args.package_variant in ["docs", "cpu"]:
+            # NOTE: The docs variant is a fake variant that is effectively the
+            # cpu variant, but marks __VARIANT__ as "docs" instead of "cpu".
+            #
+            # This minor change lets the library loader know not throw
+            # exceptions on failed load, which is the workaround for a bug in
+            # the Sphinx documentation generation process, see:
+            #
+            #   https://github.com/pytorch/FBGEMM/pull/3477
+            #   https://github.com/pytorch/FBGEMM/pull/3717
             print("[SETUP.PY] Building the CPU-ONLY variant of FBGEMM_GPU ...")
             cmake_args.append("-DFBGEMM_CPU_ONLY=ON")
 
@@ -547,7 +566,7 @@ def main(argv: List[str]) -> None:
         ]
         + [
             f"Programming Language :: Python :: {x}"
-            for x in ["3", "3.9", "3.10", "3.11", "3.12"]
+            for x in ["3", "3.9", "3.10", "3.11", "3.12", "3.13"]
         ],
     )
 

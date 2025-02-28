@@ -30,6 +30,28 @@ from torch import nn
 logging.basicConfig(level=logging.DEBUG)
 
 
+def warmup(
+    request: TBERequest,
+    warmup_ms: int,
+    warmup_runs: int,
+    func: Callable[[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor],
+    bwd_only: bool = False,
+    grad: Optional[torch.Tensor] = None,
+) -> None:
+    indices, offsets, weights = request.unpack_3()
+    if warmup_ms:
+        start_time_ms = time.time() * 1000
+        while time.time() * 1000 - start_time_ms < warmup_ms:
+            out = func(indices, offsets, weights)
+            if bwd_only:
+                out.backward(grad)
+    else:
+        for _ in range(warmup_runs):
+            out = func(indices, offsets, weights)
+            if bwd_only:
+                out.backward(grad)
+
+
 def benchmark_torch_function(  # noqa: C901
     # pyre-fixme[2]: Parameter must be annotated.
     f,
@@ -159,34 +181,49 @@ def benchmark_requests(
     # Can be used to clear model's stats after warmup for example.
     callback_after_warmup: Optional[Callable[[], None]] = None,
     periodic_logs: bool = False,
+    warmup_ms: Optional[int] = None,
+    iters: int = -1,
 ) -> float:
     times = []
-
     # Run at least one warmup iteration to avoid the long cudaLaunchKernel time
-    # for the first kernel
-    num_warmups = num_warmups + 1 if num_warmups >= 0 else 1
+    # for the first kernel if warmup_ms > 0
+    # warmup_ms is prioritized over num_warmups
 
-    if num_warmups > 0:
-        indices, offsets, weights = requests[0].unpack_3()
-        for _ in range(num_warmups):
-            out = func(indices, offsets, weights)
-            if bwd_only:
-                out.backward(grad)
+    if warmup_ms is None:
+        num_warmups = num_warmups + 1 if num_warmups >= 0 else 1
+
+    # warm-up the GPU before profiling
+    warmup(
+        requests[0],
+        # pyre-ignore[6]
+        warmup_ms,
+        num_warmups,
+        lambda indices, offsets, per_sample_weights: func(
+            indices,
+            offsets,
+            per_sample_weights,
+        ),
+        bwd_only=bwd_only,
+        grad=grad,
+    )
 
     if callback_after_warmup is not None:
         callback_after_warmup()
 
-    num_iters = len(requests)
+    num_reqs = len(requests)
+    iters = num_reqs if iters == -1 else iters
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_iters)]
-        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_iters)]
+        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     else:
         start_events = []
         end_events = []
 
-    for it, req in enumerate(requests):
+    for it in range(iters):
+        req = requests[it % num_reqs]
+
         indices, offsets, weights = req.unpack_3()
         if bwd_only:
             # Run forward before profiling if does backward only
@@ -226,7 +263,7 @@ def benchmark_requests(
         ]
 
     if periodic_logs:
-        for it in range(100, num_iters + 1, 100):
+        for it in range(100, iters + 1, 100):
             times_ = times[0:it]
             avg_time = sum(times_) / len(times_) * 1.0e6
             last_100_avg = sum(times_[-100:]) / 100 * 1.0e6
@@ -234,7 +271,7 @@ def benchmark_requests(
                 f"Iteration [{it}/{len(requests)}]: Last 100: {last_100_avg:.2f} us, Running avg: {avg_time:.2f} us"
             )
 
-    avg_time = sum(times) / len(requests)
+    avg_time = sum(times) / iters
     median_time = statistics.median(times)
     return median_time if check_median else avg_time
 
@@ -389,7 +426,7 @@ def benchmark_pipelined_requests(
 
 
 @dataclass
-class VBEBenchmarkOutput:
+class EvalCompressionBenchmarkOutput:
     avg: float
     fwd: float
     bwd: float
@@ -399,14 +436,14 @@ class VBEBenchmarkOutput:
     compressed_bwd: float
 
 
-def benchmark_vbe(
+def benchmark_eval_compression(
     baseline_requests: List[Tuple[torch.Tensor, torch.Tensor]],
     compressed_requests: List[Tuple[torch.Tensor, torch.Tensor]],
     baseline_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     compressed_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
     reindex: torch.Tensor,
     embedding_dim: int,
-) -> VBEBenchmarkOutput:
+) -> EvalCompressionBenchmarkOutput:
     times = []
     fwd_times = []
     bwd_times = []
@@ -485,9 +522,63 @@ def benchmark_vbe(
     reindex = statistics.median(reindex_times)
     compressed_bwd = statistics.median(bwd_times)
 
-    return VBEBenchmarkOutput(
+    return EvalCompressionBenchmarkOutput(
         avg, fwd, bwd, compressed_avg, compressed_fwd, reindex, compressed_bwd
     )
+
+
+def benchmark_vbe(
+    requests: List[Tuple[torch.Tensor, torch.Tensor]],
+    func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+) -> Tuple[float, float]:
+    """
+    A benchmark function to return the average execution time in seconds of
+    forward and backward of VBE kernels.
+
+    Args:
+        requests (List[Tuple[torch.Tensor, torch.Tensor]]):
+            A list of requests.  Each request is a tuple
+            of indices and offsets.
+
+        func (Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
+            A function that takes in indices and offsets
+            and returns the output of the VBE kernel.
+
+    Returns:
+        Tuple[float, float]:
+            A tuple of average execution time in seconds of forward and
+            backward of VBE kernels.
+    """
+
+    fwd_times = []
+    bwd_times = []
+
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    for indices, offsets in requests:
+        # forward
+        start_event.record()
+        out = func(indices, offsets)
+        end_event.record()
+        torch.cuda.synchronize()
+        it_time = start_event.elapsed_time(end_event) * 1.0e-3
+        fwd_times.append(it_time)
+
+        grad = torch.rand_like(out)
+        start_event.record()
+        # backward
+        out.backward(grad)
+        end_event.record()
+        torch.cuda.synchronize()
+        it_time = start_event.elapsed_time(end_event) * 1.0e-3
+        bwd_times.append(it_time)
+
+    fwd_time_sec = statistics.median(fwd_times)
+    bwd_time_sec = statistics.median(bwd_times)
+
+    return fwd_time_sec, bwd_time_sec
 
 
 def fill_random_scale_bias(

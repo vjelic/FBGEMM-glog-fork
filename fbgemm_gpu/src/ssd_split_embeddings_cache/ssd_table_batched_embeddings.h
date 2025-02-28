@@ -25,6 +25,7 @@
 #endif
 #include "fbgemm_gpu/split_embeddings_cache/kv_db_cpp_utils.h"
 #include "kv_db_table_batched_embeddings.h"
+#include "kv_tensor_wrapper.h"
 #include "torch/csrc/autograd/record_function_ops.h"
 
 namespace ssd {
@@ -124,55 +125,29 @@ class Initializer {
   std::unique_ptr<std::thread> producer_;
 };
 
+class EmbeddingRocksDB;
+using snapshot_ptr_t = const rocksdb::Snapshot*;
+// @lint-ignore CLANGTIDY cppcoreguidelines-special-member-functions
+class SnapshotHandle {
+ public:
+  explicit SnapshotHandle(EmbeddingRocksDB* db);
+  ~SnapshotHandle();
+  void release();
+  snapshot_ptr_t get_snapshot_for_shard(size_t shard) const;
+
+ private:
+  friend class EmbeddingRocksDB;
+
+  EmbeddingRocksDB* db_;
+  std::vector<snapshot_ptr_t> shard_snapshots_;
+}; // class SnapshotHandle
+
 /// @ingroup embedding-ssd
 ///
 /// @brief An implementation of EmbeddingKVDB for RocksDB
 ///
 class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
-  using snapshot_ptr_t = const rocksdb::Snapshot*;
-
  public:
-  class SnapshotHandle {
-   public:
-    explicit SnapshotHandle(EmbeddingRocksDB* db) : db_(db) {
-      auto num_shards = db->num_shards();
-      CHECK_GT(num_shards, 0);
-      shard_snapshots_.reserve(num_shards);
-      for (auto shard = 0; shard < num_shards; ++shard) {
-        const auto* snapshot = db->dbs_[shard]->GetSnapshot();
-        CHECK(snapshot != nullptr)
-            << "ERROR: create_snapshot fails to create a snapshot "
-            << "for db shard " << shard << ". Please make sure that "
-            << "inplace_update_support is set to false" << std::endl;
-        shard_snapshots_.push_back(snapshot);
-      }
-    }
-
-    ~SnapshotHandle() {
-      for (auto shard = 0; shard < db_->dbs_.size(); ++shard) {
-        snapshot_ptr_t snapshot = shard_snapshots_[shard];
-        CHECK(snapshot != nullptr)
-            << "Unexpected nullptr for snapshot " << shard;
-        db_->dbs_[shard]->ReleaseSnapshot(snapshot);
-      }
-    }
-
-    void release() {
-      db_->release_snapshot(this);
-    }
-
-    snapshot_ptr_t get_snapshot_for_shard(size_t shard) const {
-      CHECK_LE(shard, shard_snapshots_.size());
-      return shard_snapshots_[shard];
-    }
-
-   private:
-    friend class EmbeddingRocksDB;
-
-    EmbeddingRocksDB* db_;
-    std::vector<snapshot_ptr_t> shard_snapshots_;
-  };
-
   explicit EmbeddingRocksDB(
       std::string path,
       int64_t num_shards,
@@ -192,16 +167,44 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
       int64_t cache_size = 0,
       bool use_passed_in_path = false,
       int64_t tbe_unqiue_id = 0,
-      int64_t l2_cache_size_gb = 0)
+      int64_t l2_cache_size_gb = 0,
+      bool enable_async_update = false)
       : kv_db::EmbeddingKVDB(
             num_shards,
             max_D,
             l2_cache_size_gb,
             tbe_unqiue_id,
-            row_storage_bitwidth / 8),
-        max_D_(max_D) {
+            row_storage_bitwidth / 8,
+            enable_async_update),
+        max_D_(max_D),
+        elem_size_(row_storage_bitwidth / 8) {
+    class Int64Comparator : public rocksdb::Comparator {
+     public:
+      const char* Name() const override {
+        return "Int64Comparator";
+      }
+
+      int Compare(const rocksdb::Slice& a, const rocksdb::Slice& b)
+          const override {
+        int64_t key_a = *reinterpret_cast<const int64_t*>(a.data());
+        int64_t key_b = *reinterpret_cast<const int64_t*>(b.data());
+        if (key_a < key_b) {
+          return -1;
+        }
+        if (key_a > key_b) {
+          return 1;
+        }
+        return 0;
+      }
+
+      void FindShortestSeparator(std::string*, const rocksdb::Slice&)
+          const override {}
+      void FindShortSuccessor(std::string*) const override {}
+    };
+
     // TODO: lots of tunables. NNI or something for this?
     rocksdb::Options options;
+    options.comparator = new Int64Comparator();
     options.create_if_missing = true;
 
     // TODO: probably not very compressible.
@@ -401,18 +404,18 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
     }
   }
 
-  folly::coro::Task<void> get_kv_db_async(
+  folly::SemiFuture<std::vector<folly::Unit>> get_kv_db_async(
       const at::Tensor& indices,
       const at::Tensor& weights,
       const at::Tensor& count) override {
-    co_await get_kv_db_async_impl(
+    return get_kv_db_async_impl</*use_iterator=*/false>(
         indices,
         weights,
         count,
         /*snapshot_handle=*/nullptr);
   }
 
-  folly::coro::Task<void> set_kv_db_async(
+  folly::SemiFuture<std::vector<folly::Unit>> set_kv_db_async(
       const at::Tensor& indices,
       const at::Tensor& weights,
       const at::Tensor& count,
@@ -422,14 +425,15 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
 #ifdef FBGEMM_FBCODE
     auto start_ts = facebook::WallClockUtil::NowInUsecFast();
 #endif
-    std::vector<folly::coro::TaskWithExecutor<void>> tasks;
-    auto count_ = count.item().toLong();
+    std::vector<folly::Future<folly::Unit>> futures;
+    auto count_ = count.scalar_type() == at::ScalarType::Long
+        ? *(count.data_ptr<int64_t>())
+        : *(count.data_ptr<int32_t>());
 
     for (auto shard = 0; shard < dbs_.size(); ++shard) {
-      tasks.emplace_back(
-          folly::coro::co_invoke(
-              [this, &indices, &weights, count_, shard]() mutable
-              -> folly::coro::Task<void> {
+      auto f =
+          folly::via(executor_.get())
+              .thenValue([=, &indices, &weights](folly::Unit) {
                 FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE(
                     weights.scalar_type(), "ssd_set", [&] {
                       using value_t = scalar_t;
@@ -470,11 +474,10 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
                             }
                           });
                     });
-                co_return;
-              })
-              .scheduleOn(executor_.get()));
+              });
+      futures.push_back(std::move(f));
     }
-    co_await folly::coro::collectAllRange(std::move(tasks));
+    // co_await folly::coro::collectAllRange(std::move(tasks));
 #ifdef FBGEMM_FBCODE
     auto duration = facebook::WallClockUtil::NowInUsecFast() - start_ts;
     switch (w_mode) {
@@ -492,6 +495,7 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
         break;
     }
 #endif
+    return folly::collect(futures);
   }
 
   bool is_valid_snapshot(const SnapshotHandle* snapshot_handle) const {
@@ -529,11 +533,13 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
     const auto seq_indices =
         at::arange(start, start + length, at::TensorOptions().dtype(at::kLong));
     const auto count = at::tensor({length}, at::ScalarType::Long);
-    folly::coro::blockingWait(
-        get_kv_db_async_impl(seq_indices, weights, count, snapshot_handle));
+
+    get_kv_db_async_impl</*use_iterator=*/true>(
+        seq_indices, weights, count, snapshot_handle)
+        .wait();
   }
 
-  void set_range(
+  void set_range_to_storage(
       const at::Tensor& weights,
       const int64_t start,
       const int64_t length) {
@@ -659,7 +665,128 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
     }
   }
 
-  folly::coro::Task<void> get_kv_db_async_impl(
+  void fill_from_row_storage(
+      int shard_id,
+      unsigned char* weights_data_ptr,
+      int64_t weights_row_index,
+      unsigned char* row_storage_data_ptr) {
+    int64_t row_width = elem_size_ * max_D_;
+    int64_t row_index;
+    initializers_[shard_id]->producer_queue_.dequeue(row_index);
+    std::copy(
+        &(row_storage_data_ptr[row_index * row_width]),
+        &(row_storage_data_ptr[row_index * row_width + row_width]),
+        &(weights_data_ptr[weights_row_index * row_width]));
+    initializers_[shard_id]->consumer_queue_.enqueue(row_index);
+  }
+
+  // use this iterator approach only when the keys in indices are contiguous and
+  // matches the key order as defined by the comparator. i.e. the values
+  // returned by the itertor are not thrown away. in other cases using an
+  // iterator doesn't provide performance benefits.
+  template <typename VALUE_T>
+  void ssd_get_weights_iterator(
+      const std::vector<rocksdb::Slice>& keys,
+      const std::vector<int32_t>& key_indices,
+      VALUE_T* weights_data_ptr,
+      std::vector<rocksdb::ColumnFamilyHandle*>& cfs,
+      int shard_id,
+      rocksdb::ReadOptions local_ro,
+      VALUE_T* row_storage_data_ptr) {
+    auto iterator_ro = local_ro;
+    iterator_ro.total_order_seek = true; // disable prefix filter
+    auto it = dbs_[shard_id]->NewIterator(iterator_ro, cfs[0]);
+
+    it->Seek(keys[0]);
+    for (auto j = 0; j < keys.size(); ++j) {
+      int64_t i = key_indices[j];
+      if (!it->Valid()) {
+        CHECK(it->status().ok());
+        // the iterator reaches the end of the data,
+        // generate a new row on the fly
+        fill_from_row_storage(
+            shard_id,
+            reinterpret_cast<unsigned char*>(weights_data_ptr),
+            i,
+            reinterpret_cast<unsigned char*>(row_storage_data_ptr));
+        continue;
+      }
+
+      const rocksdb::Slice& expected_key = keys[j];
+      if (it->key().compare(expected_key) != 0) {
+        // the row being looked up doesn't exist in
+        // RocksDB, generate a new row on the fly
+        fill_from_row_storage(
+            shard_id,
+            reinterpret_cast<unsigned char*>(weights_data_ptr),
+            i,
+            reinterpret_cast<unsigned char*>(row_storage_data_ptr));
+      } else {
+        const auto value = it->value();
+        if (!std::is_same<VALUE_T, uint8_t>::value) {
+          CHECK_EQ(value.size(), max_D_ * sizeof(VALUE_T));
+        }
+        std::copy(
+            reinterpret_cast<const VALUE_T*>(value.data()),
+            reinterpret_cast<const VALUE_T*>(value.data() + value.size()),
+            &(weights_data_ptr[i * max_D_]));
+
+        it->Next();
+      }
+    }
+
+    delete it;
+  }
+
+  template <typename VALUE_T>
+  void ssd_get_weights_multi_get(
+      const std::vector<rocksdb::Slice>& keys,
+      const std::vector<int32_t>& key_indices,
+      VALUE_T* weights_data_ptr,
+      std::vector<rocksdb::ColumnFamilyHandle*>& cfs,
+      int shard_id,
+      rocksdb::ReadOptions local_ro,
+      VALUE_T* row_storage_data_ptr) {
+    FOLLY_DECLARE_REUSED(values, std::vector<rocksdb::PinnableSlice>);
+    FOLLY_DECLARE_REUSED(statuses, std::vector<rocksdb::Status>);
+    values.resize(keys.size());
+    statuses.resize(keys.size());
+    dbs_[shard_id]->MultiGet(
+        local_ro,
+        keys.size(),
+        cfs.data(),
+        keys.data(),
+        values.data(),
+        statuses.data(),
+        /*sorted_input=*/true);
+    for (auto j = 0; j < keys.size(); ++j) {
+      const auto& s = statuses[j];
+      int64_t i = key_indices[j];
+      const auto& value = values[j];
+      if (s.ok()) {
+        if (!std::is_same<VALUE_T, uint8_t>::value) {
+          CHECK_EQ(value.size(), max_D_ * sizeof(VALUE_T));
+        }
+        std::copy(
+            reinterpret_cast<const VALUE_T*>(value.data()),
+            reinterpret_cast<const VALUE_T*>(value.data() + value.size()),
+            &(weights_data_ptr[i * max_D_]));
+      } else {
+        CHECK(s.IsNotFound());
+        fill_from_row_storage(
+            shard_id,
+            reinterpret_cast<unsigned char*>(weights_data_ptr),
+            i,
+            reinterpret_cast<unsigned char*>(row_storage_data_ptr));
+      }
+    }
+  }
+
+  // use_iterator=true is only efficient when the key sequence being looked up
+  // matches the key sequence matches the key sequence obtained through the
+  // iterator. see the comment for ssd_get_weights_iterator.
+  template <bool use_iterator>
+  folly::SemiFuture<std::vector<folly::Unit>> get_kv_db_async_impl(
       const at::Tensor& indices,
       const at::Tensor& weights,
       const at::Tensor& count,
@@ -668,8 +795,10 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
 #ifdef FBGEMM_FBCODE
     auto start_ts = facebook::WallClockUtil::NowInUsecFast();
 #endif
-    std::vector<folly::coro::TaskWithExecutor<void>> tasks;
-    auto count_ = count.item().toLong();
+    std::vector<folly::Future<folly::Unit>> futures;
+    auto count_ = count.scalar_type() == at::ScalarType::Long
+        ? *(count.data_ptr<int64_t>())
+        : *(count.data_ptr<int32_t>());
 
     for (auto shard = 0; shard < dbs_.size(); ++shard) {
       // Get a snapshot for the shard
@@ -678,10 +807,9 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
           : snapshot_handle->get_snapshot_for_shard(shard);
       auto local_ro = ro_;
       local_ro.snapshot = snapshot;
-      tasks.emplace_back(
-          folly::coro::co_invoke(
-              [this, &indices, &weights, count_, shard, local_ro]() mutable
-              -> folly::coro::Task<void> {
+      auto f =
+          folly::via(executor_.get())
+              .thenValue([=, &indices, &weights](folly::Unit) {
                 FBGEMM_DISPATCH_FLOAT_HALF_AND_BYTE(
                     weights.scalar_type(), "ssd_get", [&] {
                       using value_t = scalar_t;
@@ -693,11 +821,12 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
                             auto indices_data_ptr = indices.data_ptr<index_t>();
                             auto D = weights.size(1);
                             CHECK_EQ(indices.size(0), weights.size(0));
+                            CHECK_EQ(D, max_D_);
                             auto weights_data_ptr = weights.data_ptr<value_t>();
                             FOLLY_DECLARE_REUSED(
                                 keys, std::vector<rocksdb::Slice>);
                             FOLLY_DECLARE_REUSED(
-                                shard_ids, std::vector<int32_t>);
+                                key_indices, std::vector<int32_t>);
                             FOLLY_DECLARE_REUSED(
                                 cfs, std::vector<rocksdb::ColumnFamilyHandle*>);
                             FOLLY_DECLARE_REUSED(
@@ -715,23 +844,23 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
                                   shard) {
                                 continue;
                               }
-                              shard_ids.push_back(i);
+                              key_indices.push_back(i);
                             }
+
+                            // bail if nothing to do
+                            if (key_indices.empty()) {
+                              return;
+                            }
+
                             std::sort(
-                                shard_ids.begin(),
-                                shard_ids.end(),
+                                key_indices.begin(),
+                                key_indices.end(),
                                 [&](int32_t lhs, int32_t rhs) {
-                                  const auto lhs_key = rocksdb::Slice(
-                                      reinterpret_cast<const char*>(
-                                          &(indices_data_ptr[lhs])),
-                                      sizeof(index_t));
-                                  const auto rhs_key = rocksdb::Slice(
-                                      reinterpret_cast<const char*>(
-                                          &(indices_data_ptr[rhs])),
-                                      sizeof(index_t));
-                                  return lhs_key.compare(rhs_key) < 0;
+                                  auto lhs_key = indices_data_ptr[lhs];
+                                  auto rhs_key = indices_data_ptr[rhs];
+                                  return lhs_key < rhs_key;
                                 });
-                            for (const auto& i : shard_ids) {
+                            for (const auto& i : key_indices) {
                               const auto key = rocksdb::Slice(
                                   reinterpret_cast<const char*>(
                                       &(indices_data_ptr[i])),
@@ -739,19 +868,9 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
                               keys.push_back(key);
                               cfs.push_back(dcf);
                             }
-                            CHECK_EQ(shard_ids.size(), keys.size());
-                            CHECK_EQ(shard_ids.size(), cfs.size());
+                            CHECK_EQ(key_indices.size(), keys.size());
+                            CHECK_EQ(key_indices.size(), cfs.size());
 
-                            values.resize(keys.size());
-                            statuses.resize(keys.size());
-                            dbs_[shard]->MultiGet(
-                                local_ro,
-                                keys.size(),
-                                cfs.data(),
-                                keys.data(),
-                                values.data(),
-                                statuses.data(),
-                                /*sorted_input=*/true);
                             const auto& init_storage =
                                 initializers_[shard]->row_storage_;
                             // Sanity check
@@ -765,45 +884,38 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
                                 ") types mismatch");
                             auto row_storage_data_ptr =
                                 init_storage.data_ptr<value_t>();
-                            for (auto j = 0; j < keys.size(); ++j) {
-                              const auto& s = statuses[j];
-                              int64_t i = shard_ids[j];
-                              const auto& value = values[j];
-                              if (s.ok()) {
-                                if (!std::is_same<value_t, uint8_t>::value) {
-                                  CHECK_EQ(value.size(), D * sizeof(value_t));
-                                }
-                                std::copy(
-                                    reinterpret_cast<const value_t*>(
-                                        value.data()),
-                                    reinterpret_cast<const value_t*>(
-                                        value.data() + value.size()),
-                                    &(weights_data_ptr[i * D]));
-                              } else {
-                                CHECK(s.IsNotFound());
-                                int64_t row_index;
-                                initializers_[shard]->producer_queue_.dequeue(
-                                    row_index);
-                                std::copy(
-                                    &(row_storage_data_ptr[row_index * D]),
-                                    &(row_storage_data_ptr[row_index * D + D]),
-                                    &(weights_data_ptr[i * D]));
-                                initializers_[shard]->consumer_queue_.enqueue(
-                                    row_index);
-                              }
+                            if (use_iterator) {
+                              ssd_get_weights_iterator(
+                                  keys,
+                                  key_indices,
+                                  weights_data_ptr,
+                                  cfs,
+                                  shard,
+                                  local_ro,
+                                  row_storage_data_ptr);
+                            } else {
+                              ssd_get_weights_multi_get(
+                                  keys,
+                                  key_indices,
+                                  weights_data_ptr,
+                                  cfs,
+                                  shard,
+                                  local_ro,
+                                  row_storage_data_ptr);
                             }
                           });
                     });
-                co_return;
-              })
-              .scheduleOn(executor_.get()));
+              });
+      futures.push_back(std::move(f));
     }
-    co_await folly::coro::collectAllRange(std::move(tasks));
 #ifdef FBGEMM_FBCODE
     auto duration = facebook::WallClockUtil::NowInUsecFast() - start_ts;
     read_total_duration_ += duration;
 #endif
+    return folly::collect(futures);
   }
+
+  friend class SnapshotHandle;
 
   std::vector<std::unique_ptr<rocksdb::DB>> dbs_;
   std::vector<std::unique_ptr<Initializer>> initializers_;
@@ -828,60 +940,7 @@ class EmbeddingRocksDB : public kv_db::EmbeddingKVDB {
   std::unordered_map<const SnapshotHandle*, std::unique_ptr<SnapshotHandle>>
       snapshots_;
   int64_t max_D_;
+  int64_t elem_size_;
 }; // class EmbeddingRocksDB
-
-class EmbeddingRocksDBWrapper;
-
-struct EmbeddingSnapshotHandleWrapper : public torch::jit::CustomClassHolder {
-  explicit EmbeddingSnapshotHandleWrapper(
-      const EmbeddingRocksDB::SnapshotHandle* handle,
-      std::shared_ptr<EmbeddingRocksDB> db)
-      : handle(handle), db(std::move(db)) {}
-
-  ~EmbeddingSnapshotHandleWrapper() {
-    db->release_snapshot(handle);
-  }
-
-  const EmbeddingRocksDB::SnapshotHandle* handle;
-  std::shared_ptr<EmbeddingRocksDB> db;
-};
-
-class KVTensorWrapper : public torch::jit::CustomClassHolder {
- public:
-  explicit KVTensorWrapper(
-      c10::intrusive_ptr<EmbeddingRocksDBWrapper> db,
-      std::vector<int64_t> shape,
-      int64_t dtype,
-      int64_t row_offset,
-      std::optional<c10::intrusive_ptr<EmbeddingSnapshotHandleWrapper>>
-          snapshot_handle);
-
-  at::Tensor narrow(int64_t dim, int64_t start, int64_t length);
-
-  void set_range(
-      int64_t dim,
-      const int64_t start,
-      const int64_t length,
-      const at::Tensor& weights);
-
-  c10::IntArrayRef size();
-
-  c10::ScalarType dtype();
-
-  std::string_view dtype_str();
-
-  c10::Device device();
-
-  std::string device_str();
-
-  std::string layout_str();
-
- private:
-  std::shared_ptr<EmbeddingRocksDB> db_;
-  c10::intrusive_ptr<EmbeddingSnapshotHandleWrapper> snapshot_handle_;
-  at::TensorOptions options_;
-  std::vector<int64_t> shape_;
-  int64_t row_offset_;
-};
 
 } // namespace ssd

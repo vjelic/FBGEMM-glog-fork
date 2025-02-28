@@ -44,6 +44,9 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
     DenseTableBatchedEmbeddingBagsCodegen,
     SplitTableBatchedEmbeddingBagsCodegen,
 )
+from fbgemm_gpu.split_table_batched_embeddings_ops_training_common import (
+    generate_vbe_metadata,
+)
 from fbgemm_gpu.tbe.ssd import SSDTableBatchedEmbeddingBags
 from fbgemm_gpu.tbe.utils import generate_requests, get_device, round_up, TBERequest
 from torch import Tensor
@@ -67,25 +70,44 @@ open_source: bool = getattr(fbgemm_gpu, "open_source", False)
 if open_source:
     # pyre-ignore[21]
     from bench_utils import (
+        benchmark_eval_compression,
         benchmark_pipelined_requests,
         benchmark_requests,
         benchmark_requests_refer,
         benchmark_torch_function,
         benchmark_vbe,
         fill_random_scale_bias,
+        warmup,
     )
 else:
     from fbgemm_gpu.bench.bench_utils import (
+        benchmark_eval_compression,
         benchmark_pipelined_requests,
         benchmark_requests,
         benchmark_requests_refer,
         benchmark_torch_function,
         benchmark_vbe,
         fill_random_scale_bias,
+        warmup,
     )
 
 
 logging.basicConfig(level=logging.DEBUG)
+
+
+def kineto_trace_profiler(p: profile, trace_info: tuple[str, str, str, str]) -> float:
+    phase, trace_url, tbe_type, kern_name = trace_info
+    p.export_chrome_trace(
+        trace_url.format(tbe_type=tbe_type, phase=phase, ospid=os.getpid())
+    )
+    kernel_time = 0
+    for event in p.key_averages():
+        # Sum the total time of forward kernel runs
+        if kern_name in event.key:
+            kernel_time += event.device_time
+    assert kernel_time > 0
+    print(f"Total CUDA time: {kernel_time:.2f} ")
+    return kernel_time
 
 
 @click.group()
@@ -100,6 +122,7 @@ def cli() -> None:
 @click.option("--batch-size", default=512)
 @click.option("--embedding-dim", default=128)
 @click.option("--weights-precision", type=SparseType, default=SparseType.FP32)
+@click.option("--cache-precision", type=SparseType, default=None)
 @click.option("--stoc", is_flag=True, default=False)
 @click.option("--iters", default=100)
 @click.option("--warmup-runs", default=0)
@@ -120,6 +143,7 @@ def cli() -> None:
 @click.option("--flush-gpu-cache-size-mb", default=0)
 @click.option("--dense", is_flag=True, default=False)
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP32)
+@click.option("--indices-dtype", type=click.Choice(["32", "64"]), default="64")
 @click.option("--requests_data_file", type=str, default=None)
 @click.option("--tables", type=str, default=None)
 @click.option("--export-trace", is_flag=True, default=False)
@@ -140,12 +164,19 @@ def cli() -> None:
 )
 @click.option("--cache-load-factor", default=0.2)
 @click.option("--use_experimental_tbe", default=True)
+@click.option(
+    "--num-requests",
+    default=-1,
+    help="Number of input batches to generate. If the value is smaller than "
+    "iters, the benchmark will reuse the input batches",
+)
 def device(  # noqa C901
     alpha: float,
     bag_size: int,
     batch_size: int,
     embedding_dim: int,
     weights_precision: SparseType,
+    cache_precision: Optional[SparseType],
     stoc: bool,
     iters: int,
     warmup_runs: int,
@@ -162,6 +193,7 @@ def device(  # noqa C901
     flush_gpu_cache_size_mb: int,
     dense: bool,
     output_dtype: SparseType,
+    indices_dtype: str,
     requests_data_file: Optional[str],
     tables: Optional[str],
     export_trace: bool,
@@ -171,8 +203,13 @@ def device(  # noqa C901
     ssd_prefix: str,
     cache_load_factor: float,
     use_experimental_tbe: bool,
+    num_requests: int,
 ) -> None:
     assert not ssd or not dense, "--ssd cannot be used together with --dense"
+    num_requests = iters if num_requests == -1 else num_requests
+    indices_dtype_torch: torch.dtype = (
+        torch.int32 if int(indices_dtype) == 32 else torch.int64
+    )
     np.random.seed(42)
     torch.manual_seed(42)
     B = batch_size
@@ -284,7 +321,9 @@ def device(  # noqa C901
                 )
                 for d in Ds
             ],
-            cache_precision=weights_precision,
+            cache_precision=(
+                weights_precision if cache_precision is None else cache_precision
+            ),
             cache_algorithm=CacheAlgorithm.LRU,
             cache_load_factor=cache_load_factor,
             use_experimental_tbe=use_experimental_tbe,
@@ -321,9 +360,8 @@ def device(  # noqa C901
     logging.info(
         f"Accessed weights per batch: {B * sum(Ds) * L * param_size_multiplier / 1.0e9: .2f} GB"
     )
-
     requests = generate_requests(
-        iters,
+        num_requests,
         B,
         T,
         L,
@@ -334,6 +372,8 @@ def device(  # noqa C901
         requests_data_file=requests_data_file,
         tables=tables,
         use_cpu=not torch.cuda.is_available(),
+        index_dtype=torch.long,
+        offset_dtype=torch.long,
     )
 
     def _kineto_trace_handler(p: profile, phase: str) -> None:
@@ -350,13 +390,14 @@ def device(  # noqa C901
         time_per_iter = benchmark_requests(
             requests,
             lambda indices, offsets, per_sample_weights: emb.forward(
-                indices.long(),
-                offsets.long(),
+                indices.to(dtype=indices_dtype_torch),
+                offsets.to(dtype=indices_dtype_torch),
                 per_sample_weights,
                 feature_requires_grad=feature_requires_grad,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
             num_warmups=warmup_runs,
+            iters=iters,
         )
 
     logging.info(
@@ -382,8 +423,8 @@ def device(  # noqa C901
         time_per_iter = benchmark_requests(
             requests,
             lambda indices, offsets, per_sample_weights: emb(
-                indices.long(),
-                offsets.long(),
+                indices.to(dtype=indices_dtype_torch),
+                offsets.to(dtype=indices_dtype_torch),
                 per_sample_weights,
                 feature_requires_grad=feature_requires_grad,
             ),
@@ -391,6 +432,7 @@ def device(  # noqa C901
             bwd_only=True,
             grad=grad_output,
             num_warmups=warmup_runs,
+            iters=iters,
         )
 
     logging.info(
@@ -573,6 +615,8 @@ def uvm(
         weighted=weighted,
         requests_data_file=requests_data_file,
         tables=tables,
+        index_dtype=torch.long,
+        offset_dtype=torch.long,
     )
 
     requests_gpu = None
@@ -588,6 +632,8 @@ def uvm(
             weighted=False,
             requests_data_file=requests_data_file,
             tables=tables,
+            index_dtype=torch.long,
+            offset_dtype=torch.long,
         )
 
     param_size_multiplier = weights_precision.bit_rate() / 8.0
@@ -657,8 +703,8 @@ def uvm(
             emb_uvm.local_uvm_cache_stats[4] = 0 if no_conflict_misses else 1
 
         emb_uvm.forward(
-            indices.long(),
-            offsets.long(),
+            indices,
+            offsets,
             per_sample_weights,
         )
 
@@ -703,8 +749,8 @@ def uvm(
         time_per_iter = benchmark_requests(
             requests_gpu,
             lambda indices, offsets, per_sample_weights: emb_gpu.forward(
-                indices.long(),
-                offsets.long(),
+                indices,
+                offsets,
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
@@ -724,8 +770,8 @@ def uvm(
         time_per_iter = benchmark_requests(
             requests,
             lambda indices, offsets, per_sample_weights: emb_mixed.forward(
-                indices.long(),
-                offsets.long(),
+                indices,
+                offsets,
                 per_sample_weights,
             ),
             flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
@@ -874,6 +920,8 @@ def cache(  # noqa C901
         weighted=weighted,
         requests_data_file=requests_data_file,
         tables=tables,
+        index_dtype=torch.long,
+        offset_dtype=torch.long,
     )
     warmup_requests, requests = requests[:iters], requests[iters:]
     grad_output = torch.randn(B, sum(Ds)).cuda()
@@ -881,7 +929,7 @@ def cache(  # noqa C901
     time_per_iter = benchmark_requests(
         requests,
         lambda indices, offsets, per_sample_weights: emb_nc(
-            indices.long(), offsets.long(), per_sample_weights
+            indices, offsets, per_sample_weights
         ).backward(grad_output),
         flush_gpu_cache_size_mb=flush_gpu_cache_size_mb,
         num_warmups=warmup_runs,
@@ -895,7 +943,7 @@ def cache(  # noqa C901
     # warm up
     for req in warmup_requests:
         indices, offsets = req.unpack_2()
-        emb.forward(indices.long(), offsets.long())
+        emb.forward(indices, offsets)
     # get cache miss rate (forward and backward) and exchanged cache lines (prefetch)
     cache_misses = []
     exchanged_cache_lines = []
@@ -906,7 +954,7 @@ def cache(  # noqa C901
         #  Optional[memory_format] = ...) -> Tensor, Tensor, Module]` is not a
         #  function.
         old_lxu_cache_state = emb.lxu_cache_state.clone()
-        emb.prefetch(indices.long(), offsets.long())
+        emb.prefetch(indices, offsets)
         exchanged_cache_lines.append(
             # pyre-fixme[16]: Item `bool` of `bool | Tensor` has no attribute `sum`.
             (emb.lxu_cache_state != old_lxu_cache_state)
@@ -914,7 +962,7 @@ def cache(  # noqa C901
             .item()
         )
         cache_misses.append((emb.lxu_cache_locations_list[0] == NOT_FOUND).sum().item())
-        emb.forward(indices.long(), offsets.long())
+        emb.forward(indices, offsets)
     logging.info(
         f"Exchanged cache lines -- mean: {sum(exchanged_cache_lines) / len(requests): .2f}, "
         f"max: {max(exchanged_cache_lines)}, min: {min(exchanged_cache_lines)}"
@@ -1142,6 +1190,7 @@ def nbit_cpu(  # noqa C901
 @click.option("--iters", default=100)
 @click.option("--runs-of-iters", default=5)
 @click.option("--warmup-runs", default=2)
+@click.option("--warmup-ms", type=int, default=None)
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP16)
 @click.option("--report-aibench", is_flag=True)
 @click.option("--run-reference", is_flag=True, default=False)
@@ -1154,6 +1203,17 @@ def nbit_cpu(  # noqa C901
     "--trace-url",
     type=str,
     default="{tbe_type}_tbe_{phase}_trace_{ospid}.json",
+)
+@click.option(
+    "--warmup-runs",
+    default=2,
+    help="Number of warmup runs. Ignored if --warmup-ms is set.",
+)
+@click.option(
+    "--warmup-ms",
+    type=int,
+    default=None,
+    help="Warmup duration in milliseconds. Disables the --run-nums option.",
 )
 def nbit_device(  # noqa C901
     alpha: float,
@@ -1175,7 +1235,6 @@ def nbit_device(  # noqa C901
     check_median: bool,
     iters: int,
     runs_of_iters: int,
-    warmup_runs: int,
     output_dtype: SparseType,
     report_aibench: bool,
     run_reference: bool,
@@ -1185,6 +1244,8 @@ def nbit_device(  # noqa C901
     fp8_exponent_bias: Optional[int],
     export_trace: bool,
     trace_url: str,
+    warmup_runs: int,
+    warmup_ms: Optional[int],
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -1302,6 +1363,7 @@ def nbit_device(  # noqa C901
                 per_sample_weights,
             ),
             check_median=check_median,
+            warmup_ms=warmup_ms,
         )
 
         # free up GPU memory
@@ -1331,18 +1393,6 @@ def nbit_device(  # noqa C901
         f"Memory Usage For Pruning: {mem_for_pruning / 1.0e9:.0f} GB"
     )
 
-    # Get trace for one run of iter
-    tbe_type: str = "split"
-
-    def _kineto_trace_handler(p: profile, phase: str) -> None:
-        p.export_chrome_trace(
-            trace_url.format(tbe_type=tbe_type, phase=phase, ospid=os.getpid())
-        )
-
-    # pyre-ignore[3]
-    def context_factory(on_trace_ready: Callable[[profile], None]):
-        return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
-
     requests = generate_requests(
         iters,
         B,
@@ -1360,7 +1410,35 @@ def nbit_device(  # noqa C901
         for req in requests
     ]
 
-    with context_factory(lambda p: _kineto_trace_handler(p, "fwd")):
+    # pyre-ignore[3]
+    def context_factory(on_trace_ready: Callable[[profile], None]):
+        return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
+
+    # Get trace for one run of iter
+    tbe_type: str = "split"
+    # input of the kineto_trace_profiler
+    trace_info = ("fwd", trace_url, tbe_type, "embedding_codegen_forward")
+    time_dict = {"kernel_time": None}  # dict to hold the kernel time
+
+    # warm-up right before profiling
+    # warmup_ms prioritized over warmup_runs
+    if warmup_ms or warmup_runs:
+        warmup(
+            requests[0],
+            # pyre-ignore[6]
+            warmup_ms,
+            warmup_runs,
+            lambda indices, offsets, per_sample_weights: emb.forward(
+                indices.int(),
+                offsets.int(),
+                per_sample_weights,
+            ),
+        )
+
+    with context_factory(
+        # pyre-ignore[6]
+        lambda p: time_dict.update(kernel_time=kineto_trace_profiler(p, trace_info))
+    ):
         # forward
         time_per_iter = benchmark_requests(
             requests,
@@ -1371,6 +1449,21 @@ def nbit_device(  # noqa C901
             ),
             check_median=check_median,
         )
+
+    if export_trace:
+        kernel_time = time_dict["kernel_time"]
+        # pyre-ignore[58]
+        bandwidth = read_write_bytes / kernel_time / 1.0e3
+
+        logging.info(
+            f"kineto profiled stats: "
+            f"{weights_precision} Forward, B: {B}, "
+            f"E: {E}, T: {T}, D: {D}, L: {L}, W: {weighted}, "
+            f"BW: {bandwidth: .2f} GB/s, "  # noqa: B950
+            f"Time: {kernel_time:.0f}us, "
+            f"Memory Usage For Pruning: {mem_for_pruning / 1.0e9:.0f} GB"
+        )
+
     # free up GPU memory
     del requests
 
@@ -1472,12 +1565,28 @@ def nbit_device(  # noqa C901
 @click.option("--check-median", is_flag=True, default=True)
 @click.option("--iters", default=100)
 @click.option("--runs-of-iters", default=5)
-@click.option("--warmup-runs", default=2)
 @click.option("--output-dtype", type=SparseType, default=SparseType.FP16)
 @click.option("--report-aibench", is_flag=True)
 @click.option("--fp8-exponent-bits", type=int, default=None)
 @click.option("--fp8-exponent-bias", type=int, default=None)
 @click.option("--use-cpu", is_flag=True, default=False)
+@click.option("--export-trace", is_flag=True, default=False)
+@click.option(
+    "--trace-url",
+    type=str,
+    default="{tbe_type}_tbe_spec_{phase}_trace_{ospid}.json",
+)
+@click.option(
+    "--warmup-runs",
+    default=2,
+    help="Number of warmup runs. Ignored if --warmup-ms is set.",
+)
+@click.option(
+    "--warmup-ms",
+    type=int,
+    default=None,
+    help="Warmup duration in milliseconds. Disables the --run-nums option.",
+)
 def nbit_device_with_spec(  # noqa C901
     alpha: float,
     bag_size_list: str,
@@ -1497,12 +1606,15 @@ def nbit_device_with_spec(  # noqa C901
     check_median: bool,
     iters: int,
     runs_of_iters: int,
-    warmup_runs: int,
     output_dtype: SparseType,
     report_aibench: bool,
     fp8_exponent_bits: Optional[int],
     fp8_exponent_bias: Optional[int],
     use_cpu: bool,
+    export_trace: bool,
+    trace_url: str,
+    warmup_runs: int,
+    warmup_ms: Optional[int],
 ) -> None:
     np.random.seed(42)
     torch.manual_seed(42)
@@ -1614,6 +1726,7 @@ def nbit_device_with_spec(  # noqa C901
     )
 
     times = []
+    kineto_request = []
     for i in range(runs_of_iters):
         # Generate a request for each table then combine
         all_requests = {
@@ -1690,7 +1803,12 @@ def nbit_device_with_spec(  # noqa C901
                     per_sample_weights,
                 ),
                 check_median=check_median,
+                warmup_ms=warmup_ms,
             )
+
+        # copy the request of last iteration for kineto profile benchmark
+        if i == runs_of_iters - 1:
+            kineto_request = requests
 
         # free up memory
         del requests
@@ -1718,6 +1836,63 @@ def nbit_device_with_spec(  # noqa C901
         f"Time: {time_per_iter * 1.0e6:.0f}us, "
         f"Memory Usage For Pruning: {mem_for_pruning / 1.0e9:.0f} GB"
     )
+
+    # pyre-ignore[3]
+    def context_factory(on_trace_ready: Callable[[profile], None]):
+        return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
+
+    if not use_cpu:
+        # profile with kineto
+        tbe_type: str = "split"
+        time_dict = {"kernel_time": None}  # Shared variable to hold the kernel time
+        trace_info = ("fwd", trace_url, tbe_type, "embedding_codegen_forward")
+
+        # warm-up right before profiling
+        # warmup_ms prioritized over warmup_runs
+        if warmup_ms or warmup_runs:
+            warmup(
+                kineto_request[0],
+                # pyre-ignore[6]
+                warmup_ms,
+                warmup_runs,
+                lambda indices, offsets, per_sample_weights: emb.forward(
+                    indices.int(),
+                    offsets.int(),
+                    per_sample_weights,
+                ),
+            )
+
+        with context_factory(
+            # pyre-ignore[6]
+            lambda p: time_dict.update(kernel_time=kineto_trace_profiler(p, trace_info))
+        ):
+            # forward
+            time_per_iter = benchmark_requests(
+                kineto_request,
+                lambda indices, offsets, per_sample_weights: emb.forward(
+                    indices.int(),
+                    offsets.int(),
+                    per_sample_weights,
+                ),
+                check_median=check_median,
+            )
+
+        if export_trace:
+            kernel_time = time_dict["kernel_time"]
+            # pyre-ignore[6]
+            bandwidth = read_write_bytes / kernel_time / 1.0e3
+
+            logging.info(
+                f"kineto profiled stats: "
+                f"{weights_precision} Forward, B: {B}, "
+                f"E: {E}, T: {T}, D: {D}, L: {L}, W: {weighted}, "
+                f"BW: {bandwidth: .2f} GB/s, "  # noqa: B950
+                f"Time: {kernel_time:.0f}us, "
+                f"Memory Usage For Pruning: {mem_for_pruning / 1.0e9:.0f} GB"
+            )
+
+    # free up memory
+    del kineto_request
 
     if report_aibench and haveAIBench:
         print(
@@ -2830,6 +3005,8 @@ def bounds_check_indices(  # noqa C901
             E,
             requests_data_file=requests_data_file,
             tables=tables,
+            index_dtype=torch.long,
+            offset_dtype=torch.long,
         )
         B_offsets = B_offsets.to(get_device()).to(torch.int)
     else:
@@ -2846,6 +3023,8 @@ def bounds_check_indices(  # noqa C901
             E,
             requests_data_file=requests_data_file,
             tables=tables,
+            index_dtype=torch.long,
+            offset_dtype=torch.long,
         )
 
     warning = torch.tensor([0]).long().to(get_device())
@@ -2858,18 +3037,56 @@ def bounds_check_indices(  # noqa C901
     def context_factory(on_trace_ready: Callable[[profile], None]):
         return profile(on_trace_ready=on_trace_ready) if export_trace else nullcontext()
 
+    if is_vbe:
+        offsets = requests[0].offsets
+        vbe_metadata = generate_vbe_metadata(
+            offsets,
+            [[b] for b in Bs],
+            pooling_mode=PoolingMode.SUM,
+            feature_dims_cpu=torch.tensor(
+                [-1] * T, device="cpu", dtype=torch.int64
+            ),  # unused
+            device=get_device(),
+        )
+        assert vbe_metadata.B_offsets is not None
+        info_B_num_bits, info_B_mask = torch.ops.fbgemm.get_infos_metadata(
+            vbe_metadata.B_offsets,  # unused tensor
+            vbe_metadata.max_B,
+            vbe_metadata.B_offsets.numel() - 1,  # T
+        )
+        row_output_offsets, b_t_map = torch.ops.fbgemm.generate_vbe_metadata(
+            vbe_metadata.B_offsets,
+            vbe_metadata.B_offsets_rank_per_feature,
+            vbe_metadata.output_offsets_feature_rank,
+            torch.tensor(
+                [-1] * (T + 1), device=get_device(), dtype=torch.int
+            ),  # unused D_offsets
+            -1,  # unused max_D
+            False,  # nobag
+            vbe_metadata.max_B_feature_rank,
+            info_B_num_bits,
+            offsets.numel() - 1,  # total_B
+        )
+    else:
+        b_t_map = None
+        info_B_num_bits = -1
+        info_B_mask = -1
+
     with context_factory(lambda p: _kineto_trace_handler(p)):
         # forward
         time_per_iter = benchmark_requests(
             requests,
             lambda indices, offsets, _: torch.ops.fbgemm.bounds_check_indices(
                 rows_per_table,
-                indices.long(),
-                offsets.long(),
+                indices,
+                offsets,
                 BoundsCheckMode(bounds_check_mode),
                 warning,
                 B_offsets=B_offsets,
                 max_B=max_B,
+                b_t_map=b_t_map,
+                info_B_num_bits=info_B_num_bits,
+                info_B_mask=info_B_mask,
             ),
             num_warmups=warmup_runs,
         )
@@ -3231,6 +3448,8 @@ def device_with_spec(  # noqa C901
             # pyre-fixme[61]: `sigma_Ls` is undefined, or not always defined.
             sigma_L=sigma_Ls[t] if use_variable_bag_sizes else None,
             zipf_oversample_ratio=3 if Ls[t] > 5 else 5,
+            index_dtype=torch.long,
+            offset_dtype=torch.long,
         )
         for i, req in enumerate(requests):
             indices, offsets, weights = req.unpack_3()
@@ -3289,8 +3508,8 @@ def device_with_spec(  # noqa C901
     time_per_iter = benchmark_requests(
         requests,
         lambda indices, offsets, per_sample_weights: emb.forward(
-            indices.long(),
-            offsets.long(),
+            indices,
+            offsets,
             per_sample_weights,
             feature_requires_grad=feature_requires_grad,
         ),
@@ -3319,8 +3538,8 @@ def device_with_spec(  # noqa C901
     time_per_iter = benchmark_requests(
         requests,
         lambda indices, offsets, per_sample_weights: emb(
-            indices.long(),
-            offsets.long(),
+            indices,
+            offsets,
             per_sample_weights,
             feature_requires_grad=feature_requires_grad,
         ),
@@ -3349,9 +3568,9 @@ def _to_offsets(lengths: torch.Tensor) -> torch.Tensor:
 @click.option("--num-tables", default=20)
 @click.option("--compressed-tables", default=10)
 @click.option("--iters", default=100)
-@click.option("--use_experimental_tbe", default=True)
 
-def vbe(
+@click.option("--use_experimental_tbe", default=True)
+def benchmark_tbe_input_compression(
     batch_size: int,
     compressed_batch_size: int,
     embedding_dim: int,
@@ -3405,20 +3624,20 @@ def vbe(
     compressed_lengths = [L] * sum(compressed_batch_sizes)
     compressed_offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
         torch.tensor(compressed_lengths, device=get_device())
-    )
+    ).long()
     compressed_values = torch.randint(
         low=0,
         high=E,
         size=(sum(compressed_lengths),),
         device=get_device(),
-        dtype=torch.int32,
+        dtype=torch.long,
     )
 
     batch_sizes = [B] * T
     lengths = [L] * sum(batch_sizes)
     offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(
         torch.tensor(lengths, device=get_device())
-    )
+    ).long()
     reindex = []
 
     for t in range(cT):
@@ -3431,7 +3650,11 @@ def vbe(
     reindex.extend(range(cB * cT, (cB * cT) + (B * cT)))
 
     reindex = torch.tensor(reindex, device=get_device())
-    values = torch.index_select(compressed_values.reshape(-1, L), 0, reindex).flatten()
+    values = (
+        torch.index_select(compressed_values.reshape(-1, L), 0, reindex)
+        .flatten()
+        .long()
+    )
 
     requests = [
         (
@@ -3448,16 +3671,16 @@ def vbe(
         for _ in range(iters)
     ]
 
-    out = benchmark_vbe(
+    out = benchmark_eval_compression(
         requests,
         compressed_requests,
         baseline_func=lambda indices, offsets: emb.forward(
-            indices.long(),
-            offsets.long(),
+            indices,
+            offsets,
         ),
         compressed_func=lambda indices, offsets: emb.forward(
-            indices.long(),
-            offsets.long(),
+            indices,
+            offsets,
             batch_size_per_feature_per_rank=[[bs] for bs in compressed_batch_sizes],
         ),
         reindex=reindex,
@@ -3468,6 +3691,147 @@ def vbe(
         f"T: {out.avg * 1.0e6:.0f}us, fwd: {out.fwd * 1.0e6:.0f}us, bwd: {out.bwd * 1.0e6:.0f}us\n"
         f"Compressed, B: {B}, cB: {cB}, T: {T - cT}, cT: {cT}, D: {D}, L: {L}, "
         f"T: {out.compressed_avg * 1.0e6:.0f}us, fwd: {out.compressed_fwd * 1.0e6:.0f}us, reindex: {out.reindex * 1.0e6:.0f}us, bwd: {out.compressed_bwd * 1.0e6:.0f}us"
+    )
+
+
+@cli.command()
+@click.option("--batch-sizes", default="128000,1280")
+@click.option("--embedding-dims", default="1024,16")
+@click.option("--bag-sizes", default="5,2")
+@click.option("--nums-embeddings", default="10000,1000000")
+@click.option("--num-tables", default=2)
+@click.option("--iters", default=100)
+def vbe(
+    batch_sizes: str,
+    embedding_dims: str,
+    bag_sizes: str,
+    nums_embeddings: str,
+    num_tables: int,
+    iters: int,
+) -> None:
+    """
+    A benchmark function to evaluate variable batch-size table-batched
+    embedding (VBE) kernels for both forward and backward. Unlike TBE,
+    batch sizes can be specified per table for VBE.
+
+    Args:
+        batch_sizes (str):
+            A comma separated list of batch sizes for each table.
+
+        embedding_dims (str):
+            A comma separated list of embedding dimensions for each table.
+
+        bag_sizes (str):
+            A comma separated list of bag sizes for each table.
+
+        num_embeddings (str):
+            A comma separated list of number of embeddings for each table.
+
+        num_tables (int):
+            The number of tables.
+
+        iters (int):
+            The number of iterations to run the benchmark for.
+    """
+
+    torch.manual_seed(42)
+    Bs = [int(v) for v in batch_sizes.split(",")]
+    Ds = [int(v) for v in embedding_dims.split(",")]
+    Ls = [int(v) for v in bag_sizes.split(",")]
+    Es = [int(v) for v in nums_embeddings.split(",")]
+    T = num_tables
+
+    # All these variables must have the same length.
+    assert T == len(Bs)
+    assert T == len(Ds)
+    assert T == len(Ls)
+    assert T == len(Es)
+
+    optimizer = OptimType.EXACT_ROWWISE_ADAGRAD
+    managed_option = (
+        EmbeddingLocation.DEVICE
+        if torch.cuda.is_available()
+        else EmbeddingLocation.HOST
+    )
+    pooling_mode = PoolingMode.SUM
+
+    emb = SplitTableBatchedEmbeddingBagsCodegen(
+        [
+            (
+                E,
+                D,
+                managed_option,
+                ComputeDevice.CUDA,
+            )
+            for E, D in zip(Es, Ds)
+        ],
+        optimizer=optimizer,
+        learning_rate=0.1,
+        eps=0.1,
+        weights_precision=SparseType.FP32,
+        stochastic_rounding=False,
+        output_dtype=SparseType.FP32,
+        pooling_mode=pooling_mode,
+        bounds_check_mode=BoundsCheckMode(BoundsCheckMode.NONE.value),
+    ).to(get_device())
+
+    lengths_list: List[torch.Tensor] = []
+    num_values_per_table: List[int] = []
+    for t, B in enumerate(Bs):
+        L = Ls[t]
+        # Assume a uniformly distributed random number in [0, 2L)
+        # On average it should be L.
+        lengths_list.append(
+            torch.randint(
+                low=0, high=2 * L, size=(B,), dtype=torch.int64, device=get_device()
+            )
+        )
+
+        # num_values is used later.
+        # Note: sum().tolist() returns a scalar value.
+        # pyre-ignore
+        num_values: int = torch.sum(lengths_list[-1]).tolist()
+        num_values_per_table.append(num_values)
+
+    lengths = torch.cat(lengths_list, 0)
+
+    # Convert lengths into offsets.
+    offsets = torch.ops.fbgemm.asynchronous_complete_cumsum(lengths).long()
+
+    # Set up values.
+    values_list: List[torch.Tensor] = []
+    for t, E in enumerate(Es):
+        # Assuming that an index distribution is uniform [0, E)
+        values_list.append(
+            torch.randint(
+                low=0,
+                high=E,
+                size=(num_values_per_table[t],),
+                dtype=torch.int32,
+                device=get_device(),
+            )
+        )
+    values = torch.cat(values_list, 0).long()
+
+    requests = [
+        (
+            values,
+            offsets,
+        )
+        for _ in range(iters)
+    ]
+
+    fwd_time_sec, bwd_time_sec = benchmark_vbe(
+        requests,
+        func=lambda indices, offsets: emb.forward(
+            indices,
+            offsets,
+            batch_size_per_feature_per_rank=[[B] for B in Bs],
+        ),
+    )
+    logging.info(
+        f"T: {T}, Bs: {Bs}, Ds: {Ds}, Ls: {Ls}, Es: {Es}\n"
+        f"fwd: {fwd_time_sec * 1.0e6:.0f}us, bwd: {bwd_time_sec * 1.0e6:.0f}us"
     )
 
 

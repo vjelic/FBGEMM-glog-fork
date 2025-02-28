@@ -432,7 +432,8 @@ at::Tensor fusednbitrowwise_to_half_cpu(
 at::Tensor fusednbitrowwise_to_float_or_half_cpu(
     const at::Tensor& input,
     const int64_t bit_rate,
-    const int64_t output_dtype);
+    const int64_t output_dtype,
+    const bool scale_bias_last = true);
 
 at::Tensor quantize_mx_cuda(
     const at::Tensor& input,
@@ -902,6 +903,29 @@ at::Tensor pack_segments_forward_cuda(
     const at::Tensor& t_in,
     const at::Tensor& lengths,
     int64_t max_length);
+
+///@ingroup sparse-data-cpu
+std::tuple<at::Tensor, std::optional<at::Tensor>> pack_segments_cpu_v2(
+    const at::Tensor& t_in,
+    const at::Tensor& lengths,
+    int64_t max_length,
+    const bool pad_minf,
+    const bool return_presence_mask);
+
+///@ingroup sparse-data-cuda
+std::tuple<at::Tensor, std::optional<at::Tensor>> pack_segments_cuda_v2(
+    const at::Tensor& t_in,
+    const at::Tensor& lengths,
+    int64_t max_length,
+    const bool pad_minf,
+    const bool return_presence_mask);
+
+std::tuple<at::Tensor, std::optional<at::Tensor>> pack_segments_forward_cuda_v2(
+    const at::Tensor& t_in,
+    const at::Tensor& lengths,
+    int64_t max_length,
+    const bool pad_minf,
+    const bool return_presence_mask);
 
 at::Tensor pack_segments_backward_cuda(
     const at::Tensor& data,

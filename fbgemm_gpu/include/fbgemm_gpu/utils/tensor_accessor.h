@@ -19,10 +19,39 @@
 #include <cstddef>
 #include <cstdint>
 
+////////////////////////////////////////////////////////////////////////////////
+// Extended TensorAccessor
+//
+// This file contains TensorAccessor and PackedTensorAccessor implementations
+// that are used in FBGEMM_GPU for additional bounds checks that are not
+// available in the standard ATen implementation. Using the builder macro
+// MAKE_TA_WITH_NAME and MAKE_PTA_WITH_NAME, bounds checks can be enabled using
+// the FBGEMM_GPU_MEMCHECK flag.
+//
+//  https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/core/TensorAccessor.h
+//  https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/core/TensorBase.h
+////////////////////////////////////////////////////////////////////////////////
+
 namespace fbgemm_gpu {
 
-static constexpr size_t PTR_NAME_MAX_LEN = 16;
-static constexpr size_t FUNC_NAME_MAX_LEN = 64;
+static constexpr size_t PTR_NAME_MAX_LEN = 32;
+static constexpr size_t FUNC_NAME_MAX_LEN = 128;
+
+C10_HOST_DEVICE inline void
+copy_str(char* dst, const char* src, const size_t max_len) {
+  // Count src buffer length up to max_len
+  size_t len = 0;
+  for (len = 0; src[len] != 0 && len < max_len; len++) {
+    // no action - calculating string length
+  }
+  len = len < (max_len - 1) ? len : (max_len - 1);
+
+  // Copy src to dst
+  for (auto i = 0; i < len; i++) {
+    dst[i] = src[i];
+  }
+  dst[len] = '\0';
+}
 
 // The PtrTraits argument to the TensorAccessor/GenericPackedTensorAccessor
 // is used to enable the __restrict__ keyword/modifier for the data
@@ -39,6 +68,10 @@ struct RestrictPtrTraits {
 };
 #endif
 
+////////////////////////////////////////////////////////////////////////////////
+// *TensorAccessor (For CPU Use)
+////////////////////////////////////////////////////////////////////////////////
+
 // TensorAccessorBase and TensorAccessor are used for both CPU and CUDA tensors.
 // For CUDA tensors it is used in device code (only). This means that we
 // restrict ourselves to functions and types available there (e.g.
@@ -49,7 +82,7 @@ struct RestrictPtrTraits {
 template <
     typename T,
     size_t N,
-    template <typename U> class PtrTraits = DefaultPtrTraits,
+    template <typename U> class PtrTraits = at::DefaultPtrTraits,
     typename index_t = int64_t>
 class TensorAccessorBase {
  public:
@@ -61,16 +94,17 @@ class TensorAccessorBase {
       const index_t* const strides,
       const char* const ptr_name,
       const char* const func_name)
-      : data_(data),
-        sizes_(sizes),
-        strides_(strides),
-        ptr_name_(ptr_name),
-        func_name_(func_name) {
-    numel_ = 1;
-    for (size_t d = 0; d < N; d++) {
-      numel_ += (sizes[d] - 1) * strides[d];
+      : data_(data), sizes_(sizes), strides_(strides) {
+    if (sizes && strides) {
+      numel_ = 1;
+      for (size_t d = 0; d < N; d++) {
+        numel_ += (sizes[d] - 1) * strides[d];
+      }
     }
+    copy_str(ptr_name_, ptr_name, PTR_NAME_MAX_LEN);
+    copy_str(func_name_, func_name, FUNC_NAME_MAX_LEN);
   }
+
   C10_HOST at::IntArrayRef sizes() const {
     return at::IntArrayRef(sizes_, N);
   }
@@ -89,17 +123,20 @@ class TensorAccessorBase {
   C10_HOST_DEVICE const PtrType data() const {
     return data_;
   }
+
   C10_HOST_DEVICE T& at(index_t idx) const {
     if (idx < 0) {
       printf(
-          "ERROR: idx < 0, tensor %s in %s, idx %lld\n",
+          "ERROR: idx < 0, tensor %s in %s, idx %ld\n",
           ptr_name_,
           func_name_,
           static_cast<int64_t>(idx));
+      // NOTE: CUDA_KERNEL_ASSERT appears to be a no-op when HIPified; need to
+      // figure a workaround for this.
       CUDA_KERNEL_ASSERT(idx >= 0)
     } else if (idx >= numel_) {
       printf(
-          "ERROR: idx >= numel, tensor %s in %s, idx %lld, numel %lld\n",
+          "ERROR: idx >= numel, tensor %s in %s, idx %ld, numel %ld\n",
           ptr_name_,
           func_name_,
           static_cast<int64_t>(idx),
@@ -114,8 +151,8 @@ class TensorAccessorBase {
   const index_t* const sizes_;
   const index_t* const strides_;
   index_t numel_;
-  const char* const ptr_name_;
-  const char* const func_name_;
+  char ptr_name_[PTR_NAME_MAX_LEN];
+  char func_name_[FUNC_NAME_MAX_LEN];
 };
 
 // The `TensorAccessor` is typically instantiated for CPU `Tensor`s using
@@ -125,7 +162,7 @@ class TensorAccessorBase {
 template <
     typename T,
     size_t N,
-    template <typename U> class PtrTraits = DefaultPtrTraits,
+    template <typename U> class PtrTraits = at::DefaultPtrTraits,
     typename index_t = int64_t>
 class TensorAccessor : public TensorAccessorBase<T, N, PtrTraits, index_t> {
  public:
@@ -183,15 +220,21 @@ class TensorAccessor<T, 1, PtrTraits, index_t>
             strides,
             ptr_name,
             func_name) {}
+
   C10_HOST_DEVICE T& operator[](index_t i) {
     // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     return this->at(this->strides_[0] * i);
   }
+
   C10_HOST_DEVICE const T& operator[](index_t i) const {
     // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
     return this->at(this->strides_[0] * i);
   }
 };
+
+////////////////////////////////////////////////////////////////////////////////
+// *PackedTensorAccessor (For CUDA Use)
+////////////////////////////////////////////////////////////////////////////////
 
 // GenericPackedTensorAccessorBase and GenericPackedTensorAccessor are used on
 // for CUDA `Tensor`s on the host and as In contrast to `TensorAccessor`s, they
@@ -218,10 +261,12 @@ class GenericPackedTensorAccessorBase {
       : data_(data) {
     std::copy(sizes, sizes + N, std::begin(sizes_));
     std::copy(strides, strides + N, std::begin(strides_));
-    // Compute numel_
-    numel_ = 1;
-    for (const auto d : c10::irange(N)) {
-      numel_ += (sizes[d] - 1) * strides[d];
+    if (sizes != nullptr && strides != nullptr) {
+      // Compute numel_
+      numel_ = 1;
+      for (const auto d : c10::irange(N)) {
+        numel_ += (sizes[d] - 1) * strides[d];
+      }
     }
     copy_str(ptr_name_, ptr_name, PTR_NAME_MAX_LEN);
     copy_str(func_name_, func_name, FUNC_NAME_MAX_LEN);
@@ -239,36 +284,32 @@ class GenericPackedTensorAccessorBase {
       const char* const ptr_name,
       const char* const func_name)
       : data_(data) {
-    for (const auto i : c10::irange(N)) {
-      this->sizes_[i] = sizes[i];
-      this->strides_[i] = strides[i];
-    }
-    // Compute numel_
-    numel_ = 1;
-    for (const auto d : c10::irange(N)) {
-      numel_ += (sizes[d] - 1) * strides[d];
+    if (sizes != nullptr && strides != nullptr) {
+      for (const auto i : c10::irange(N)) {
+        this->sizes_[i] = sizes[i];
+        this->strides_[i] = strides[i];
+      }
+      // Compute numel_
+      numel_ = 1;
+      for (const auto d : c10::irange(N)) {
+        numel_ += (sizes[d] - 1) * strides[d];
+      }
     }
     copy_str(ptr_name_, ptr_name, PTR_NAME_MAX_LEN);
     copy_str(func_name_, func_name, FUNC_NAME_MAX_LEN);
   }
 
-  C10_HOST void copy_str(char* dst, const char* src, const size_t max_len) {
-    const auto len = std::min(strlen(src), max_len - 1);
-    std::memcpy(dst, src, sizeof(char) * len);
-    dst[len] = '\0';
-  }
-
   C10_HOST_DEVICE T& at(index_t idx) const {
     if (idx < 0) {
       printf(
-          "ERROR: idx < 0, tensor %s in %s, idx %lld\n",
+          "ERROR: idx < 0, tensor %s in %s, idx %ld\n",
           ptr_name_,
           func_name_,
           static_cast<int64_t>(idx));
       CUDA_KERNEL_ASSERT(idx >= 0)
     } else if (idx >= numel_) {
       printf(
-          "ERROR: idx >= numel, tensor %s in %s, idx %lld, numel %lld\n",
+          "ERROR: idx >= numel, tensor %s in %s, idx %ld, numel %ld\n",
           ptr_name_,
           func_name_,
           static_cast<int64_t>(idx),
@@ -298,9 +339,17 @@ class GenericPackedTensorAccessorBase {
   index_t numel_;
   char ptr_name_[PTR_NAME_MAX_LEN];
   char func_name_[FUNC_NAME_MAX_LEN];
+
   C10_HOST void bounds_check_(index_t i) const {
     TORCH_CHECK_INDEX(
         0 <= i && i < index_t{N},
+#ifdef FBGEMM_GPU_MEMCHECK
+        "[ ",
+        func_name_,
+        " ][ ",
+        ptr_name_,
+        " ]: ",
+#endif
         "Index ",
         i,
         " is not within bounds of a tensor of dimension ",
@@ -487,6 +536,39 @@ inline at::ScalarType scalar_type_for() {
   return at::ScalarType::Undefined;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Tensor Checks with Descriptive Error Messages
+////////////////////////////////////////////////////////////////////////////////
+
+template <size_t N>
+inline void check_tensor_dim(
+    const at::TensorBase& tensor
+#ifdef FBGEMM_GPU_MEMCHECK
+    ,
+    const char* const func_name,
+    const char* const tensor_name
+#endif
+) {
+  TORCH_CHECK(
+      tensor.dim() == N,
+#ifdef FBGEMM_GPU_MEMCHECK
+      "[ ",
+      func_name,
+      " ]: ",
+#endif
+      "Expected tensor ",
+#ifdef FBGEMM_GPU_MEMCHECK
+      "'",
+      tensor_name,
+      "' ",
+#endif
+      "to have ",
+      N,
+      " dims, but found ",
+      tensor.dim(),
+      " instead!");
+}
+
 template <typename T>
 inline void check_scalar_type(
     const at::TensorBase& tensor
@@ -528,34 +610,121 @@ namespace pta = fbgemm_gpu;
 namespace pta = at;
 #endif
 
-#ifdef FBGEMM_GPU_MEMCHECK
 template <
     typename T,
     size_t N,
     template <typename U> class PtrTraits = at::DefaultPtrTraits,
     typename index_t = int64_t>
-fbgemm_gpu::GenericPackedTensorAccessor<T, N, PtrTraits, index_t>
-make_generic_packed_tensor_accessor(
+inline pta::TensorAccessor<T, N, PtrTraits, index_t> make_tensor_accessor(
+#ifdef FBGEMM_GPU_MEMCHECK
     const at::Tensor& tensor,
-    const char* const ptr_name,
+    const char* const tensor_name,
     const char* const func_name) {
+#else
+    const at::Tensor& tensor) {
+#endif
+
+  static_assert(
+      N > 0,
+      "Accessor is used for indexing tensor, for scalars use *data_ptr<T>()");
+
+  // If the tensor is defined, then check the tensor dimensions and scalar type
+  // before building and returning the accessor.
+  if (tensor.defined()) {
+    fbgemm_gpu::check_tensor_dim<N>(
+        tensor
+#ifdef FBGEMM_GPU_MEMCHECK
+        ,
+        func_name,
+        tensor_name
+#endif
+    );
+
+    fbgemm_gpu::check_scalar_type<T>(
+        tensor
+#ifdef FBGEMM_GPU_MEMCHECK
+        ,
+        func_name,
+        tensor_name
+#endif
+    );
+
+#ifdef FBGEMM_GPU_MEMCHECK
+    return fbgemm_gpu::TensorAccessor<T, N, PtrTraits, index_t>(
+        static_cast<typename PtrTraits<T>::PtrType>(tensor.data_ptr<T>()),
+        tensor.sizes().data(),
+        tensor.strides().data(),
+        tensor_name,
+        func_name);
+#else
+    return tensor.accessor<T, N>();
+#endif
+
+  } else {
+    // Else, just return a null tensor accessor - this is useful for cases where
+    // optionals are not used.
+
+#ifdef FBGEMM_GPU_MEMCHECK
+    return fbgemm_gpu::TensorAccessor<T, N, PtrTraits, index_t>(
+        nullptr, nullptr, nullptr, tensor_name, func_name);
+#else
+    return pta::TensorAccessor<T, N, PtrTraits, index_t>(
+        nullptr, nullptr, nullptr);
+#endif
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// *TensorAccessor Builder Functions
+////////////////////////////////////////////////////////////////////////////////
+
+template <
+    typename T,
+    size_t N,
+    template <typename U> class PtrTraits = at::DefaultPtrTraits,
+    typename index_t = int64_t>
+inline pta::GenericPackedTensorAccessor<T, N, PtrTraits, index_t>
+make_generic_packed_tensor_accessor(
+#ifdef FBGEMM_GPU_MEMCHECK
+    const at::Tensor& tensor,
+    const char* const tensor_name,
+    const char* const func_name) {
+#else
+    const at::Tensor& tensor) {
+#endif
   static_assert(
       N > 0,
       "accessor is used for indexing tensor, for scalars use *data_ptr<T>()");
-  TORCH_CHECK(
-      tensor.dim() == N,
-      "TensorAccessor expected ",
-      N,
-      " dims but tensor has ",
-      tensor.dim());
+
+  fbgemm_gpu::check_tensor_dim<N>(
+      tensor
+#ifdef FBGEMM_GPU_MEMCHECK
+      ,
+      func_name,
+      tensor_name
+#endif
+  );
+
+  fbgemm_gpu::check_scalar_type<T>(
+      tensor
+#ifdef FBGEMM_GPU_MEMCHECK
+      ,
+      func_name,
+      tensor_name
+#endif
+  );
+
+#ifdef FBGEMM_GPU_MEMCHECK
   return fbgemm_gpu::GenericPackedTensorAccessor<T, N, PtrTraits, index_t>(
       static_cast<typename PtrTraits<T>::PtrType>(tensor.data_ptr<T>()),
       tensor.sizes().data(),
       tensor.strides().data(),
-      ptr_name,
+      tensor_name,
       func_name);
-}
+#else
+  return tensor.generic_packed_accessor<T, N, PtrTraits, index_t>();
 #endif
+}
 
 template <
     typename T,
@@ -564,7 +733,7 @@ template <
 pta::PackedTensorAccessor32<T, N, PtrTraits> make_packed_tensor_accessor32(
 #ifdef FBGEMM_GPU_MEMCHECK
     const at::Tensor& tensor,
-    const char* const ptr_name,
+    const char* const tensor_name,
     const char* const func_name) {
 #else
     const at::Tensor& tensor) {
@@ -573,20 +742,18 @@ pta::PackedTensorAccessor32<T, N, PtrTraits> make_packed_tensor_accessor32(
   TORCH_CHECK(
       tensor.numel() <=
           static_cast<int64_t>(std::numeric_limits<int32_t>::max()),
-      "numel needs to be smaller than int32_t max; otherwise, please use packed_accessor64");
-
-  fbgemm_gpu::check_scalar_type<T>(
-      tensor
 #ifdef FBGEMM_GPU_MEMCHECK
-      ,
+      "[ ",
       func_name,
-      ptr_name
+      " ]: Tensor ",
+      tensor_name,
+      " ",
 #endif
-  );
+      "numel needs to be smaller than int32_t max; otherwise, please use packed_accessor64");
 
 #ifdef FBGEMM_GPU_MEMCHECK
   return make_generic_packed_tensor_accessor<T, N, PtrTraits, int32_t>(
-      tensor, ptr_name, func_name);
+      tensor, tensor_name, func_name);
 #else
   return tensor.packed_accessor32<T, N, PtrTraits>();
 #endif
@@ -599,30 +766,28 @@ template <
 pta::PackedTensorAccessor64<T, N, PtrTraits> make_packed_tensor_accessor64(
 #ifdef FBGEMM_GPU_MEMCHECK
     const at::Tensor& tensor,
-    const char* const ptr_name,
+    const char* const tensor_name,
     const char* const func_name) {
 #else
     const at::Tensor& tensor) {
 #endif
 
-  fbgemm_gpu::check_scalar_type<T>(
-      tensor
-#ifdef FBGEMM_GPU_MEMCHECK
-      ,
-      func_name,
-      ptr_name
-#endif
-  );
-
 #ifdef FBGEMM_GPU_MEMCHECK
   return make_generic_packed_tensor_accessor<T, N, PtrTraits, int64_t>(
-      tensor, ptr_name, func_name);
+      tensor, tensor_name, func_name);
 #else
   return tensor.packed_accessor64<T, N, PtrTraits>();
 #endif
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// *TensorAccessor Builder Macros
+////////////////////////////////////////////////////////////////////////////////
+
 #ifdef FBGEMM_GPU_MEMCHECK
+#define MAKE_TA_WITH_NAME(FUNC_NAME, TENSOR, T, N) \
+  make_tensor_accessor<T, N>(TENSOR, #TENSOR, FUNC_NAME)
+
 #define MAKE_PACKED_TENSOR_ACCESSOR_BASE(                     \
     FUNC_NAME, TENSOR, T, N, PTR_TRAITS, INDEX_NBITS)         \
   make_packed_tensor_accessor##INDEX_NBITS<T, N, PTR_TRAITS>( \
@@ -634,7 +799,11 @@ pta::PackedTensorAccessor64<T, N, PtrTraits> make_packed_tensor_accessor64(
       at::acc_type<T, true>,                          \
       N,                                              \
       PTR_TRAITS>(TENSOR, #TENSOR, FUNC_NAME)
+
 #else
+#define MAKE_TA_WITH_NAME(FUNC_NAME, TENSOR, T, N) \
+  make_tensor_accessor<T, N>(TENSOR)
+
 #define MAKE_PACKED_TENSOR_ACCESSOR_BASE(             \
     FUNC_NAME, TENSOR, T, N, PTR_TRAITS, INDEX_NBITS) \
   make_packed_tensor_accessor##INDEX_NBITS<T, N, PTR_TRAITS>(TENSOR)

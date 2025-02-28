@@ -25,10 +25,10 @@ except Exception:
 # pyre-ignore[16]
 if open_source:
     torch.ops.load_library(
-        os.path.join(os.path.dirname(__file__), "fbgemm_gpu_experimental_gen_ai_py.so")
+        os.path.join(os.path.dirname(__file__), "fbgemm_gpu_experimental_gen_ai.so")
     )
     torch.classes.load_library(
-        os.path.join(os.path.dirname(__file__), "fbgemm_gpu_experimental_gen_ai_py.so")
+        os.path.join(os.path.dirname(__file__), "fbgemm_gpu_experimental_gen_ai.so")
     )
 else:
     torch.ops.load_library(
@@ -45,4 +45,7 @@ else:
     )
     torch.ops.load_library(
         "//deeplearning/fbgemm/fbgemm_gpu/experimental/gen_ai:kv_cache_ops"
+    )
+    torch.ops.load_library(
+        "//deeplearning/fbgemm/fbgemm_gpu/experimental/gen_ai:gather_scatter_ops"
     )

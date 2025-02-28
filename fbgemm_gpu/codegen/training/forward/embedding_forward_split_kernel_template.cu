@@ -35,6 +35,11 @@
 
 #include "fbgemm_gpu/embedding_forward_template_helpers.cuh"
 
+{%- if is_rocm %}
+#include "fbgemm_gpu/utils/rocm/weight_row.h"
+#include "fbgemm_gpu/utils/rocm/vec2.h"
+{%- endif %}
+
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
 
@@ -77,7 +82,11 @@ using namespace fbgemm_gpu;
     {%- endif %}
     {%- endif %}
     {#-/* Set the weights row */#}
+    {%- if is_rocm %}
+    const auto weights_row = rocm::WeightRowAccessorVec2
+    {%- else %}
     const auto weights_row = WeightRowAccessor
+    {%- endif %}
         <
             emb_t,
             cache_t,
@@ -156,8 +165,8 @@ using namespace fbgemm_gpu;
 {%- endmacro %}
 
 {#-/*
-    Splitted version of load_and_accumulate macro. This code chunk describes 
-    the weights load in forward kernel. Set up the WeightRow and load quantization 
+    Splitted version of load_and_accumulate macro. This code chunk describes
+    the weights load in forward kernel. Set up the WeightRow and load quantization
     parameters. Shortcut store for nobag mode.
 
     The main difference is in whether the slices are loaded from the embedding
@@ -192,7 +201,11 @@ using namespace fbgemm_gpu;
     {%- endif %}
     {%- endif %}
     {#-/* Set the weights row */#}
+    {%- if is_rocm %}
+    const auto weights_row = rocm::WeightRowAccessorVec2
+    {%- else %}
     const auto weights_row = WeightRowAccessor
+    {%- endif %}
         <
             emb_t,
             cache_t,
@@ -229,7 +242,7 @@ using namespace fbgemm_gpu;
     {%- if not nobag %}
     // Iterate over the row in the weights table, in 4-element strides
     #pragma unroll kMaxVecsPerThread
-    for (int32_t i = 0; i < kMaxVecsPerThread; ++i) 
+    for (int32_t i = 0; i < kMaxVecsPerThread; ++i)
     {
         // Load the slice of the weights
         int32_t d = (i * kThreadGroupSize + threadIdx.x) * VEC_WIDTH;
@@ -257,9 +270,9 @@ using namespace fbgemm_gpu;
 {%- endmacro %}
 
 {#-/*
-    Splitted version of load_and_accumulate macro. This code chunk 
-    describes the weights accumulate step in the forward kernel. 
-    Accumulate the slices of values from the row. Does nothing for 
+    Splitted version of load_and_accumulate macro. This code chunk
+    describes the weights accumulate step in the forward kernel.
+    Accumulate the slices of values from the row. Does nothing for
     nobag mode assuming all the work is done in load() macro.
 
     The main difference is in whether the slices are loaded from the embedding
@@ -334,8 +347,7 @@ using namespace fbgemm_gpu;
         {%- if is_gwd_kernel %}
         // if l > L or prev_iter == 0, global_weight_decay = 1
         const auto prev_it = prev_iter[idx];
-        CUDA_KERNEL_ASSERT(prev_it < iter);
-        const auto global_weight_decay = (l > L || prev_it == 0) ? 1 : max(gwd_lower_bound, powf(weight_decay_base, iter - prev_it - 1));
+        const auto global_weight_decay = (l > L || prev_it == 0) ? 1 : max(gwd_lower_bound, powf(weight_decay_base, max(iter - prev_it - 1, 0.0f)));
         {%- endif %}
 
         {%- if weighted %}
@@ -345,14 +357,14 @@ using namespace fbgemm_gpu;
 
         {%- if is_rocm %}
         {%- if not nobag %}
-        Vec4T<cache_t> vals[kManualUnrollLength * kMaxVecsPerThread];        
+        rocm::Vec2T<cache_t> vals[kManualUnrollLength * kMaxVecsPerThread];
         {%- endif %}
         // Iterate over kThreadGroupSize indices
-        for (auto outer_j = 0; outer_j < kThreadGroupSize && l_start + outer_j < L - L % kManualUnrollLength; outer_j += kManualUnrollLength) 
+        for (auto outer_j = 0; outer_j < kThreadGroupSize && l_start + outer_j < L - L % kManualUnrollLength; outer_j += kManualUnrollLength)
         {
             {%- if dense or lxu_miss_rate != "cache_conflict_miss_rate::zero" %}
             // Load index from thread j in the group
-            [[maybe_unused]] int64_t idx_j_[kManualUnrollLength]; 
+            [[maybe_unused]] int64_t idx_j_[kManualUnrollLength];
             for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j)
             {
                 idx_j_[inner_j] = SHFL_SYNC(idx, outer_j + inner_j);
@@ -360,7 +372,7 @@ using namespace fbgemm_gpu;
             {%- endif %}
             {%- if not dense and lxu_miss_rate != "cache_conflict_miss_rate::all" %}
             // Load cache's index from thread j in the group
-            [[maybe_unused]] int32_t {{ locs_or_addrs_idx }}_j_[kManualUnrollLength]; 
+            [[maybe_unused]] int32_t {{ locs_or_addrs_idx }}_j_[kManualUnrollLength];
             for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j)
             {
                 {{ locs_or_addrs_idx }}_j_[inner_j] = use_lxu_cache ? SHFL_SYNC({{ locs_or_addrs_idx }}, outer_j + inner_j) : 0;
@@ -369,7 +381,7 @@ using namespace fbgemm_gpu;
 
 	        {%- if weighted %}
             // Load positional weight index from thread j in the group
-            at::acc_type<cache_t, true> idx_weight_j_[kManualUnrollLength]; 
+            at::acc_type<cache_t, true> idx_weight_j_[kManualUnrollLength];
             for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j)
             {
                 idx_weight_j_[inner_j] = SHFL_SYNC(idx_weight, outer_j + inner_j);
@@ -377,7 +389,7 @@ using namespace fbgemm_gpu;
             {%- endif %}
 
 
-            for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j) 
+            for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j)
             {
                 auto j = outer_j + inner_j;
                 {%- if is_index_select %}
@@ -434,7 +446,7 @@ using namespace fbgemm_gpu;
                 {#/**************************************************************/#}
             }
             {%- if not nobag %}
-            for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j) 
+            for (auto inner_j = 0; inner_j < kManualUnrollLength; ++inner_j)
             {
                 auto j = outer_j + inner_j;
 
@@ -494,7 +506,7 @@ using namespace fbgemm_gpu;
         {%- endif %}
 
         {%- if is_rocm %}
-        for(auto j = L - L % kManualUnrollLength; j < kThreadGroupSize && l_start + j < L; ++j) {
+        for(auto j = L % kThreadGroupSize - L % kManualUnrollLength; l_start + kThreadGroupSize > L &&  l_start + j < L; ++j) {
         {%- else %}
         // Iterate over kThreadGroupSize indices
         for (auto j = 0; j < kThreadGroupSize && l_start + j < L; ++j) {
@@ -658,7 +670,12 @@ batch_index_select_dim0_codegen_forward_kernel(
 #endif
 
     // Elements are processed 4 at a time through fbgemm_gpu::Vec4 (CUDA float4, 16 bytes)
+    // for CUDA devices and 2 at a time for ROCm
+    {%- if is_rocm %}
+    constexpr int VEC_WIDTH = 2;
+    {%- else %}
     constexpr int VEC_WIDTH = 4;
+    {%- endif %}
     {%- if is_rocm %}
     // Unroll factor for ROCm devices
     constexpr int kManualUnrollLength = 4;
@@ -702,7 +719,7 @@ batch_index_select_dim0_codegen_forward_kernel(
     indices_start = total_L_start + L_start;
     L = (total_L - L_start >= fixed_L_per_warp) ? fixed_L_per_warp : (total_L - L_start);
     {%- else %}
-    // Determine the number of indices (pooling factor) to look up within the bag
+    // Determine the number of indices Vec4(pooling factor) to look up within the bag
     index_t indices_start = offsets[b_t];
     int32_t L = offsets[b_t + 1] - indices_start;
     {%- endif %}
@@ -762,7 +779,11 @@ batch_index_select_dim0_codegen_forward_kernel(
     const float inv_L = (mean_pooling && L != 0) ? static_cast<float>(1.0) / L: static_cast<float>(1.0);
 
     // Set up the accumulator buffer
+    {%- if is_rocm %}
+    rocm::Vec2T<cache_t> accumulators[kMaxVecsPerThread];
+    {%- else %}
     Vec4T<cache_t> accumulators[kMaxVecsPerThread];
+    {%- endif %}
     {%- endif %}
 
     {%- if dense %}
@@ -941,6 +962,7 @@ batch_index_select_dim0_codegen_forward_kernel
 {%- endmacro %}
 
 {%- macro bulk_template_instantiations(use_cache, kMaxVecsPerThread, kThreadGroupSize) %}
+    {%- set max_vecs_per_thread = 2 * kMaxVecsPerThread if is_rocm else kMaxVecsPerThread %}
     {%- for emb_type in ['float', 'at::Half'] %}
     {%- for cache_type in ['float', 'at::Half'] %}
     {%- for output_type in ['float', 'at::Half', 'at::BFloat16'] %}
@@ -951,7 +973,7 @@ batch_index_select_dim0_codegen_forward_kernel
             output_type,
             index_type,
             use_cache,
-            kMaxVecsPerThread,
+            max_vecs_per_thread,
             kThreadGroupSize)
         }}
     {%- endfor %}

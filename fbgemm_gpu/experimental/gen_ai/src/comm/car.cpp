@@ -101,24 +101,50 @@ void nccl_comm_init_rank(
       "ncclCommInitRank");
 }
 
+ncclDataType_t to_nccl_data_type(c10::ScalarType type) {
+  switch (type) {
+    case at::kFloat:
+      return ncclDataType_t::ncclFloat;
+    case at::kHalf:
+      return ncclDataType_t::ncclHalf;
+    case at::kDouble:
+      return ncclDataType_t::ncclDouble;
+    case at::kLong:
+      return ncclDataType_t::ncclInt64;
+    case at::kInt:
+      return ncclDataType_t::ncclInt;
+    case at::kChar:
+      return ncclDataType_t::ncclChar;
+    case at::kByte:
+      return ncclDataType_t::ncclUint8;
+    case at::kBool:
+      return ncclDataType_t::ncclUint8;
+#if defined(USE_ROCM)
+    case at::kFloat8_e4m3fnuz:
+      return ncclDataType_t::ncclUint8;
+    case at::kFloat8_e5m2fnuz:
+      return ncclDataType_t::ncclUint8;
+#else
+    case at::kFloat8_e4m3fn:
+      return ncclDataType_t::ncclUint8;
+    case at::kFloat8_e5m2:
+      return ncclDataType_t::ncclUint8;
+#endif
+    case at::kBFloat16:
+      return ncclDataType_t::ncclBfloat16;
+    default:
+      TORCH_CHECK(false, "Unconvertible NCCL type ", type);
+  }
+}
+
 void nccl_allgather(at::Tensor dst, at::Tensor src, int64_t comm_idx) {
   using namespace c10d;
   TORCH_CHECK(src.is_contiguous());
   TORCH_CHECK(dst.is_contiguous());
-  ncclDataType_t type;
-  switch (src.scalar_type()) {
-    case at::kFloat:
-      type = ncclDataType_t::ncclFloat;
-      break;
-    case at::kHalf:
-      type = ncclDataType_t::ncclHalf;
-      break;
-    case at::kBFloat16:
-      type = ncclDataType_t::ncclBfloat16;
-      break;
-    default:
-      TORCH_CHECK(false, "unsupported type: ", src.scalar_type());
-  }
+  TORCH_CHECK(
+      src.dtype() == dst.dtype(),
+      "dst and src tensors must have the same dtype.");
+  ncclDataType_t type = to_nccl_data_type(src.scalar_type());
   C10D_NCCL_CHECK(
       ncclAllGather(
           src.data_ptr(),
@@ -130,7 +156,7 @@ void nccl_allgather(at::Tensor dst, at::Tensor src, int64_t comm_idx) {
       "ncclAllGather");
 }
 
-void nccl_alltoall(
+void nccl_alltoall_single(
     at::Tensor dst,
     at::Tensor src,
     int64_t world_size,
@@ -141,6 +167,14 @@ void nccl_alltoall(
   auto stream = at::cuda::getCurrentCUDAStream();
   torch::cuda::nccl::all2all_single_equal_split(
       src, dst, world_size, *get_nccl_comm(comm_idx), stream);
+}
+
+void nccl_alltoall(
+    std::vector<at::Tensor> dsts,
+    std::vector<at::Tensor> srcs,
+    int64_t comm_idx) {
+  auto stream = at::cuda::getCurrentCUDAStream();
+  torch::cuda::nccl::all2all(dsts, srcs, *get_nccl_comm(comm_idx), stream);
 }
 
 void nccl_reducescatter(at::Tensor dst, at::Tensor src, int64_t comm_idx) {
@@ -225,6 +259,11 @@ void two_shot_car_allreduce(
     at::Tensor src,
     std::optional<at::Tensor> bias,
     int64_t comm_idx);
+void car_reducescatter(
+    at::Tensor dst,
+    at::Tensor src,
+    bool split_last_dim,
+    int64_t comm_idx);
 
 at::Tensor car_tensor();
 
@@ -245,7 +284,8 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def("nccl_allgather(Tensor(a!) dst, Tensor src, int comm_idx=0) -> ()");
 
   m.def(
-      "nccl_alltoall(Tensor(a!) dst, Tensor src, int world_size, int comm_idx=0) -> ()");
+      "nccl_alltoall_single(Tensor(a!) dst, Tensor src, int world_size, int comm_idx=0) -> ()");
+  m.def("nccl_alltoall(Tensor(a!)[] dst, Tensor[] src, int comm_idx=0) -> ()");
 
   m.def("nccl_reducescatter(Tensor(a!) dst, Tensor src, int comm_idx=0) -> ()");
 
@@ -267,15 +307,20 @@ TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
 
   m.def(
       "two_shot_car_allreduce(Tensor(a!) dst, Tensor src, Tensor? bias=None, int comm_idx=0) -> ()");
+
+  m.def(
+      "car_reducescatter(Tensor(a!) dst, Tensor src, bool split_last_dim=False, int comm_idx=0) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(fbgemm, CUDA, m) {
   m.impl("nccl_allreduce", nccl_allreduce);
   m.impl("nccl_allgather", nccl_allgather);
+  m.impl("nccl_alltoall_single", nccl_alltoall_single);
   m.impl("nccl_alltoall", nccl_alltoall);
   m.impl("nccl_reducescatter", nccl_reducescatter);
   m.impl("one_shot_car_allreduce", one_shot_car_allreduce);
   m.impl("two_shot_car_allreduce", two_shot_car_allreduce);
+  m.impl("car_reducescatter", car_reducescatter);
 }
 
 // Though it shouldnt be used, it is useful to define these functions for CPU to
@@ -283,10 +328,12 @@ TORCH_LIBRARY_IMPL(fbgemm, CUDA, m) {
 TORCH_LIBRARY_IMPL(fbgemm, CPU, m) {
   m.impl("nccl_allreduce", nccl_allreduce);
   m.impl("nccl_allgather", nccl_allgather);
+  m.impl("nccl_alltoall_single", nccl_alltoall_single);
   m.impl("nccl_alltoall", nccl_alltoall);
   m.impl("nccl_reducescatter", nccl_reducescatter);
   m.impl("one_shot_car_allreduce", one_shot_car_allreduce);
   m.impl("two_shot_car_allreduce", two_shot_car_allreduce);
+  m.impl("car_reducescatter", car_reducescatter);
 }
 
 // Shape registration functions for car operators.
@@ -305,10 +352,17 @@ void nccl_allgather_meta(
   return;
 }
 
-void nccl_alltoall_meta(
+void nccl_alltoall_single_meta(
     at::Tensor /* dst */,
     at::Tensor /* src */,
     int64_t /* world_size */,
+    int64_t /* comm_idx */) {
+  return;
+}
+
+void nccl_alltoall_meta(
+    std::vector<at::Tensor> /* dsts */,
+    std::vector<at::Tensor> /* srcs */,
     int64_t /* comm_idx */) {
   return;
 }
@@ -336,13 +390,23 @@ void two_shot_car_allreduce_meta(
   return;
 }
 
+void car_reducescatter_meta(
+    at::Tensor /* dst */,
+    at::Tensor /* src */,
+    bool /* split_last_dim */,
+    int64_t /* comm_idx */) {
+  return;
+}
+
 TORCH_LIBRARY_IMPL(fbgemm, Meta, m) {
   m.impl("nccl_allreduce", nccl_allreduce_meta);
   m.impl("nccl_allgather", nccl_allgather_meta);
+  m.impl("nccl_alltoall_single", nccl_alltoall_single_meta);
   m.impl("nccl_alltoall", nccl_alltoall_meta);
   m.impl("nccl_reducescatter", nccl_reducescatter_meta);
   m.impl("one_shot_car_allreduce", one_shot_car_allreduce_meta);
   m.impl("two_shot_car_allreduce", two_shot_car_allreduce_meta);
+  m.impl("car_reducescatter", car_reducescatter_meta);
 }
 
 } // namespace fbgemm_gpu

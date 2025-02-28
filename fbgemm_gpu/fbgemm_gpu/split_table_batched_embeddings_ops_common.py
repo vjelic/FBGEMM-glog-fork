@@ -13,6 +13,9 @@ import enum
 from dataclasses import dataclass
 from typing import List, NamedTuple
 
+import torch
+from torch import Tensor
+
 
 # Maximum number of times prefetch() can be called without
 # a corresponding forward() call
@@ -29,6 +32,20 @@ class EmbeddingLocation(enum.IntEnum):
     MANAGED_CACHING = 2
     HOST = 3
     MTIA = 4
+
+
+def str_to_embedding_location(key: str) -> EmbeddingLocation:
+    lookup = {
+        "device": EmbeddingLocation.DEVICE,
+        "managed": EmbeddingLocation.MANAGED,
+        "managed_caching": EmbeddingLocation.MANAGED_CACHING,
+        "host": EmbeddingLocation.HOST,
+        "mtia": EmbeddingLocation.MTIA,
+    }
+    if key in lookup:
+        return lookup[key]
+    else:
+        raise ValueError(f"Cannot parse value into EmbeddingLocation: {key}")
 
 
 class CacheAlgorithm(enum.Enum):
@@ -54,6 +71,21 @@ class PoolingMode(enum.IntEnum):
     MEAN = 1
     NONE = 2
 
+    def do_pooling(self) -> bool:
+        return self is not PoolingMode.NONE
+
+
+def str_to_pooling_mode(key: str) -> PoolingMode:
+    lookup = {
+        "sum": PoolingMode.SUM,
+        "mean": PoolingMode.MEAN,
+        "none": PoolingMode.NONE,
+    }
+    if key in lookup:
+        return lookup[key]
+    else:
+        raise ValueError(f"Cannot parse value into PoolingMode: {key}")
+
 
 class BoundsCheckMode(enum.IntEnum):
     # Raise an exception (CPU) or device-side assert (CUDA)
@@ -64,6 +96,20 @@ class BoundsCheckMode(enum.IntEnum):
     IGNORE = 2
     # No bounds checks.
     NONE = 3
+    # IGNORE with V2 enabled
+    V2_IGNORE = 4
+    # WARNING with V2 enabled
+    V2_WARNING = 5
+    # FATAL with V2 enabled
+    V2_FATAL = 6
+
+
+class EmbeddingSpecInfo(enum.IntEnum):
+    feature_names = 0
+    rows = 1
+    dims = 2
+    sparse_type = 3
+    embedding_location = 4
 
 
 RecordCacheMetrics: NamedTuple = NamedTuple(
@@ -134,3 +180,36 @@ def construct_cache_state(
 # breakage with Caffe2 module_factory because it will pull in numpy
 def round_up(a: int, b: int) -> int:
     return int((a + b - 1) // b) * b
+
+
+def tensor_to_device(tensor: torch.Tensor, device: torch.device) -> Tensor:
+    if tensor.device == torch.device("meta"):
+        return torch.empty_like(tensor, device=device)
+    return tensor.to(device)
+
+
+def get_new_embedding_location(
+    device: torch.device, cache_load_factor: float
+) -> EmbeddingLocation:
+    """
+    Based on the cache_load_factor and device, return the embedding location intended
+    for the TBE weights.
+    """
+    # Only support CPU and GPU device
+    assert device.type == "cpu" or device.type == "cuda"
+    if cache_load_factor < 0 or cache_load_factor > 1:
+        raise ValueError(
+            f"cache_load_factor must be between 0.0 and 1.0, got {cache_load_factor}"
+        )
+
+    if device.type == "cpu":
+        return EmbeddingLocation.HOST
+    # UVM only
+    elif cache_load_factor == 0:
+        return EmbeddingLocation.MANAGED
+    # HBM only
+    elif cache_load_factor == 1.0:
+        return EmbeddingLocation.DEVICE
+    # UVM caching
+    else:
+        return EmbeddingLocation.MANAGED_CACHING

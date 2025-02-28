@@ -130,7 +130,7 @@ class KVCacheTests(unittest.TestCase):
             size=(B, MAX_T, N_KVH_L, D_H), dtype=torch.bfloat16, device="cuda"
         )
 
-        xq_out_bf16 = torch.ops.fbgemm.rope_qkv_varseq_prefill(
+        xq_out_bf16 = torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)(
             xq,
             xk,
             xv,
@@ -152,7 +152,7 @@ class KVCacheTests(unittest.TestCase):
             dtype=torch.uint8,
             device="cuda",
         )
-        xq_out = torch.ops.fbgemm.rope_qkv_varseq_prefill(
+        xq_out = torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)(
             xq,
             xk,
             xv,
@@ -166,12 +166,13 @@ class KVCacheTests(unittest.TestCase):
         )
         torch.testing.assert_close(xq_out_bf16, xq_out)
 
-        cache_k, cache_v = torch.ops.fbgemm.dequantize_int4_cache(
+        dequantized_cache = torch.compile(torch.ops.fbgemm.dequantize_int4_cache)(
             cache_k_int4,
             cache_v_int4,
             attn_bias.k_seqinfo.seqlen,
             num_groups=num_groups,
         )
+        cache_k, cache_v = dequantized_cache
 
         torch.testing.assert_close(
             cache_k[:, :T], cache_k_bf16[:, :T], atol=1.0e-2, rtol=1.0e-2
@@ -191,9 +192,9 @@ class KVCacheTests(unittest.TestCase):
             torch.version.cuda
             and torch.cuda.get_device_properties(torch.cuda.current_device()).major < 9
         )
-        or (torch.version.hip and torch.version.hip < "6.2")
+        or (torch.version.hip)
         or not HAS_XFORMERS,
-        "Skip when H100 is not available or MI300 is not available",
+        "Skip when H100 is not available",
     )
     def test_fp8_kv_cache(self, MAX_T: int, N_KVH_L: int) -> None:
         N_H_L = 2
@@ -260,7 +261,7 @@ class KVCacheTests(unittest.TestCase):
             size=(B, MAX_T, N_KVH_L, D_H), dtype=torch.bfloat16, device="cuda"
         )
 
-        xq_out_bf16 = torch.ops.fbgemm.rope_qkv_varseq_prefill(
+        xq_out_bf16 = torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)(
             xq,
             xk,
             xv,
@@ -282,7 +283,7 @@ class KVCacheTests(unittest.TestCase):
             dtype=torch.uint8,
             device="cuda",
         )
-        xq_out = torch.ops.fbgemm.rope_qkv_varseq_prefill(
+        xq_out = torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)(
             xq,
             xk,
             xv,
@@ -295,11 +296,12 @@ class KVCacheTests(unittest.TestCase):
         )
         torch.testing.assert_close(xq_out_bf16, xq_out)
 
-        cache_k, cache_v = torch.ops.fbgemm.dequantize_fp8_cache(
+        dequantized_cache = torch.compile(torch.ops.fbgemm.dequantize_fp8_cache)(
             cache_k_fp8,
             cache_v_fp8,
             attn_bias.k_seqinfo.seqlen,
         )
+        cache_k, cache_v = dequantized_cache
 
         torch.testing.assert_close(
             cache_k[:, :T], cache_k_bf16[:, :T], atol=1.0e-2, rtol=5.0e-2
@@ -364,7 +366,15 @@ class KVCacheTests(unittest.TestCase):
             device="cuda",
         )
         xq = xqkv[:, :N_H_L, :]
-        xk = xqkv[:, N_H_L : N_H_L + N_KVH_L, :]
+        # This clone is to avoid a weirdness in torch.compile:
+        # because as far as the signature of rope_qkv_varseq_prefill
+        # goes, xk could be modified (but in fact isn't because we
+        # aren't using write_k_back=True) and torch.compile takes
+        # action to be careful when a function has aliased parameters
+        # one of which is modified. The function merge_view_inputs in
+        # runtime_wrappers.py inside torch compile has an IndexError
+        # without this clone.
+        xk = xqkv[:, N_H_L : N_H_L + N_KVH_L, :].clone()
         xv = xqkv[:, N_H_L + N_KVH_L :, :]
 
         xpos_gamma: float = 0.8
@@ -390,9 +400,9 @@ class KVCacheTests(unittest.TestCase):
 
         if rope_theta is not None:
             func = (
-                torch.ops.fbgemm.rope_qkv_varseq_prefill
+                torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)
                 if prefill
-                else torch.ops.fbgemm.rope_qkv_decoding
+                else torch.compile(torch.ops.fbgemm.rope_qkv_decoding)
             )
             xq_out_ref = func(
                 xq,
@@ -418,9 +428,9 @@ class KVCacheTests(unittest.TestCase):
             )
         else:
             func = (
-                torch.ops.fbgemm.xpos_qkv_varseq_prefill
+                torch.compile(torch.ops.fbgemm.xpos_qkv_varseq_prefill)
                 if prefill
-                else torch.ops.fbgemm.xpos_qkv_decoding
+                else torch.compile(torch.ops.fbgemm.xpos_qkv_decoding)
             )
             xq_out_ref = func(
                 xq,
@@ -517,7 +527,7 @@ class KVCacheTests(unittest.TestCase):
             device="cuda",
         )
         xq = xqkv[:, :N_H_L, :]
-        xk = xqkv[:, N_H_L : N_H_L + N_KVH_L, :]
+        xk = xqkv[:, N_H_L : N_H_L + N_KVH_L, :].clone()
         xv = xqkv[:, N_H_L + N_KVH_L :, :]
 
         assert cache_k.is_contiguous()
@@ -537,9 +547,9 @@ class KVCacheTests(unittest.TestCase):
             seqpos_args = (seq_positions,)
 
         func = (
-            torch.ops.fbgemm.rope_qkv_varseq_prefill
+            torch.compile(torch.ops.fbgemm.rope_qkv_varseq_prefill)
             if prefill
-            else torch.ops.fbgemm.rope_qkv_decoding
+            else torch.compile(torch.ops.fbgemm.rope_qkv_decoding)
         )
         xq_out = func(
             xq,

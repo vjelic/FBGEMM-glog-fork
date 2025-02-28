@@ -8,6 +8,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/modules/Utilities.cmake)
 
 function(prepare_target_sources)
     # This function does the following:
+    #
     #   1. Take all the specified project sources for a target
     #   1. Filter files out based on CPU-only, CUDA, and HIP build modes
     #   1. Bucketize them into sets of CXX, CU, and HIP files
@@ -22,7 +23,7 @@ function(prepare_target_sources)
         GPU_SRCS
         CUDA_SPECIFIC_SRCS
         HIP_SPECIFIC_SRCS
-        GPU_FLAGS
+        NVCC_FLAGS
         INCLUDE_DIRS
     )
 
@@ -91,7 +92,7 @@ function(prepare_target_sources)
         # Set source properties
         set_source_files_properties(${${args_PREFIX}_sources_cu}
             PROPERTIES COMPILE_OPTIONS
-            "${args_GPU_FLAGS}")
+            "${args_NVCC_FLAGS}")
 
         set_source_files_properties(${${args_PREFIX}_sources_cu}
             PROPERTIES INCLUDE_DIRECTORIES
@@ -134,14 +135,21 @@ endfunction()
 
 function(gpu_cpp_library)
     # This function does the following:
+    #
     #   1. Take all the target sources and select relevant sources based on build type (CPU-only, CUDA, HIP)
     #   1. Apply source file properties as needed
-    #   1. HIPify files as needed
-    #   1. Build the .SO file
+    #   1. Fetch the HIPified versions of the files as needed (presumes that `hipify()` has already been run)
+    #   1. Build the .SO file, either as STATIC or MODULE
+    #
+    # Building as STATIC allows the target to be linked to other library targets:
+    #   https://www.reddit.com/r/cpp_questions/comments/120p0ey/how_to_create_a_composite_shared_library_out_of
+    #   https://github.com/ROCm/hipDNN/blob/master/Examples/hipdnn-training/cmake/FindHIP.cmake
 
     set(flags)
     set(singleValueArgs
-        PREFIX          # Desired name prefix for the library target
+        PREFIX          # Desired name for the library target (and by extension, the prefix for naming intermediate targets)
+        TYPE            # Target type, e.g., MODULE, OBJECT.  See https://cmake.org/cmake/help/latest/command/add_library.html
+        DESTINATION     # The install destination directory to place the build target into
     )
     set(multiValueArgs
         CPU_SRCS            # Sources for CPU-only build
@@ -149,8 +157,11 @@ function(gpu_cpp_library)
         CUDA_SPECIFIC_SRCS  # Sources available only for CUDA build
         HIP_SPECIFIC_SRCS   # Sources available only for HIP build
         OTHER_SRCS          # Sources from third-party libraries
-        GPU_FLAGS           # Compile flags for GPU builds
+        CC_FLAGS            # General compilation flags applicable to all build variants
+        NVCC_FLAGS          # Compilation flags specific to NVCC
+        HIPCC_FLAGS         # Compilation flags specific to HIPCC
         INCLUDE_DIRS        # Include directories for compilation
+        DEPS                # Target dependencies, i.e. built STATIC targets
     )
 
     cmake_parse_arguments(
@@ -162,41 +173,66 @@ function(gpu_cpp_library)
     # Prepare CXX and CU sources
     ############################################################################
 
+    # Take all the sources, and filter them into CPU and GPU buckets depending
+    # on the source type and build mode
     prepare_target_sources(
         PREFIX ${args_PREFIX}
         CPU_SRCS ${args_CPU_SRCS}
         GPU_SRCS ${args_GPU_SRCS}
         CUDA_SPECIFIC_SRCS ${args_CUDA_SPECIFIC_SRCS}
         HIP_SPECIFIC_SRCS ${args_HIP_SPECIFIC_SRCS}
-        GPU_FLAGS ${args_GPU_FLAGS}
+        NVCC_FLAGS ${args_NVCC_FLAGS}
         INCLUDE_DIRS ${args_INCLUDE_DIRS})
     set(lib_sources ${${args_PREFIX}_sources})
 
+    # If the overall sources list is empty (e.g. the target is GPU-only and we
+    # are currently building in CPU-only mode), add a placeholder source file
+    # so that the library can be built without failure
+    if(NOT lib_sources AND NOT args_OTHER_SRCS)
+        # Create a salt value
+        STRING(RANDOM LENGTH 6 salt)
+
+        # Generate a placeholder source file
+        file(COPY_FILE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/placeholder.cpp
+            ${CMAKE_CURRENT_BINARY_DIR}/gen_placeholder_${salt}.cpp)
+
+        # Append to lib_sources
+        list(APPEND lib_sources
+            ${CMAKE_CURRENT_BINARY_DIR}/gen_placeholder_${salt}.cpp)
+    endif()
 
     ############################################################################
     # Build the Library
     ############################################################################
 
-    set(lib_name ${args_PREFIX}_py)
-    if(USE_ROCM)
-        # Fetch the equivalent HIPified sources if available.
-        # This presumes that hipify() has already been run.
-        get_hipified_list("${lib_sources}" lib_sources_hipified)
+    # Set the build target name
+    set(lib_name ${args_PREFIX})
 
-        # Set properties for the HIPified sources
-        set_source_files_properties(${lib_sources_hipified}
-                                    PROPERTIES HIP_SOURCE_PROPERTY_FORMAT 1)
+    if(USE_ROCM)
+        if(lib_sources)
+            # Fetch the equivalent HIPified sources if available.  The mapping
+            # is provided by a table that is generated during transpilation
+            # process, so this presumes that `hipify()` has already been run.
+            #
+            # This code is placed under an if-guard so that it won't fail for
+            # targets that have nothing to do with HIP, e.g. asmjit
+            get_hipified_list("${lib_sources}" lib_sources_hipified)
+
+            # Set properties for the HIPified sources
+            set_source_files_properties(${lib_sources_hipified} PROPERTIES
+                HIP_SOURCE_PROPERTY_FORMAT 1)
+        endif()
 
         # Set the include directories for HIP
         hip_include_directories("${args_INCLUDE_DIRS}")
 
         # Create the HIP library
-        hip_add_library(${lib_name} SHARED
+        hip_add_library(${lib_name} ${args_TYPE}
             ${lib_sources_hipified}
             ${args_OTHER_SRCS}
             ${FBGEMM_HIP_HCC_LIBRARIES}
-            HIPCC_OPTIONS
-            ${HIP_HCC_FLAGS})
+            HIPCC_OPTIONS ${HIP_HCC_FLAGS} ${args_HIPCC_FLAGS})
 
         # Append ROCM includes
         target_include_directories(${lib_name} PUBLIC
@@ -206,8 +242,8 @@ function(gpu_cpp_library)
             ${args_INCLUDE_DIRS})
 
     else()
-        # Create the C++/CUDA library
-        add_library(${lib_name} MODULE
+        # Create the CPU-only / CUDA library
+        add_library(${lib_name} ${args_TYPE}
             ${lib_sources}
             ${args_OTHER_SRCS})
     endif()
@@ -216,28 +252,62 @@ function(gpu_cpp_library)
     # Library Includes and Linking
     ############################################################################
 
-    # Add PyTorch include/
+    # Add external include directories
     target_include_directories(${lib_name} PRIVATE
         ${TORCH_INCLUDE_DIRS}
         ${NCCL_INCLUDE_DIRS})
 
-    # Remove `lib` from the output artifact name, i.e. `libfoo.so` -> `foo.so`
-    set_target_properties(${lib_name}
-        PROPERTIES PREFIX "")
+    # Set additional target properties
+    set_target_properties(${lib_name} PROPERTIES
+        # Remove `lib` prefix from the output artifact name, e.g.
+        # `libfoo.so` -> `foo.so`
+        PREFIX ""
+        # Enforce -fPIC for STATIC library option, since they are to be
+        # integrated into other libraries down the line
+        # https://stackoverflow.com/questions/3961446/why-does-gcc-not-implicitly-supply-the-fpic-flag-when-compiling-static-librarie
+        POSITION_INDEPENDENT_CODE ON)
 
-    # Link to PyTorch
-    target_link_libraries(${lib_name}
-        ${TORCH_LIBRARIES}
-        ${NCCL_LIBRARIES}
-        ${CUDA_DRIVER_LIBRARIES})
-
-    # Link to NVML if available
-    if(NVML_LIB_PATH)
-        target_link_libraries(${lib_name} ${NVML_LIB_PATH})
+    if (args_DEPS)
+        # Only set this if the library has dependencies that we also build,
+        # otherwise we will hit the following error:
+        #   `No valid ELF RPATH or RUNPATH entry exists in the file`
+        set_target_properties(${lib_name} PROPERTIES
+            BUILD_WITH_INSTALL_RPATH ON
+            # Set the RPATH for the library to include $ORIGIN, so it can look
+            # into the same directory for dependency .SO files to load, e.g.
+            # fbgemm_gpu.so -> fbgemm.so, asmjit.so
+            #
+            # More info on RPATHS:
+            #   https://amir.rachum.com/shared-libraries/#debugging-cheat-sheet
+            #   https://stackoverflow.com/questions/43330165/how-to-link-a-shared-library-with-cmake-with-relative-path
+            #   https://stackoverflow.com/questions/57915564/cmake-how-to-set-rpath-to-origin-with-cmake
+            #   https://stackoverflow.com/questions/58360502/how-to-set-rpath-origin-in-cmake
+            INSTALL_RPATH "\$ORIGIN")
     endif()
 
-    # Silence warnings (in asmjit)
+    # Collect external libraries for linking
+    set(library_dependencies
+        ${TORCH_LIBRARIES}
+        ${NCCL_LIBRARIES}
+        ${CUDA_DRIVER_LIBRARIES}
+        ${args_DEPS})
+
+    # Add NVML if available
+    if(NVML_LIB_PATH)
+        list(APPEND library_dependencies ${NVML_LIB_PATH})
+    endif()
+
+    # Link against the external libraries as needed
+    target_link_libraries(${lib_name} PRIVATE ${library_dependencies})
+
+    ############################################################################
+    # Other Compilation Flags
+    ############################################################################
+
+    # Set the additional compilation flags
     target_compile_options(${lib_name} PRIVATE
+        ${args_CC_FLAGS}
+        # Silence compiler warnings (in asmjit)
         -Wno-deprecated-anon-enum-enum-conversion
         -Wno-deprecated-declarations)
 
@@ -245,24 +315,43 @@ function(gpu_cpp_library)
     # Post-Build Steps
     ############################################################################
 
+    if (args_DEPS)
+        # Only set this if the library has dependencies that we also build,
+        # otherwise we will hit the following error:
+        #   `No valid ELF RPATH or RUNPATH entry exists in the file`
+        set(set_rpath_to_origin 1)
+    endif()
+
     # Add a post-build step to remove errant RPATHs from the .SO
     add_custom_target(${lib_name}_postbuild ALL
         DEPENDS
         WORKING_DIRECTORY ${OUTPUT_DIR}
-        COMMAND bash ${FBGEMM}/.github/scripts/fbgemm_gpu_postbuild.bash)
+        COMMAND bash ${FBGEMM}/.github/scripts/fbgemm_gpu_postbuild.bash $<TARGET_FILE:${lib_name}> ${set_rpath_to_origin})
 
-    # Run the post-build steps AFTER the build itself
+    # Set the post-build steps to run AFTER the build completes
     add_dependencies(${lib_name}_postbuild ${lib_name})
 
     ############################################################################
     # Set the Output Variable(s)
     ############################################################################
 
-    # PREFIX = `foo` --> Target Library = `foo_py`
-    set(${args_PREFIX}_py ${lib_name} PARENT_SCOPE)
+    set(${args_PREFIX} ${lib_name} PARENT_SCOPE)
+
+    ############################################################################
+    # Add to Install Package
+    ############################################################################
+
+    if(args_DESTINATION)
+        install(TARGETS ${args_PREFIX}
+            DESTINATION ${args_DESTINATION})
+    endif()
+
+    ############################################################################
+    # Debug Summary
+    ############################################################################
 
     BLOCK_PRINT(
-        "GPU CPP Library Target: ${args_PREFIX}"
+        "GPU CPP Library Target: ${args_PREFIX} (${args_TYPE})"
         " "
         "CPU_SRCS:"
         "${args_CPU_SRCS}"
@@ -273,14 +362,20 @@ function(gpu_cpp_library)
         "CUDA_SPECIFIC_SRCS:"
         "${args_CUDA_SPECIFIC_SRCS}"
         " "
-        "HIP_SPECIFIC_SRCS"
+        "HIP_SPECIFIC_SRCS:"
         "${args_HIP_SPECIFIC_SRCS}"
         " "
         "OTHER_SRCS:"
         "${args_OTHER_SRCS}"
         " "
-        "GPU_FLAGS:"
-        "${args_GPU_FLAGS}"
+        "CC_FLAGS:"
+        "${args_CC_FLAGS}"
+        " "
+        "NVCC_FLAGS:"
+        "${args_NVCC_FLAGS}"
+        " "
+        "HIPCC_FLAGS:"
+        "${args_HIPCC_FLAGS}"
         " "
         "INCLUDE_DIRS:"
         "${args_INCLUDE_DIRS}"
@@ -291,7 +386,13 @@ function(gpu_cpp_library)
         "HIPified Source Files:"
         "${lib_sources_hipified}"
         " "
+        "Library Dependencies:"
+        "${library_dependencies}"
+        " "
         "Output Library:"
         "${lib_name}"
+        " "
+        "Destination Directory:"
+        "${args_DESTINATION}"
     )
 endfunction()

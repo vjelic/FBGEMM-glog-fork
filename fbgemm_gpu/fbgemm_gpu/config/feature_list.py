@@ -25,7 +25,7 @@ class FeatureGateName(Enum):
 
     .. code-block:: python
 
-        from deeplearning.fbgemm.fbgemm_gpu.config import FeatureGateName
+        from fbgemm_gpu.config import FeatureGateName
 
         def foo():
             if FeatureGateName.TBE_V2.is_enabled():
@@ -50,6 +50,9 @@ class FeatureGateName(Enum):
 
     # Enable Ensemble Rowwise Adagrad (D60189486 stack)
     TBE_ENSEMBLE_ROWWISE_ADAGRAD = auto()
+
+    # Enable bounds_check_indices_v2
+    BOUNDS_CHECK_INDICES_V2 = auto()
 
     def is_enabled(self) -> bool:
         return FeatureGate.is_enabled(self)

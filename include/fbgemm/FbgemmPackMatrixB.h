@@ -28,6 +28,8 @@ struct TypeConverter {
   T operator()(F) const;
 };
 
+#define PMAT_ALIGNMENT 64
+
 /// class that performs packing of matrix in
 /// row-major format into
 /// internal packed blocked-row major format
@@ -60,7 +62,15 @@ class PackedGemmMatrixB {
       const float alpha,
       const float* smat,
       const int brow = 512)
-      : nrow_(nrow), ncol_(ncol), brow_(brow), kernel_ncol_blocks_(2) {
+      : nrow_(nrow),
+        ncol_(ncol),
+        brow_(brow),
+#ifdef FBGEMM_ENABLE_KLEIDIAI
+        kernel_ncol_blocks_(1)
+#else
+        kernel_ncol_blocks_(2)
+#endif
+  {
     initializeParam();
     initializeMemory();
     // copy source matrix into packed matrix
@@ -86,6 +96,31 @@ class PackedGemmMatrixB {
         size_(size),
         kernel_ncol_blocks_(2) {
     initializeMemory();
+  }
+
+  PackedGemmMatrixB(
+      const int nrow,
+      const int ncol,
+      const int brow,
+      const int last_brow,
+      const int bcol,
+      const int nbrow,
+      const int nbcol,
+      const uint64_t size,
+      const int kernel_ncol_blocks,
+      void* pmat)
+      : nrow_(nrow),
+        ncol_(ncol),
+        brow_(brow),
+        last_brow_(last_brow),
+        bcol_(bcol),
+        nbrow_(nbrow),
+        nbcol_(nbcol),
+        size_(size),
+        kernel_ncol_blocks_(kernel_ncol_blocks) {
+    pmat_ = static_cast<T*>(pmat);
+    packed_ = true;
+    pmat_passed_in = true;
   }
 
   void initializeParam() {
@@ -124,12 +159,15 @@ class PackedGemmMatrixB {
   void initializeMemory() {
     // allocate and initialize packed memory
     size_ = (blockRowSize() * nbrow_) * (blockColSize() * nbcol_);
-    pmat_ = static_cast<T*>(fbgemmAlignedAlloc(64, matSize() * sizeof(T)));
+    pmat_ = static_cast<T*>(
+        fbgemmAlignedAlloc(PMAT_ALIGNMENT, matSize() * sizeof(T)));
     memset(pmat_, 0, matSize() * sizeof(T));
   }
 
   ~PackedGemmMatrixB() {
-    fbgemmAlignedFree(pmat_);
+    if (pmat_passed_in == false) {
+      fbgemmAlignedFree(pmat_);
+    }
   }
 
   void unpackFromSrc(const matrix_op_t trans, T* src_mat) {
@@ -256,6 +294,7 @@ class PackedGemmMatrixB {
   int kernel_ncol_blocks_;
   T* pmat_;
   bool packed_{false};
+  bool pmat_passed_in{false};
 };
 
 } // namespace fbgemm

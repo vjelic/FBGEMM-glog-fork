@@ -93,10 +93,12 @@ __install_check_operator_registrations () {
     local test_operators=(
       "torch.ops.fbgemm.nccl_init"
       "torch.ops.fbgemm.gqa_attn_splitk"
+      "torch.ops.fbgemm.rope_qkv_decoding"
     )
   else
     local test_operators=(
       "torch.ops.fbgemm.asynchronous_inclusive_cumsum"
+      "torch.ops.fbgemm.split_embedding_codegen_lookup_sgd_function_pt2"
     )
   fi
 
@@ -180,8 +182,8 @@ install_fbgemm_gpu_pip () {
     echo "Usage: ${FUNCNAME[0]} ENV_NAME FBGEMM_GPU_CHANNEL[/VERSION] FBGEMM_GPU_VARIANT_TYPE[/VARIANT_VERSION]"
     echo "Example(s):"
     echo "    ${FUNCNAME[0]} build_env 0.8.0 cpu                  # Install the CPU variant, specific version from release channel"
-    echo "    ${FUNCNAME[0]} build_env release cuda/12.4.1        # Install the CUDA variant, latest version from release channel"
-    echo "    ${FUNCNAME[0]} build_env test/0.8.0 cuda/12.4.1     # Install the CUDA 12.4 variant, specific version from test channel"
+    echo "    ${FUNCNAME[0]} build_env release cuda/12.6.3        # Install the CUDA 12.3 variant, latest version from release channel"
+    echo "    ${FUNCNAME[0]} build_env test/0.8.0 cuda/12.6.3     # Install the CUDA 12.3 variant, specific version from test channel"
     echo "    ${FUNCNAME[0]} build_env nightly rocm/6.2           # Install the ROCM 6.2 variant, latest version from nightly channel"
     return 1
   else

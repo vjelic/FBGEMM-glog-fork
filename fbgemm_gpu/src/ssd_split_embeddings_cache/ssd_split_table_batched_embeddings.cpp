@@ -14,6 +14,7 @@
 #include <torch/custom_class.h>
 
 #include "./ssd_table_batched_embeddings.h"
+#include "embedding_rocksdb_wrapper.h"
 #include "fbgemm_gpu/utils/ops_utils.h"
 
 using namespace at;
@@ -258,124 +259,45 @@ void compact_indices_cuda(
 
 namespace ssd {
 
-class EmbeddingRocksDBWrapper : public torch::jit::CustomClassHolder {
- public:
-  EmbeddingRocksDBWrapper(
-      std::string path,
-      int64_t num_shards,
-      int64_t num_threads,
-      int64_t memtable_flush_period,
-      int64_t memtable_flush_offset,
-      int64_t l0_files_per_compact,
-      int64_t max_D,
-      int64_t rate_limit_mbps,
-      int64_t size_ratio,
-      int64_t compaction_ratio,
-      int64_t write_buffer_size,
-      int64_t max_write_buffer_num,
-      double uniform_init_lower,
-      double uniform_init_upper,
-      int64_t row_storage_bitwidth = 32,
-      int64_t cache_size = 0,
-      bool use_passed_in_path = false,
-      int64_t tbe_unique_id = 0,
-      int64_t l2_cache_size_gb = 0)
-      : impl_(std::make_shared<ssd::EmbeddingRocksDB>(
-            path,
-            num_shards,
-            num_threads,
-            memtable_flush_period,
-            memtable_flush_offset,
-            l0_files_per_compact,
-            max_D,
-            rate_limit_mbps,
-            size_ratio,
-            compaction_ratio,
-            write_buffer_size,
-            max_write_buffer_num,
-            uniform_init_lower,
-            uniform_init_upper,
-            row_storage_bitwidth,
-            cache_size,
-            use_passed_in_path,
-            tbe_unique_id,
-            l2_cache_size_gb)) {}
-
-  void set_cuda(
-      Tensor indices,
-      Tensor weights,
-      Tensor count,
-      int64_t timestep,
-      bool is_bwd) {
-    return impl_->set_cuda(indices, weights, count, timestep, is_bwd);
+SnapshotHandle::SnapshotHandle(EmbeddingRocksDB* db) : db_(db) {
+  auto num_shards = db->num_shards();
+  CHECK_GT(num_shards, 0);
+  shard_snapshots_.reserve(num_shards);
+  for (auto shard = 0; shard < num_shards; ++shard) {
+    const auto* snapshot = db->dbs_[shard]->GetSnapshot();
+    CHECK(snapshot != nullptr)
+        << "ERROR: create_snapshot fails to create a snapshot "
+        << "for db shard " << shard << ". Please make sure that "
+        << "inplace_update_support is set to false" << std::endl;
+    shard_snapshots_.push_back(snapshot);
   }
+}
 
-  void get_cuda(Tensor indices, Tensor weights, Tensor count) {
-    return impl_->get_cuda(indices, weights, count);
+SnapshotHandle::~SnapshotHandle() {
+  for (auto shard = 0; shard < db_->dbs_.size(); ++shard) {
+    snapshot_ptr_t snapshot = shard_snapshots_[shard];
+    CHECK(snapshot != nullptr) << "Unexpected nullptr for snapshot " << shard;
+    db_->dbs_[shard]->ReleaseSnapshot(snapshot);
   }
+}
 
-  void set(Tensor indices, Tensor weights, Tensor count) {
-    return impl_->set(indices, weights, count);
-  }
+void SnapshotHandle::release() {
+  db_->release_snapshot(this);
+}
 
-  void get(Tensor indices, Tensor weights, Tensor count, int64_t sleep_ms) {
-    return impl_->get(indices, weights, count, sleep_ms);
-  }
+snapshot_ptr_t SnapshotHandle::get_snapshot_for_shard(size_t shard) const {
+  CHECK_LE(shard, shard_snapshots_.size());
+  return shard_snapshots_[shard];
+}
 
-  std::vector<int64_t> get_mem_usage() {
-    return impl_->get_mem_usage();
-  }
+EmbeddingSnapshotHandleWrapper::EmbeddingSnapshotHandleWrapper(
+    const SnapshotHandle* handle,
+    std::shared_ptr<EmbeddingRocksDB> db)
+    : handle(handle), db(std::move(db)) {}
 
-  std::vector<double> get_rocksdb_io_duration(
-      const int64_t step,
-      const int64_t interval) {
-    return impl_->get_rocksdb_io_duration(step, interval);
-  }
-
-  std::vector<double> get_l2cache_perf(
-      const int64_t step,
-      const int64_t interval) {
-    return impl_->get_l2cache_perf(step, interval);
-  }
-
-  void compact() {
-    return impl_->compact();
-  }
-
-  void flush() {
-    return impl_->flush();
-  }
-
-  void reset_l2_cache() {
-    return impl_->reset_l2_cache();
-  }
-
-  void wait_util_filling_work_done() {
-    return impl_->wait_util_filling_work_done();
-  }
-
-  c10::intrusive_ptr<EmbeddingSnapshotHandleWrapper> create_snapshot() {
-    auto handle = impl_->create_snapshot();
-    return c10::make_intrusive<EmbeddingSnapshotHandleWrapper>(handle, impl_);
-  }
-
-  void release_snapshot(
-      c10::intrusive_ptr<EmbeddingSnapshotHandleWrapper> snapshot_handle) {
-    auto handle = snapshot_handle->handle;
-    CHECK_NE(handle, nullptr);
-    impl_->release_snapshot(handle);
-  }
-
-  int64_t get_snapshot_count() const {
-    return impl_->get_snapshot_count();
-  }
-
- private:
-  friend class KVTensorWrapper;
-
-  // shared pointer since we use shared_from_this() in callbacks.
-  std::shared_ptr<ssd::EmbeddingRocksDB> impl_;
-};
+EmbeddingSnapshotHandleWrapper::~EmbeddingSnapshotHandleWrapper() {
+  db->release_snapshot(handle);
+}
 
 KVTensorWrapper::KVTensorWrapper(
     c10::intrusive_ptr<EmbeddingRocksDBWrapper> db,
@@ -392,6 +314,11 @@ KVTensorWrapper::KVTensorWrapper(
                  .layout(at::kStrided);
   if (snapshot_handle.has_value()) {
     snapshot_handle_ = std::move(snapshot_handle.value());
+  }
+  // derive strides details assuming contiguous tensor
+  strides_ = std::vector<int64_t>(shape_.size(), 1);
+  for (auto dim = shape_.size() - 1; dim > 0; --dim) {
+    strides_[dim - 1] = strides_[dim] * shape_[dim];
   }
 }
 
@@ -416,17 +343,21 @@ void KVTensorWrapper::set_range(
   CHECK_GE(db_->get_max_D(), shape_[1]);
   int pad_right = db_->get_max_D() - weights.size(1);
   if (pad_right == 0) {
-    db_->set_range(weights, start + row_offset_, length);
+    db_->set_range_to_storage(weights, start + row_offset_, length);
   } else {
     std::vector<int64_t> padding = {0, pad_right, 0, 0};
     auto padded_weights = torch::constant_pad_nd(weights, padding, 0);
     CHECK_EQ(db_->get_max_D(), padded_weights.size(1));
-    db_->set_range(padded_weights, start + row_offset_, length);
+    db_->set_range_to_storage(padded_weights, start + row_offset_, length);
   }
 }
 
-c10::IntArrayRef KVTensorWrapper::size() {
+c10::IntArrayRef KVTensorWrapper::sizes() {
   return shape_;
+}
+
+c10::IntArrayRef KVTensorWrapper::strides() {
+  return strides_;
 }
 
 c10::ScalarType KVTensorWrapper::dtype() {
@@ -481,7 +412,8 @@ static auto embedding_rocks_db_wrapper =
                 int64_t,
                 bool,
                 int64_t,
-                int64_t>(),
+                int64_t,
+                bool>(),
             "",
             {
                 torch::arg("path"),
@@ -503,6 +435,7 @@ static auto embedding_rocks_db_wrapper =
                 torch::arg("use_passed_in_path") = true,
                 torch::arg("tbe_unique_id") = 0,
                 torch::arg("l2_cache_size_gb") = 0,
+                torch::arg("enable_async_update") = true,
             })
         .def(
             "set_cuda",
@@ -524,6 +457,9 @@ static auto embedding_rocks_db_wrapper =
             &EmbeddingRocksDBWrapper::get_rocksdb_io_duration)
         .def("get_l2cache_perf", &EmbeddingRocksDBWrapper::get_l2cache_perf)
         .def("set", &EmbeddingRocksDBWrapper::set)
+        .def(
+            "set_range_to_storage",
+            &EmbeddingRocksDBWrapper::set_range_to_storage)
         .def(
             "get",
             &EmbeddingRocksDBWrapper::get,
@@ -573,9 +509,10 @@ static auto kv_tensor_wrapper =
         .def_property("layout_str", &KVTensorWrapper::layout_str)
         .def_property(
             "shape",
-            &KVTensorWrapper::size,
+            &KVTensorWrapper::sizes,
             std::string(
-                "Returns the shape of the original tensor. Only the narrowed part is materialized."));
+                "Returns the shape of the original tensor. Only the narrowed part is materialized."))
+        .def_property("strides", &KVTensorWrapper::strides);
 
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
   m.def(

@@ -14,6 +14,8 @@ import itertools
 import logging
 import os
 import tempfile
+import threading
+import time
 from math import log2
 from typing import Any, Callable, List, Optional, Tuple, Type, Union
 import torch  # usort:skip
@@ -145,6 +147,9 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         # Set to True to alloc a UVM tensor using malloc+cudaHostRegister.
         # Set to False to use cudaMallocManaged
         uvm_host_mapped: bool = False,
+        enable_async_update: bool = True,  # whether enable L2/rocksdb write to async background thread
+        # if > 0, insert all kv pairs to rocksdb at init time, in chunks of *bulk_init_chunk_size* rows
+        bulk_init_chunk_size: int = 0,
     ) -> None:
         super(SSDTableBatchedEmbeddingBags, self).__init__()
 
@@ -176,7 +181,6 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             "D_offsets",
             torch.tensor(D_offsets, device=self.current_device, dtype=torch.int32),
         )
-
         assert self.D_offsets.numel() == T + 1
         hash_size_cumsum = [0] + list(itertools.accumulate(rows))
         if hash_size_cumsum[-1] == 0:
@@ -202,6 +206,8 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         logging.info(
             f"TBE will allocate a UVM buffer with is_host_mapped={uvm_host_mapped}"
         )
+        self.bulk_init_chunk_size = bulk_init_chunk_size
+        self.lazy_init_thread: threading.Thread | None = None
 
         # Buffers for bounds check
         self.register_buffer(
@@ -237,7 +243,8 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             f"Desired L0 files per compaction: {ssd_l0_files_per_compact}, "
             f"{cache_size / 1024.0 / 1024.0 / 1024.0 : .2f}GB, "
             f"weights precision: {weights_precision}, "
-            f"output dtype: {output_dtype}"
+            f"output dtype: {output_dtype}, "
+            f"chunk size in bulk init: {bulk_init_chunk_size} rows"
         )
         self.register_buffer(
             "lxu_cache_state",
@@ -283,7 +290,6 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         )
 
         assert weights_precision in (SparseType.FP32, SparseType.FP16)
-        assert output_dtype in (SparseType.FP32, SparseType.FP16)
         self.weights_precision = weights_precision
         self.output_dtype: int = output_dtype.as_int()
 
@@ -427,7 +433,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         logging.info(f"tbe_unique_id: {tbe_unique_id}")
         if not ps_hosts:
             logging.info(
-                f"Logging SSD offloading setup, tbe_unique_id:{tbe_unique_id}, l2_cache_size:{l2_cache_size}GB, "
+                f"Logging SSD offloading setup, tbe_unique_id:{tbe_unique_id}, l2_cache_size:{l2_cache_size}GB, enable_async_update:{enable_async_update}"
                 f"passed_in_path={ssd_directory}, num_shards={ssd_rocksdb_shards},num_threads={ssd_rocksdb_shards},"
                 f"memtable_flush_period={ssd_memtable_flush_period},memtable_flush_offset={ssd_memtable_flush_offset},"
                 f"l0_files_per_compact={ssd_l0_files_per_compact},max_D={self.max_D},rate_limit_mbps={ssd_rate_limit_mbps},"
@@ -439,7 +445,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             )
             # pyre-fixme[4]: Attribute must be annotated.
             # pyre-ignore[16]
-            self.ssd_db = torch.classes.fbgemm.EmbeddingRocksDBWrapper(
+            self._ssd_db = torch.classes.fbgemm.EmbeddingRocksDBWrapper(
                 ssd_directory,
                 ssd_rocksdb_shards,
                 ssd_rocksdb_shards,
@@ -459,11 +465,16 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
                 use_passed_in_path,
                 tbe_unique_id,
                 l2_cache_size,
+                enable_async_update,
             )
+            if self.bulk_init_chunk_size > 0:
+                self.ssd_uniform_init_lower: float = ssd_uniform_init_lower
+                self.ssd_uniform_init_upper: float = ssd_uniform_init_upper
+                self._lazy_initialize_ssd_tbe()
         else:
             # pyre-fixme[4]: Attribute must be annotated.
             # pyre-ignore[16]
-            self.ssd_db = torch.classes.fbgemm.EmbeddingParameterServerWrapper(
+            self._ssd_db = torch.classes.fbgemm.EmbeddingParameterServerWrapper(
                 [host[0] for host in ps_hosts],
                 [host[1] for host in ps_hosts],
                 tbe_unique_id,
@@ -559,6 +570,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             weight_norm_coefficient=cowclip_regularization.weight_norm_coefficient,
             lower_bound=cowclip_regularization.lower_bound,
             regularization_mode=weight_decay_mode.value,
+            use_rowwise_bias_correction=False,  # Unused, this is used in TBE's Adam
         )
 
         table_embedding_dtype = weights_precision.as_dtype()
@@ -696,6 +708,86 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             self.stats_reporter.register_stats(self.l2_num_cache_evictions_stats_name)
             self.stats_reporter.register_stats(self.l2_cache_free_mem_stats_name)
             self.stats_reporter.register_stats(self.l2_cache_capacity_stats_name)
+
+    @property
+    # pyre-ignore
+    def ssd_db(self):
+        """Intercept the ssd_db property to make sure it is fully initialized before use.
+        This is needed because random weights are initialized in a separate thread"""
+        if self.lazy_init_thread is not None:
+            self.lazy_init_thread.join()
+            self.lazy_init_thread = None
+            logging.info("lazy ssd tbe initialization completed, weights are ready")
+
+        return self._ssd_db
+
+    @ssd_db.setter
+    # pyre-ignore
+    def ssd_db(self, value):
+        """Setter for ssd_db property."""
+        if self.lazy_init_thread is not None:
+            # This is essentially a copy assignment operation, since the thread is
+            # already existing, and we are assigning a new ssd_db to it. Complete
+            # the initialization first, then assign the new value to it.
+            self.lazy_init_thread.join()
+            self.lazy_init_thread = None
+            logging.info(
+                "lazy ssd tbe initialization completed, ssd_db will now get overridden"
+            )
+
+        self._ssd_db = value
+
+    def _lazy_initialize_ssd_tbe(self) -> None:
+        """
+        Initialize the SSD TBE with random weights. This function should only be
+        called once at initialization time.
+        """
+        if self.bulk_init_chunk_size > 0:
+            self.lazy_init_thread = threading.Thread(target=self._insert_all_kv)
+            # pyre-ignore
+            self.lazy_init_thread.start()
+            logging.info(
+                f"lazy ssd tbe initialization started since bulk_init_chunk_size is set to {self.bulk_init_chunk_size}"
+            )
+        else:
+            logging.debug(
+                "bulk_init_chunk_size is not set, skipping lazy initialization"
+            )
+
+    @torch.jit.ignore
+    def _insert_all_kv(self) -> None:
+        """
+        Populate all rows in the ssd TBE with random weights. Existing keys will
+        be effectively overwritten. This function should only be called once at
+        initailization time.
+        """
+        row_offset = 0
+        chunk_size = self.bulk_init_chunk_size
+        total_dim0 = 0
+        for dim0, _ in self.embedding_specs:
+            total_dim0 += dim0
+
+        start_ts = time.time()
+        chunk_tensor = torch.empty(
+            chunk_size,
+            self.max_D,
+            dtype=self.weights_precision.as_dtype(),
+            device="cuda",
+        )
+        cpu_tensor = torch.empty_like(chunk_tensor, device="cpu")
+        for row_offset in range(0, total_dim0, chunk_size):
+            actual_dim0 = min(total_dim0 - row_offset, chunk_size)
+            chunk_tensor.uniform_(
+                self.ssd_uniform_init_lower, self.ssd_uniform_init_upper
+            )
+            cpu_tensor.copy_(chunk_tensor, non_blocking=False)
+            rand_val = cpu_tensor[:actual_dim0, :]
+            # This code is intentionally not calling through the getter property
+            # to avoid the lazy initialization thread from joining with itself.
+            self._ssd_db.set_range_to_storage(rand_val, row_offset, actual_dim0)
+        end_ts = time.time()
+        elapsed = int((end_ts - start_ts) * 1e6)
+        logging.info(f"TBE bulk initialization took {elapsed:_} us")
 
     @torch.jit.ignore
     def _report_duration(
@@ -1483,7 +1575,6 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         return generate_vbe_metadata(
             offsets,
             batch_size_per_feature_per_rank,
-            self.optimizer,
             self.pooling_mode,
             self.feature_dims,
             self.current_device,
@@ -1665,7 +1756,9 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
 
     @torch.jit.export
     def split_embedding_weights(
-        self, no_snapshot: bool = True
+        self,
+        no_snapshot: bool = True,
+        should_flush: bool = False,
     ) -> List[PartiallyMaterializedTensor]:
         """
         This method is intended to be used by the checkpointing engine
@@ -1675,18 +1768,22 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         we would create a KVTensorWrapper (ssd_split_table_batched_embeddings.cpp)
         for each table (shard), which allows caller to read the weights
         using `narrow()` in a rolling-window manner.
+        Args:
+            should_flush (bool): Flush caches if True. Note: this is an expensive
+                                 operation, only set to True when necessary.
 
         Returns:
             a list of partially materialized tensors, each representing a table
         """
         # Force device synchronize for now
         torch.cuda.synchronize()
-        # Flush L1 and L2 caches
-        self.flush()
         # Create a snapshot
         if no_snapshot:
             snapshot_handle = None
         else:
+            if should_flush:
+                # Flush L1 and L2 caches
+                self.flush()
             snapshot_handle = self.ssd_db.create_snapshot()
 
         dtype = self.weights_precision.as_dtype()
@@ -1724,27 +1821,22 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
     def flush(self) -> None:
         active_slots_mask = self.lxu_cache_state != -1
 
-        active_slots_mask_cpu = active_slots_mask.cpu()
-        lxu_cache_weights_cpu = self.lxu_cache_weights.cpu()
-        lxu_cache_state_cpu = self.lxu_cache_state.cpu()
-
-        active_weights = lxu_cache_weights_cpu.masked_select(
-            active_slots_mask_cpu.view(-1, 1)
-        ).view(-1, self.max_D)
-        active_ids = lxu_cache_state_cpu.view(-1).masked_select(
-            active_slots_mask_cpu.view(-1)
+        active_weights_gpu = self.lxu_cache_weights[active_slots_mask.view(-1)].view(
+            -1, self.max_D
         )
+        active_ids_gpu = self.lxu_cache_state.view(-1)[active_slots_mask.view(-1)]
+
+        active_weights_cpu = active_weights_gpu.cpu()
+        active_ids_cpu = active_ids_gpu.cpu()
 
         torch.cuda.current_stream().wait_stream(self.ssd_eviction_stream)
 
-        self.ssd_db.set_cuda(
-            active_ids,
-            active_weights,
-            torch.tensor([active_ids.numel()]),
-            self.timestep,
-            False,
+        torch.cuda.synchronize()
+        self.ssd_db.set(
+            active_ids_cpu,
+            active_weights_cpu,
+            torch.tensor([active_ids_cpu.numel()]),
         )
-
         self.ssd_db.flush()
 
     def prepare_inputs(

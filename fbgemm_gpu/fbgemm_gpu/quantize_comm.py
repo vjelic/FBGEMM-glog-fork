@@ -183,6 +183,8 @@ class QuantizedCommCodec:
         self._loss_scale = loss_scale
         self._is_fwd = is_fwd
         self._row_dim: int = -1 if row_dim is None else row_dim
+        if self._comm_precision == SparseType.MX4:
+            self._row_dim = MX_GROUP_SIZE_DEFAULT if row_dim is None else row_dim
 
     def encode(
         self, input_tensor: torch.Tensor, ctx: Optional[QuantizationContext] = None
@@ -223,7 +225,7 @@ class QuantizedCommCodec:
             ctx = none_throws(ctx)
             torch._check(
                 input_len % ctx.row_dim == 0,
-                lambda: "input_len  {input_len} is not a multiple of row dim {ctx.row_dim}",
+                lambda: f"input_len  {input_len} is not a multiple of row dim {ctx.row_dim}",
             )
             assert input_len % ctx.row_dim == 0, (
                 f"input_len {input_len} is not a multiple of row dim {ctx.row_dim} "
@@ -239,7 +241,7 @@ class QuantizedCommCodec:
                 group_size = MX_GROUP_SIZE_DEFAULT
             assert (
                 input_len % group_size == 0
-            ), f"input_len {input_len} needs to be multiple of group_size 32"
+            ), f"input_len {input_len} needs to be multiple of group_size {group_size}"
             # quantized output size = half input size + number of groups (shared exp)
             ctx = none_throws(ctx)
             return (input_len // 2) + (input_len // ctx.mx_group_size)
@@ -252,11 +254,12 @@ class QuantizedCommCodec:
 
     def create_context(self) -> Optional[QuantizationContext]:
         # fp8 rowwise is activated when row_dim > 0
-        if (
-            self._comm_precision == SparseType.FP8
-            or self._comm_precision == SparseType.MX4
-        ):
+        if self._comm_precision == SparseType.FP8:
             return QuantizationContext(self._row_dim)
+        if self._comm_precision == SparseType.MX4:
+            return QuantizationContext(
+                row_dim=self._row_dim, mx_group_size=self._row_dim
+            )
         # int8 rowwise is default
         return QuantizationContext()
 

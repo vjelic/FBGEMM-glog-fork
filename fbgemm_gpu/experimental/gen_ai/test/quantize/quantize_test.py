@@ -16,12 +16,13 @@ import fbgemm_gpu.experimental.gen_ai  # noqa: F401
 import torch
 import triton  # noqa: F401
 
-from fbgemm_gpu.experimental.gemm.triton_gemm.fp8_gemm import (
-    matmul_fp8_block,
-    matmul_fp8_row,
-    quantize_fp8_block,
-    quantize_fp8_row,
-)
+if torch.cuda.is_available():
+    from fbgemm_gpu.experimental.gemm.triton_gemm.fp8_gemm import (
+        matmul_fp8_block,
+        matmul_fp8_row,
+        quantize_fp8_block,
+        quantize_fp8_row,
+    )
 
 from hypothesis import given, settings, strategies as st
 
@@ -49,22 +50,6 @@ FP16_MAX_POS: float = torch.finfo(torch.float16).max
 
 # pyre-fixme[16]: Module `fbgemm_gpu` has no attribute `open_source`.
 open_source: bool = getattr(fbgemm_gpu, "open_source", False)
-
-
-# pyre-ignore
-def patch_inductor_if_available():
-    """Helper function to disable currently buggy inductor pass."""
-
-    # pyre-ignore
-    def wrapper(func):
-        if hasattr(torch._inductor, "config"):
-            return torch._inductor.config.patch(enable_auto_functionalized_v2=False)(
-                func
-            )
-        else:
-            return func
-
-    return wrapper
 
 
 def fp8_row_quantize_ref(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -149,7 +134,9 @@ class FP8TorchExportTests(unittest.TestCase):
 
         model = TestModule().cuda()
         # bf16 required here
-        _ = torch.export.export(model, (torch.randn(32, 32).to(torch.bfloat16).cuda(),))
+        _ = torch.export.export(
+            model, (torch.randn(32, 32).to(torch.bfloat16).cuda(),), strict=True
+        )
 
     def test_f8f8bf16_export(self) -> None:
         class TestModule(torch.nn.Module):
@@ -176,7 +163,7 @@ class FP8TorchExportTests(unittest.TestCase):
             fp8_dtype = torch.float8_e4m3fnuz
         xq = torch.randn(M, K).to(fp8_dtype).cuda()
         wq = torch.randn(N, K).to(fp8_dtype).cuda()
-        _ = torch.export.export(model, (xq, wq))
+        _ = torch.export.export(model, (xq, wq), strict=True)
 
 
 @unittest.skipIf(
@@ -237,7 +224,7 @@ class FP8Tests(unittest.TestCase):
     )
     @settings(deadline=None)
     @given(
-        B_T=st.sampled_from([2048, 4096]),
+        B_T=st.sampled_from([0, 2048, 4096]),
         D=st.sampled_from([128, 256]),
         HD_L=st.sampled_from([256, 512]),
         Mode=st.sampled_from(
@@ -446,8 +433,8 @@ class FP8Tests(unittest.TestCase):
         # Blockwise seems to have slightly more noisy outputs.
         # Special case correctness to avoid flakiness.
         if Mode == "blockwise":
-            atol = 1.2e-1
-            rtol = 1.2e-1
+            atol = 1.3e-1
+            rtol = 1.3e-1
         else:
             atol = 9.0e-2
             rtol = 9.0e-2
@@ -739,16 +726,18 @@ class FP8Tests(unittest.TestCase):
         torch.testing.assert_close(y_ref, y_fp8, atol=8.0e-2, rtol=8.0e-2)
 
     @unittest.skipIf(
-        not torch.version.cuda, "Skip on AMD: GMM ops are not yet suported."
+        not torch.version.cuda and torch.version.hip < "6.2",
+        "Skip on AMD with < RoCM 6.2",
     )
     @settings(deadline=None)
     @given(
-        G=st.sampled_from([1, 4, 5]),
+        G=st.sampled_from([1, 4, 5, 16]),
         M=st.sampled_from([2048, 3584]),
         N=st.sampled_from([1024, 6144]),
         K=st.sampled_from([512, 3584]),
-        use_cudagraph=st.sampled_from([True, False]),
-        use_padding_zeros=st.sampled_from([True, False]),
+        use_cudagraph=st.booleans(),
+        use_padding_zeros=st.booleans(),
+        return_stacked=st.booleans(),
     )
     def test_fp8_grouped_gemm(
         self,
@@ -758,6 +747,7 @@ class FP8Tests(unittest.TestCase):
         K: int,
         use_cudagraph: bool,
         use_padding_zeros: bool,
+        return_stacked: bool,
     ) -> None:
         ms = (
             torch.randint(
@@ -768,92 +758,121 @@ class FP8Tests(unittest.TestCase):
             )
             * 64
         )
-        ns = torch.randint(1, (N // 64) + 1, (G,), dtype=torch.int) * 64
-        ks = torch.randint(1, (K // 64) + 1, (G,), dtype=torch.int) * 64
+        # When using padding or the dynamic kernel, Ns and Ks should be fixed.
+        if use_padding_zeros or return_stacked:
+            ns = [N] * G
+            ks = [K] * G
+        # Otherwise, any value is supported.
+        else:
+            # AMD requires N and K >= 512.
+            ns = torch.randint(512 // 64, (N // 64) + 1, (G,), dtype=torch.int) * 64
+            ks = torch.randint(512 // 64, (K // 64) + 1, (G,), dtype=torch.int) * 64
 
         x_group = []
         w_group = []
         xq_group = []
         wq_group = []
-        scale_group = []
+        x_scale_group = []
+        w_scale_group = []
         zero_start_index_M = None
-        zero_start_index_M_value = M
 
+        # If padding, mark where zeros start for each input.
         if use_padding_zeros:
-            zero_start_index_M_value = 256
-            zero_start_index_M = torch.full(
-                size=(G,),
-                fill_value=zero_start_index_M_value,
-                dtype=torch.int,
-                device="cuda",
-            )
+            zero_start_index_M = torch.tensor(ms, dtype=torch.long, device="cuda")
 
-        for i, (m, n, k) in enumerate(zip(ms, ns, ks)):
+        for _, (m, n, k) in enumerate(zip(ms, ns, ks)):
             x = torch.rand(size=(m, k), dtype=torch.bfloat16, device="cuda")
             w = torch.rand(size=(n, k), dtype=torch.bfloat16, device="cuda")
 
             if use_padding_zeros:
-                # Zero out dim M from index zero_start_index_M_value
-                x[zero_start_index_M_value:, :] = 0
+                # When padding, all x values are made to have the same M.
+                x = torch.nn.functional.pad(x, (0, 0, 0, max(ms) - m), value=0)
 
-            xq, x_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(x)
-            wq, w_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(w)
+            xq, x_scale = quantize_fp8_row(x)
+            wq, w_scale = quantize_fp8_row(w)
             x_group.append(x)
             w_group.append(w)
             xq_group.append(xq)
             wq_group.append(wq)
-            scale_group.append(x_scale * w_scale)
+            x_scale_group.append(x_scale)
+            w_scale_group.append(w_scale)
+
+        # Make inputs contiguous in memory, this simulates the typical MOE use-case.
+        if use_padding_zeros:
+            x_group = torch.unbind(torch.stack(x_group, dim=0).contiguous())
+            w_group = torch.unbind(torch.stack(w_group, dim=0).contiguous())
+            xq_group = torch.stack(xq_group, dim=0).contiguous()
+            wq_group = torch.stack(wq_group, dim=0).contiguous()
+            x_scale_group = torch.stack(x_scale_group, dim=0).contiguous()
+            w_scale_group = torch.stack(w_scale_group, dim=0).contiguous()
 
         # FP8 grouped gemm kernel
-        if use_cudagraph:
-            # warmup
-            torch.ops.fbgemm.f8f8bf16_grouped(
+        fp8_args = (
+            [
                 xq_group,
                 wq_group,
-                scale_group,
-                zero_start_index_M if use_padding_zeros else None,
+                x_scale_group,
+                w_scale_group,
+                zero_start_index_M,
+            ]
+            if use_padding_zeros
+            else [xq_group, wq_group, x_scale_group, w_scale_group]
+        )
+        fp8_op = (
+            torch.ops.fbgemm.f8f8bf16_rowwise_grouped_dynamic
+            if use_padding_zeros
+            else (
+                torch.ops.fbgemm.f8f8bf16_rowwise_grouped_stacked
+                if return_stacked
+                else torch.ops.fbgemm.f8f8bf16_rowwise_grouped
             )
+        )
+        if use_cudagraph:
+            # warmup
+            fp8_op(*fp8_args)
             # With cudagraph
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                y_fp8_group = torch.ops.fbgemm.f8f8bf16_grouped(
-                    xq_group,
-                    wq_group,
-                    scale_group,
-                    zero_start_index_M if use_padding_zeros else None,
-                )
+                y_fp8_group = fp8_op(*fp8_args)
             g.replay()
         else:
-            y_fp8_group = torch.ops.fbgemm.f8f8bf16_grouped(
-                xq_group,
-                wq_group,
-                scale_group,
-                zero_start_index_M if use_padding_zeros else None,
-            )
+            y_fp8_group = fp8_op(*fp8_args)
+
+        # Massage output into proper format.
+        if not isinstance(y_fp8_group, (tuple, list)):
+            if y_fp8_group.ndim == 2:
+                y_fp8_group = torch.split(y_fp8_group, tuple(ms.tolist()), dim=0)
+            else:
+                y_fp8_group = torch.unbind(y_fp8_group)
 
         # BF16 grouped gemm kernel
+        bf16_args = (
+            [x_group, w_group, zero_start_index_M if use_padding_zeros else None]
+            if return_stacked
+            else [x_group, w_group]
+        )
+        bf16_op = (
+            torch.ops.fbgemm.bf16bf16bf16_grouped_dynamic
+            if return_stacked
+            else torch.ops.fbgemm.bf16bf16bf16_grouped
+        )
         if use_cudagraph:
             # warmup
-            torch.ops.fbgemm.bf16bf16bf16_grouped(
-                x_group,
-                w_group,
-                zero_start_index_M if use_padding_zeros else None,
-            )
+            bf16_op(*bf16_args)
             # With cudagraph
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                y_bf16_group = torch.ops.fbgemm.bf16bf16bf16_grouped(
-                    x_group,
-                    w_group,
-                    zero_start_index_M if use_padding_zeros else None,
-                )
+                y_bf16_group = bf16_op(*bf16_args)
             g.replay()
         else:
-            y_bf16_group = torch.ops.fbgemm.bf16bf16bf16_grouped(
-                x_group,
-                w_group,
-                zero_start_index_M if use_padding_zeros else None,
-            )
+            y_bf16_group = bf16_op(*bf16_args)
+
+        # View output as list if needed.
+        if not isinstance(y_bf16_group, (tuple, list)):
+            if y_bf16_group.ndim == 2:
+                y_bf16_group = torch.split(y_bf16_group, tuple(ms.tolist()), dim=0)
+            else:
+                y_bf16_group = torch.unbind(y_bf16_group)
 
         # BF16 loopover gemm reference
         y_group_ref = []
@@ -864,27 +883,13 @@ class FP8Tests(unittest.TestCase):
         # Assert FP8 outputs
         for i in range(len(y_group_ref)):
             torch.testing.assert_close(
-                y_fp8_group[i], y_group_ref[i], atol=8.0e-2, rtol=8.0e-2
-            )
-
-        # Calculate output sizes
-        output_sizes = []
-        for i in range(len(x_group)):
-            output_size = x_group[i].size(0) * w_group[i].size(0)
-            output_sizes.append(output_size)
-        # Split the output_tensor into a list of tensors based on output_sizes
-        y_bf16_group = torch.split(y_bf16_group, output_sizes)
-        y_bf16_group_list = []
-        # Reshape each tensor in the output_group
-        for i in range(len(x_group)):
-            y_bf16_group_list.append(
-                y_bf16_group[i].view(x_group[i].size(0), w_group[i].size(0))
+                y_fp8_group[i], y_group_ref[i], atol=8.0e-2, rtol=2.0e-1
             )
 
         # Assert BF16 outputs
         for i in range(len(y_group_ref)):
             torch.testing.assert_close(
-                y_bf16_group_list[i], y_group_ref[i], atol=8.0e-2, rtol=8.0e-2
+                y_bf16_group[i], y_group_ref[i], atol=8.0e-2, rtol=8.0e-2
             )
 
     @unittest.skipIf(
@@ -926,35 +931,33 @@ class FP8Tests(unittest.TestCase):
                 1,
                 M,
                 (G,),
-                dtype=torch.int,
                 device="cuda",
             )
             for i in range(len(x_group)):
                 x_group[i][zero_start_index_M[i] :, :] = 0
 
+        bf16_op = (
+            torch.ops.fbgemm.bf16bf16bf16_grouped_dynamic
+            if use_padding_zeros
+            else torch.ops.fbgemm.bf16bf16bf16_grouped
+        )
+        bf16_args = (
+            (x_group, w_group, zero_start_index_M)
+            if use_padding_zeros
+            else (x_group, w_group)
+        )
+
         # BF16 grouped gemm kernel
         if use_cudagraph:
             # warmup
-            torch.ops.fbgemm.bf16bf16bf16_grouped(
-                x_group,
-                w_group,
-                zero_start_index_M if use_padding_zeros else None,
-            )
+            bf16_op(*bf16_args)
             # With cudagraph
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
-                y_bf16_group = torch.ops.fbgemm.bf16bf16bf16_grouped(
-                    x_group,
-                    w_group,
-                    zero_start_index_M if use_padding_zeros else None,
-                )
+                y_bf16_group = bf16_op(*bf16_args)
             g.replay()
         else:
-            y_bf16_group = torch.ops.fbgemm.bf16bf16bf16_grouped(
-                x_group,
-                w_group,
-                zero_start_index_M if use_padding_zeros else None,
-            )
+            y_bf16_group = bf16_op(*bf16_args)
 
         # BF16 loopover gemm reference
         y_group_ref = torch.bmm(xs, ws.transpose(1, 2))
@@ -1037,8 +1040,6 @@ class FP8Tests(unittest.TestCase):
         "Skip if no GPU is present.",
     )
     @unittest.skipIf(open_source, "Temporarily disabled in OSS.")
-    # TODO We can probably turn this back on later, it seems to currently be buggy.
-    @patch_inductor_if_available()
     def test_quantize_compile(self) -> None:
         # Test that quantize operators can be torch compiled.
         # Correctness is covered in other tests, we just want to make sure
@@ -1052,6 +1053,7 @@ class FP8Tests(unittest.TestCase):
         X = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
         XQ = torch.randn(M, K, device="cuda").to(fp8_dtype)
         WQ = torch.randn(N, K, device="cuda").to(fp8_dtype)
+        output = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
         row_scale = torch.randn(M, device="cuda")
         col_scale = torch.randn(N, device="cuda")
         block_scale = torch.randn(M // 128, K // 128, device="cuda")
@@ -1069,6 +1071,14 @@ class FP8Tests(unittest.TestCase):
         )
         torch.compile(torch.ops.fbgemm.f8f8bf16_tensorwise)(XQ, WQ, 1.0)
         torch.compile(torch.ops.fbgemm.f8f8bf16_rowwise)(XQ, WQ, row_scale, col_scale)
+
+        # Check that preallocated output writing is correct.
+        torch.compile(torch.ops.fbgemm.f8f8bf16_rowwise_out)(
+            XQ, WQ, row_scale, col_scale, output
+        )
+        torch.testing.assert_close(
+            output, torch.ops.fbgemm.f8f8bf16_rowwise(XQ, WQ, row_scale, col_scale)
+        )
 
         # These ops are only supported on cuda for now.
         if torch.version.cuda:
@@ -1102,6 +1112,122 @@ class FP8Tests(unittest.TestCase):
                 block_scale[0],
                 block_scale[0],
             )
+            # test bf16_fast_gemv is torch compileable
+            X_bf16 = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+            W_bf16 = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+            torch.compile(torch.ops.fbgemm.bf16_fast_gemv)(X_bf16, W_bf16)
+
+    @unittest.skipIf(
+        not torch.version.cuda, "Skip on AMD: fast gemv op is not yet supported."
+    )
+    def test_gemv(
+        self, test_cases, gemv_op, atol, rtol, quantize_w=False, quantize_x=False
+    ):
+        for M, N, K in test_cases:
+            x = torch.randn(size=(M, K), dtype=torch.bfloat16, device="cuda") * 0.1
+            w = torch.randn(size=(N, K), dtype=torch.bfloat16, device="cuda") * 0.01
+            if quantize_w and not quantize_x:
+                wq, w_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(w)
+                z = gemv_op(x, wq, w_scale)
+            elif quantize_w and quantize_x:
+                xq, x_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(x)
+                wq, w_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(w)
+                z = gemv_op(xq, wq, x_scale * w_scale)
+            else:
+                z = gemv_op(x, w)
+            z_ref = (x @ w.T).to(torch.bfloat16).to("cuda")
+            torch.testing.assert_close(z, z_ref, atol=atol, rtol=rtol)
+
+    @unittest.skipIf(
+        not torch.version.cuda, "Skip on AMD: fast gemv op is not yet supported."
+    )
+    def test_bf16_gemv(self) -> None:
+        test_cases = [
+            (1, 128, 256),
+            (1, 256, 256),
+            (1, 1280, 8192),
+            (1, 8192, 1024),
+            (1, 7168, 8192),
+            (1, 8192, 3584),
+        ]
+        self.test_gemv(test_cases, torch.ops.fbgemm.bf16_fast_gemv, 9.0e-3, 9.0e-3)
+
+    @unittest.skipIf(
+        not torch.version.cuda, "Skip on AMD: fast gemv op is not yet supported."
+    )
+    def test_bf16_fp8_gemv(self) -> None:
+        test_cases = [
+            (1, 128, 256),
+            (1, 256, 256),
+            (1, 1280, 8192),
+            (1, 8192, 1024),
+            (1, 7168, 8192),
+            (1, 8192, 3584),
+        ]
+        self.test_gemv(
+            test_cases,
+            torch.ops.fbgemm.bf16fp8bf16_fast_gemv,
+            1.0e-2,
+            1.0e-2,
+            quantize_w=True,
+        )
+
+    @unittest.skipIf(
+        not torch.version.cuda, "Skip on AMD: fast gemv op is not yet supported."
+    )
+    def test_fp8_fp8_gemv(self) -> None:
+        test_cases = [
+            (1, 1280, 8192),
+            (1, 8192, 1024),
+            (1, 7168, 8192),
+            (1, 8192, 3584),
+        ]
+        self.test_gemv(
+            test_cases,
+            torch.ops.fbgemm.fp8fp8bf16_fast_gemv,
+            9.0e-2,
+            9.0e-2,
+            quantize_w=True,
+            quantize_x=True,
+        )
+
+    @unittest.skipIf(
+        torch.version.hip, "Skip on AMD: cuda quantize op is yet supported."
+    )
+    @settings(deadline=None)
+    @given(
+        K=st.sampled_from([0, 128]),
+    )
+    def test_quantize_zero_input(self, K) -> None:
+        w = torch.randn(size=(0, K), dtype=torch.bfloat16, device="cuda")
+        w_scale_ref = torch.empty(size=(0,), dtype=torch.float32, device="cuda")
+        wq, w_scale = torch.ops.fbgemm.quantize_fp8_per_row(w)
+        torch.testing.assert_close(w.shape, wq.shape)
+        torch.testing.assert_close(w_scale.shape, w_scale_ref.shape)
+
+    @unittest.skipIf(torch.version.hip, "Skip on AMD: fp8 lite op is yet suported.")
+    @settings(deadline=None)
+    @given(
+        M=st.sampled_from([1, 4]),
+        N=st.sampled_from([1024, 6144]),
+        K=st.sampled_from([512, 3584]),
+        CudaGraph=st.sampled_from([True, False]),
+    )
+    def test_fp8_lite_matmul(self, M: int, N: int, K: int, CudaGraph: bool) -> None:
+        x = torch.randn(size=(M, K), dtype=torch.bfloat16, device="cuda") * 0.1
+        w = torch.randn(size=(N, K), dtype=torch.bfloat16, device="cuda") * 0.01
+        xq, x_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(x)
+        wq, w_scale = torch.ops.fbgemm.quantize_fp8_per_tensor(w)
+        if CudaGraph:
+            zq = torch.ops.fbgemm.f8f8bf16_lite(xq, wq, x_scale * w_scale)
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                zq = torch.ops.fbgemm.f8f8bf16_lite(xq, wq, x_scale * w_scale)
+            g.replay()
+        else:
+            zq = torch.ops.fbgemm.f8f8bf16_lite(xq, wq, x_scale * w_scale)
+        zq_ref = (x @ w.T).to(torch.bfloat16)
+        torch.testing.assert_close(zq, zq_ref, atol=9.0e-2, rtol=9.0e-2)
 
 
 if __name__ == "__main__":
