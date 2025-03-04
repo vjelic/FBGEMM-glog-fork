@@ -318,6 +318,7 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
             Y(2, 8, 1, 2);
           }
         }
+        {%- endif %}
         if (max_int4_128b_rows > 2) {
           Y(1, 4, 2, 4);
         }
@@ -364,6 +365,7 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
             Y(2, 4, 1, 2);
           }
         }
+        {%- endif %}
         if (max_int8_128b_rows > 2) {
           if(use_rocm_packed_bag_mode) {
             Y(2, 2, 2, 4);
