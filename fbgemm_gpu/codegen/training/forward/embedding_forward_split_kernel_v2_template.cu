@@ -770,8 +770,8 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
       const uint32_t load_D = (D_offsets[t + 1] / VEC_WIDTH) - D_start;
       const auto placement = static_cast<PlacementType>(weights_placements[t]);
       const auto is_cache = placement == PlacementType::MANAGED_CACHING;
-      {%- if is_rocm and not is_cache %}
-      const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, (kWarpSize/2));
+      {%- if is_rocm %} 
+      const uint32_t num_warps_per_row = is_cache ? DIV_ROUND_UP(load_D, (kWarpSize/2)):DIV_ROUND_UP(load_D, kWarpSize);
       {%- else %}
       const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, kWarpSize);
       {% endif %}
@@ -817,14 +817,16 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
     load_D = shfl_sync(load_D, 0);
     const auto placement = static_cast<PlacementType>(weights_placements[t]);
     const auto is_cache = placement == PlacementType::MANAGED_CACHING;
-    {%- if is_rocm and not is_cache %}
-    const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, (kWarpSize/2));
+    {%- if is_rocm %} 
+    const uint32_t num_warps_per_row = is_cache ? DIV_ROUND_UP(load_D, (kWarpSize/2)):DIV_ROUND_UP(load_D, kWarpSize);
     {%- else %}
     const uint32_t num_warps_per_row = DIV_ROUND_UP(load_D, kWarpSize);
     {% endif %}
     if (table_warp_id >= num_warps_per_row * (is_small_L ? num_warps_for_small_L : B)) {
       return;
     }
+
+    
     // Compute d (same for all Ls)
     const uint32_t load_d = (table_warp_id % num_warps_per_row) * kWarpSize;
     // Compute sample ID
