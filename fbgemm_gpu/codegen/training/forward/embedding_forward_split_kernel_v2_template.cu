@@ -866,7 +866,7 @@ __global__ void split_embedding_codegen_forward_{{ wdesc }}_v2_kernel(
         smem[params_offset + SAVED_PARAMS::P_load_D] = load_D;
         smem[params_offset + SAVED_PARAMS::P_total_load_D] = total_load_D;
         if (USE_LXU_CACHE) {
-          if ( placement == PlacementType::MANAGED_CACHING) {
+          if (placement == PlacementType::MANAGED_CACHING) {
             *reinterpret_cast<const cache_t**>(&smem[params_offset + LXU_CACHE_PARAMS::P_lxu_cache_weights]) =
               lxu_cache_weights + (load_d * VEC_WIDTH);
             *reinterpret_cast<const int32_t**>(&smem[params_offset + LXU_CACHE_PARAMS::P_lxu_cache_locations]) =
