@@ -170,5 +170,6 @@ gpu_cpp_library(
     fbgemm_gpu_tbe_cache
     fbgemm_gpu_tbe_optimizers
     fbgemm_gpu_tbe_utils
+    $<$<BOOL:${TBB_FOUND}>:TBB::tbb>  # Add TBB dependency conditionally
   DESTINATION
     fbgemm_gpu)
