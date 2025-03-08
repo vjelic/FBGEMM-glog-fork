@@ -107,7 +107,7 @@ class SplitEmbedding{{ optimizer_class_name }}(Optimizer):
         # TODO: Add arg checkers
         defaults = dict(
             {%- if "learning_rate_tensor" in args.split_function_arg_names %}
-            learning_rate=learning_rate,
+            learning_rate=learning_rate_tesnor,
             {%- endif %}
             {%- if "eps" in args.split_function_arg_names %}
             eps=eps,
