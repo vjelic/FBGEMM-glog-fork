@@ -129,24 +129,16 @@ torch::Tensor IndicesGenerator::generate() {
   }
 
   // Now sort the indices by their tags.
+  std::sort(
 #ifdef TBB_FOUND
-  std::sort(
       std::execution::par,
-      std::begin(indicesWithTags),
-      std::end(indicesWithTags),
-      [](const std::pair<int64_t, double>& lhs,
-         const std::pair<int64_t, double>& rhs) {
-        return lhs.second < rhs.second;
-      });
-#else
-  std::sort(
-      std::begin(indicesWithTags),
-      std::end(indicesWithTags),
-      [](const std::pair<int64_t, double>& lhs,
-         const std::pair<int64_t, double>& rhs) {
-        return lhs.second < rhs.second;
-      });
 #endif
+      std::begin(indicesWithTags),
+      std::end(indicesWithTags),
+      [](const std::pair<int64_t, double>& lhs,
+         const std::pair<int64_t, double>& rhs) {
+        return lhs.second < rhs.second;
+      });
 
   auto t = convertVectorToTensor(indicesWithTags);
 
