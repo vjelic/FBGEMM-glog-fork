@@ -128,10 +128,11 @@ torch::Tensor IndicesGenerator::generate() {
     indicesMetadata[curIdx].tags.push_back(tag);
   }
 
-  // Now sort the indices by their tags. Use parallel sort for some extra speed
-  // (vector is very large).
+  // Now sort the indices by their tags.
   std::sort(
+#ifdef TBB_FOUND
       std::execution::par,
+#endif
       std::begin(indicesWithTags),
       std::end(indicesWithTags),
       [](const std::pair<int64_t, double>& lhs,

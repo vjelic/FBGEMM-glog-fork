@@ -86,6 +86,13 @@ include(${CMAKEMODULES}/RocmSetup.cmake)
 # Load gpu_cpp_library()
 include(${CMAKEMODULES}/GpuCppLibrary.cmake)
 
+# Find and include TBB for parallel algorithms support
+find_package(TBB QUIET)
+if(NOT TBB_FOUND)
+  message(WARNING "Intel TBB not found. Attempting to build without explicit TBB dependency. If you encounter linking errors with tbb::detail symbols, please install TBB or modify indices_generator.cpp to avoid using std::execution::par.")
+else()
+  message(STATUS "Found Intel TBB: ${TBB_VERSION}")
+endif()
 
 ################################################################################
 # Source Includes

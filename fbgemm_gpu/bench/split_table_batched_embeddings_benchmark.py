@@ -47,6 +47,16 @@ from fbgemm_gpu.split_table_batched_embeddings_ops_training import (
 from fbgemm_gpu.split_table_batched_embeddings_ops_training_common import (
     generate_vbe_metadata,
 )
+from fbgemm_gpu.tbe.bench import (
+    bench_warmup,
+    benchmark_cpu_requests,
+    benchmark_eval_compression,
+    benchmark_pipelined_requests,
+    benchmark_requests,
+    benchmark_requests_refer,
+    benchmark_vbe,
+    fill_random_scale_bias,
+)
 from fbgemm_gpu.tbe.ssd import SSDTableBatchedEmbeddingBags
 from fbgemm_gpu.tbe.utils import generate_requests, get_device, round_up, TBERequest
 from torch import Tensor
@@ -69,26 +79,9 @@ open_source: bool = getattr(fbgemm_gpu, "open_source", False)
 
 if open_source:
     # pyre-ignore[21]
-    from bench_utils import (
-        benchmark_pipelined_requests,
-        benchmark_requests,
-        benchmark_requests_refer,
-        benchmark_torch_function,
-        benchmark_vbe,
-        warmup,
-    )
+    from bench_utils import benchmark_torch_function
 else:
-    from fbgemm_gpu.bench.bench_utils import (
-        benchmark_pipelined_requests,
-        benchmark_requests,
-        benchmark_requests_refer,
-        benchmark_torch_function,
-        benchmark_vbe,
-        warmup,
-    )
-
-
-from fbgemm_gpu.tbe.bench import benchmark_eval_compression, fill_random_scale_bias
+    from fbgemm_gpu.bench.bench_utils import benchmark_torch_function
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -317,9 +310,7 @@ def device(  # noqa C901
                 )
                 for d in Ds
             ],
-            cache_precision=(
-                weights_precision if cache_precision is None else cache_precision
-            ),
+            cache_precision=cache_precision,
             cache_algorithm=CacheAlgorithm.LRU,
             cache_load_factor=cache_load_factor,
             **common_split_args,
@@ -986,24 +977,6 @@ def cache(  # noqa C901
     )
 
 
-def benchmark_cpu_requests(
-    requests: List[TBERequest],
-    func: Callable[[Tensor, Tensor, Optional[Tensor]], Tensor],
-    num_warmups: int = 0,
-) -> float:
-    import time
-
-    if num_warmups > 0:
-        for _ in range(num_warmups):
-            func(*(requests[0].unpack_3()))
-
-    start_time = time.perf_counter()
-    for req in requests:
-        func(*(req.unpack_3()))
-    end_time = time.perf_counter()
-    return (end_time - start_time) / len(requests)
-
-
 @cli.command()
 @click.option("--alpha", default=1.0)
 @click.option("--bag-size", default=20)
@@ -1409,7 +1382,7 @@ def nbit_device(  # noqa C901
     # warm-up right before profiling
     # warmup_ms prioritized over warmup_runs
     if warmup_ms or warmup_runs:
-        warmup(
+        bench_warmup(
             requests[0],
             # pyre-ignore[6]
             warmup_ms,
@@ -1836,7 +1809,7 @@ def nbit_device_with_spec(  # noqa C901
         # warm-up right before profiling
         # warmup_ms prioritized over warmup_runs
         if warmup_ms or warmup_runs:
-            warmup(
+            bench_warmup(
                 kineto_request[0],
                 # pyre-ignore[6]
                 warmup_ms,
@@ -2827,7 +2800,6 @@ def hashtable(  # noqa C901
     )
 
     if use_cpu:
-        # pyre-fixme[16]: Module `classes` has no attribute `fbgemm`.
         ht = torch.classes.fbgemm.PrunedMapCPU()
         ht.insert(chosen_indices, dense_indices, offsets, T)
 
@@ -3289,6 +3261,7 @@ def emb_inplace_update(  # noqa C901
 @click.option("--batch-size", default=512)
 @click.option("--embedding-dim-list", type=str, default="128")
 @click.option("--weights-precision", type=SparseType, default=SparseType.FP32)
+@click.option("--cache-precision", type=SparseType, default=None)
 @click.option("--stoc", is_flag=True, default=False)
 @click.option("--iters", default=100)
 @click.option("--warmup-runs", default=0)
@@ -3308,6 +3281,7 @@ def device_with_spec(  # noqa C901
     batch_size: int,
     embedding_dim_list: str,
     weights_precision: SparseType,
+    cache_precision: Optional[SparseType],
     stoc: bool,
     iters: int,
     warmup_runs: int,
@@ -3396,6 +3370,7 @@ def device_with_spec(  # noqa C901
         learning_rate=0.1,
         eps=0.1,
         weights_precision=weights_precision,
+        cache_precision=cache_precision,
         stochastic_rounding=stoc,
         output_dtype=output_dtype,
         pooling_mode=pooling_mode,
