@@ -264,12 +264,12 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
         num_packed_bags_L = max_indices_per_warp > max_L && !std::is_same_v<output_t, uint8_t> && sparse_type != SparseType::FP32?  max_indices_per_warp / max_L : 1; \
         num_packed_bags_D = NumUint4LoadsPerRow > num_uint4_loads_per_row && !std::is_same_v<output_t, uint8_t> && sparse_type != SparseType::FP32 ? NumUint4LoadsPerRow / num_uint4_loads_per_row : 1; \
         /* Number of bags that might be fitted to shared memory. */                   \
-        num_packed_bags = num_packed_bags_L>1 ? num_packed_bags_D * num_packed_bags_L : num_packed_bags_D; \
+        num_packed_bags = max_L>1 ? num_packed_bags_D : num_packed_bags_D * num_packed_bags_L; \
       } \
       {%- endif %}
-      if (num_packed_bags > 1 && num_packed_bags_L>1) {              \
+      if (num_packed_bags > 1 && max_L<=1) {              \
         X(dev_only, true, true, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)        \
-      } else if (num_packed_bags > 1 && num_packed_bags_L<=1) {              \
+      } else if (num_packed_bags > 1 && max_L>1) {              \
         X(dev_only, true, false, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)        \
       } else {                                \
         X(dev_only, false, false, OutputRowsPerThread, InputRowsInFlight, MinNum128BRows, MaxNum128BRows)       \
