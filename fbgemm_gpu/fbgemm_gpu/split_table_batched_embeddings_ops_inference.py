@@ -951,7 +951,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
         indices, offsets, per_sample_weights = inputs_to_device(
             indices, offsets, per_sample_weights, self.bounds_check_warning
         )
-        weights_tys: List[SparseType] = [e[3] for e in self.embedding_specs]
+        
 
 
 
@@ -1017,6 +1017,7 @@ class IntNBitTableBatchedEmbeddingBagsCodegen(nn.Module):
             )
         # Note: CPU and CUDA ops use the same interface to facilitate JIT IR
         # generation for CUDA/CPU. For CPU op, we don't need weights_uvm and
+        
         # weights_placements
         return torch.ops.fbgemm.int_nbit_split_embedding_codegen_lookup_function(
             dev_weights=self.weights_host if self.host_size > 0 else self.weights_dev,
