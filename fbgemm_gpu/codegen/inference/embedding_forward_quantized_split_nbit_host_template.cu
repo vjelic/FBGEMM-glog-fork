@@ -241,9 +241,6 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
     // PackedMode is only available for ROCm devices
     constexpr bool kIsRocm = {{ "true" if is_rocm else "false" }};
     const static bool use_rocm_packed_bag_mode = kIsRocm && fbgemm_gpu::config::is_feature_enabled(fbgemm_gpu::config::FeatureGateName::TBE_ROCM_INFERENCE_PACKED_BAGS);
-    // PackedMode is only available for ROCm devices
-    constexpr bool kIsRocm = {{ "true" if is_rocm else "false" }};
-    const static bool use_rocm_packed_bag_mode = kIsRocm && fbgemm_gpu::config::is_feature_enabled(fbgemm_gpu::config::FeatureGateName::TBE_ROCM_INFERENCE_PACKED_BAGS);
     /*
      * Helper macro for run-time packed mode dispatch. Computes maximum number of bags
      * (num_packed_bags) that fits into NumUint4LoadsPerRow given embeddings' type and 
@@ -257,7 +254,10 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
       int32_t num_packed_bags_L = 1;  \
       const int64_t max_L = max_Ls;   \
       {%-if is_rocm and not nobag %}
-      if(use_rocm_packed_bag_mode) {                                                       \
+      const static bool use_packed_bag_mode = fbgemm_gpu::config::is_feature_enabled( \
+        fbgemm_gpu::config::FeatureGateName::TBE_ROCM_INFERENCE_PACKED_BAGS);         \
+      if(use_packed_bag_mode) {                                                       \
+        /* The actual maximum number of uint4 reads per row w.r.t. row size, type and alignment */ \
         const int32_t num_uint4_loads_per_row = nbit::div_round_up(nbit::padded_row_size_in_bytes(max_D, sparse_type, row_alignment), sizeof(uint4)); \
         constexpr int32_t NumUint4LoadsPerRow = MaxNum128BRows * 128 / sizeof(uint4); \
         constexpr int32_t max_indices_per_warp = kWarpSize / NumUint4LoadsPerRow; \
@@ -347,18 +347,8 @@ Tensor int_nbit_split_embedding{{ "_nobag" if nobag else "" }}_codegen_forward_{
           } else {
             Y(1, 4, 4, 8);
           }
-          if(use_rocm_packed_bag_mode) {
-            Y(1, 2, 4, 8);
-          } else {
-            Y(1, 4, 4, 8);
-          }
         }
         if (max_int4_128b_rows > 8) {
-          if(use_rocm_packed_bag_mode) {
-            Y(1, 1, 8, 16);
-          } else { 
-            Y(1, 4, 8, 16);
-          } 
           if(use_rocm_packed_bag_mode) {
             Y(1, 1, 8, 16);
           } else { 
