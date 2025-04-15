@@ -89,7 +89,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     return;
   }
 
-  if (PackedMode_L){
+  if constexpr (PackedMode_L){
     const int64_t weights_offset = weights_offsets[t];
     const int32_t D_total = padded_D(D, weight_ty);
     const int32_t D_padding = D_total - D;
