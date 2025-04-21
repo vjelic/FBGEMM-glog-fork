@@ -242,8 +242,12 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
       const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
       //  const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
       input_rows_in_flight = shfl_sync(input_rows_in_flight, packed_bag_idx_D * uint4_loads_per_row);
+      {%- if is_rocm %}
       constexpr int32_t max_indices_per_warp = kWarpSize / (MaxNum128BRows * 128 / sizeof(uint4));
       int32_t Ls_shfl[OutputRowsPerThread*max_indices_per_warp];
+      {% else %}
+      int32_t Ls_shfl[OutputRowsPerThread*kWarpSize];
+      {% endif %}
       for(uint32_t k = 0; k < num_packed_bags_L ; ++k){
         for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
           Ls_shfl[k*OutputRowsPerThread+i] = shfl_sync(Ls[i], k * bag_size_offset * NumUint4LoadsPerRow + packed_bag_idx_D * uint4_loads_per_row);
