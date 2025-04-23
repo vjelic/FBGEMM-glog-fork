@@ -133,9 +133,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
     __shared__ AllBuffers buffers;
     for (uint32_t L_start = 0; L_start < max_Ls; L_start += InputRowsInFlight) {
       uint32_t input_rows_in_flight = min(static_cast<uint32_t>(InputRowsInFlight), max_Ls - L_start);
-
-
-
       {% if weighted %}
       typedef float AllIndiceWeights[WarpsPerBlock][OutputRowsPerThread][InputRowsInFlight];
       __shared__ AllIndiceWeights buffers_indice_weights;
@@ -143,17 +140,13 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
       uint32_t input_row_idx = 0;
       for (uint32_t load_idx = threadIdx.x; load_idx < input_rows_in_flight * num_packed_bags_L * NumUint4LoadsPerRow; load_idx += kWarpSize) {
         uint32_t row_load_idx = load_idx % NumUint4LoadsPerRow % uint4_loads_per_row;
-              //  To do: write the condition of bag_size_offset depending on num_packed_bags_L
-    
-        input_row_idx = num_packed_bags_L>1? (load_idx / NumUint4LoadsPerRow) % bag_size_offset: (load_idx / NumUint4LoadsPerRow); // 63/32 = 1% 1 = 0
-        
+        input_row_idx = num_packed_bags_L>1? (load_idx / NumUint4LoadsPerRow) % bag_size_offset: (load_idx / NumUint4LoadsPerRow); 
         const uint32_t packed_bag_idx_D = (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row;
         const uint32_t packed_bag_idx_L = (threadIdx.x / NumUint4LoadsPerRow) / bag_size_offset;
         bool load_idx_valid = packed_bag_idx_D < num_packed_bags_D && packed_bag_idx_L < num_packed_bags_L;
         {%- if is_rocm %}
         constexpr uint32_t kMaxRowUnroll = 4;
         constexpr uint32_t kRowUnroll = OutputRowsPerThread < kMaxRowUnroll ? OutputRowsPerThread : kMaxRowUnroll;
-
         #pragma unroll
         for (uint32_t outer_i = 0; outer_i < OutputRowsPerThread - OutputRowsPerThread % kRowUnroll; outer_i += kRowUnroll) {
           uint4 row_data_v[kRowUnroll];
@@ -168,8 +161,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
             idx_v[inner_i] = valid ? indices_[indices_starts[i] + L_start + input_row_idx] : -1;
             cache_idx_v[inner_i] = (!DeviceOnly && cache_valid) ? lxu_cache_locations[indices_starts[i] + L_start + input_row_idx] : -1;
           }
-
-
           #pragma unroll
           for (uint32_t inner_i = 0; inner_i < kRowUnroll; ++inner_i) {
             uint32_t i = outer_i + inner_i;
@@ -240,7 +231,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
       syncwarp();
       const int32_t uints_per_row = 4 * uint4_loads_per_row;
       const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
-      //  const uint32_t packed_bag_idx_D = num_packed_bags_D > 1 ? (threadIdx.x % NumUint4LoadsPerRow) / uint4_loads_per_row : 0;
       input_rows_in_flight = shfl_sync(input_rows_in_flight, packed_bag_idx_D * uint4_loads_per_row);
       constexpr int32_t max_indices_per_warp = kWarpSize / (MaxNum128BRows * 128 / sizeof(uint4));
       int32_t Ls_shfl[OutputRowsPerThread*max_indices_per_warp];
@@ -259,7 +249,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
                 continue;
               }
               const uint32_t* row = reinterpret_cast<const uint32_t*>(&buffers[warp_idx][i][input_row_idx + bag_size_offset *k][0]);
-
               // const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
               // scale and bias are at the beginning of each row.
               // rationale: have scale/shift at start since these get loaded first
@@ -337,15 +326,11 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
               {% endif %}
             }
           }
-                
-        // }
-
         {% if not nobag %}
         #pragma unroll OutputRowsPerThread
         for (uint32_t i = 0; i < OutputRowsPerThread; ++i) {
           const int32_t num_stores_with_padding_per_row = 4 * uint4_loads_per_row; 
           const int32_t packed_bag_idx_D = threadIdx.x / num_stores_with_padding_per_row;
-        //   for(uint32_t k = 0; k < num_packed_bags_L ; ++k){
           uint32_t b = min(static_cast<uint32_t>(bb * num_packed_bags * OutputRowsPerThread + i * num_packed_bags + k*num_packed_bags_D + packed_bag_idx_D), static_cast<uint32_t>(B - 1));
           const float inv_L = (mean_pooling &&Ls_shfl[k*OutputRowsPerThread+i] != 0) ? static_cast<float>(1.0) / Ls_shfl[k*OutputRowsPerThread+i] : static_cast<float>(1.0);
 
