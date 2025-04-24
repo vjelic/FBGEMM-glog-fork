@@ -174,7 +174,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                 )
                 for (E, D, M, W_TY) in zip(Es, Ds, managed, weights_ty_list)
             ],
-            Ls = L,
+            Ls=L,
             output_dtype=output_dtype,
             device=torch.cuda.current_device(),
         )
@@ -209,7 +209,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                     )
                     for (E, D, M, W_TY) in zip(Es, Ds, managed, weights_ty_list)
                 ],
-                Ls = L,
+                Ls=L,
                 output_dtype=SparseType.FP32,
                 device=torch.cuda.current_device(),
             )
@@ -701,7 +701,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                 )
                 for (E, D) in zip(Es, Ds)
             ],
-            Ls = L,
+            Ls=L,
             index_remapping=index_remapping,
             use_array_for_index_remapping=use_array_for_index_remapping,
             pruning_hash_load_factor=pruning_hash_load_factor,
@@ -709,7 +709,7 @@ class NBitFowardTest(NBitFowardTestCommon):
         cc_ref.fill_random_weights()
         cc = IntNBitTableBatchedEmbeddingBagsCodegen(
             [("", E, D, weights_ty, M) for (E, D, M) in zip(Es, Ds, managed)],
-            Ls = L,
+            Ls=L,
             cache_algorithm=cache_algorithm,
             cache_assoc=associativity,
             index_remapping=index_remapping,
@@ -783,7 +783,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                 )
                 for H in T_H
             ],
-            Ls = L,
+            Ls=L,
             pooling_mode=pooling_mode,
             device="cpu",
             output_dtype=nbit_weights_ty,
@@ -930,7 +930,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                 )
                 for H in T_H
             ],
-            Ls = L,
+            Ls=L,
             pooling_mode=pooling_mode,
             device="cpu",
             output_dtype=nbit_weights_ty,
@@ -948,7 +948,7 @@ class NBitFowardTest(NBitFowardTestCommon):
                 )
                 for H in T_H
             ],
-            Ls = L,
+            Ls=L,
             pooling_mode=pooling_mode,
             device="cpu",
             output_dtype=output_dtype,
