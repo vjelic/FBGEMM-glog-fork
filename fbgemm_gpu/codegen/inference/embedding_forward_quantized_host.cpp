@@ -100,7 +100,7 @@ void process_uvm_cache_stats(
     const bool gather_uvm_stats,
     const Tensor& uvm_cache_stats,
     const bool populate_uvm_stats) {
-if (gather_uvm_stats) {
+  if (gather_uvm_stats) {
     static std::mutex cache_mutex;
 
     // uvm_cache_stats_counters is a vector of size 4, storing the cumulated
@@ -118,8 +118,8 @@ if (gather_uvm_stats) {
     auto uvm_cache_stats_cpu = uvm_cache_stats.cpu();
     auto* uvm_cache_stats_ptr = uvm_cache_stats_cpu.data_ptr<int32_t>();
     if (uvm_cache_stats_ptr[1] > 0) {
-    // Report cache stats in per-mille.
-    {
+      // Report cache stats in per-mille.
+      {
         // Add cache stats values into the culmulated variables.
         std::lock_guard<std::mutex> guard(cache_mutex);
         std::transform(
@@ -132,44 +132,44 @@ if (gather_uvm_stats) {
         // Calculate cache related ratios based on the cumulated numbers and
         // push them into the counter pools.
         if (populate_uvm_stats && uvm_cache_stats_counters[0] > 0) {
-        const double unique_rate =
-            static_cast<double>(uvm_cache_stats_counters[1]) /
-            uvm_cache_stats_counters[0] * 1000;
-        const double unique_miss_rate =
-            static_cast<double>(uvm_cache_stats_counters[2]) /
-            uvm_cache_stats_counters[0] * 1000;
-        const double conflict_unique_miss_rate =
-            static_cast<double>(uvm_cache_stats_counters[3]) /
-            uvm_cache_stats_counters[0] * 1000;
-        const double conflict_miss_rate =
-            static_cast<double>(uvm_cache_stats_counters[4]) /
-            uvm_cache_stats_counters[0] * 1000;
-        // total # misses = unique misses - conflict_unique_misses + conflict
-        // misses.
-        const double total_miss_rate =
-            static_cast<double>(
-                uvm_cache_stats_counters[2] - uvm_cache_stats_counters[3] +
-                uvm_cache_stats_counters[4]) /
-            uvm_cache_stats_counters[0] * 1000;
+          const double unique_rate =
+              static_cast<double>(uvm_cache_stats_counters[1]) /
+              uvm_cache_stats_counters[0] * 1000;
+          const double unique_miss_rate =
+              static_cast<double>(uvm_cache_stats_counters[2]) /
+              uvm_cache_stats_counters[0] * 1000;
+          const double conflict_unique_miss_rate =
+              static_cast<double>(uvm_cache_stats_counters[3]) /
+              uvm_cache_stats_counters[0] * 1000;
+          const double conflict_miss_rate =
+              static_cast<double>(uvm_cache_stats_counters[4]) /
+              uvm_cache_stats_counters[0] * 1000;
+          // total # misses = unique misses - conflict_unique_misses + conflict
+          // misses.
+          const double total_miss_rate =
+              static_cast<double>(
+                  uvm_cache_stats_counters[2] - uvm_cache_stats_counters[3] +
+                  uvm_cache_stats_counters[4]) /
+              uvm_cache_stats_counters[0] * 1000;
 
-        STATS_tbe_uvm_cache_unique_rate.addValue(unique_rate);
-        STATS_tbe_uvm_cache_unique_miss_rate.addValue(unique_miss_rate);
-        STATS_tbe_uvm_cache_conflict_unique_miss_rate.addValue(
-            conflict_unique_miss_rate);
-        STATS_tbe_uvm_cache_conflict_miss_rate.addValue(conflict_miss_rate);
-        STATS_tbe_uvm_cache_total_miss_rate.addValue(total_miss_rate);
+          STATS_tbe_uvm_cache_unique_rate.addValue(unique_rate);
+          STATS_tbe_uvm_cache_unique_miss_rate.addValue(unique_miss_rate);
+          STATS_tbe_uvm_cache_conflict_unique_miss_rate.addValue(
+              conflict_unique_miss_rate);
+          STATS_tbe_uvm_cache_conflict_miss_rate.addValue(conflict_miss_rate);
+          STATS_tbe_uvm_cache_total_miss_rate.addValue(total_miss_rate);
 
-        // Fill all the elements of the vector uvm_cache_stats_counters as 0
-        // to zero out the cumulated counters.
-        std::fill(
-            uvm_cache_stats_counters.begin(),
-            uvm_cache_stats_counters.end(),
-            0);
+          // Fill all the elements of the vector uvm_cache_stats_counters as 0
+          // to zero out the cumulated counters.
+          std::fill(
+              uvm_cache_stats_counters.begin(),
+              uvm_cache_stats_counters.end(),
+              0);
         }
-    }
+      }
     }
     if (call_count % FLAGS_tbe_uvm_cache_stats_print_out_period == 0) {
-    LOG(INFO) << "$Stats [" << signature << "] "
+      LOG(INFO) << "$Stats [" << signature << "] "
                 << " hash_size: " << total_cache_hash_size
                 << ", call_count: " << call_count
                 << ", N_requested_indices: " << uvm_cache_stats_ptr[1]
@@ -178,7 +178,7 @@ if (gather_uvm_stats) {
                 << ", N_conflict_unique_misses: " << uvm_cache_stats_ptr[4]
                 << ", N_conflict_misses: " << uvm_cache_stats_ptr[5];
     }
-}
+  }
 }
 
 } // namespace
@@ -307,10 +307,10 @@ Tensor int_nbit_split_embedding_codegen_lookup_function(
     std::optional<int64_t> max_float8_D,
     std::optional<int64_t> fp8_exponent_bits,
     std::optional<int64_t> fp8_exponent_bias) {
-if (offsets.scalar_type() != indices.scalar_type()) {
+  if (offsets.scalar_type() != indices.scalar_type()) {
     offsets = offsets.toType(indices.scalar_type());
-}
-if (static_cast<PoolingMode>(pooling_mode) == PoolingMode::NONE) {
+  }
+  if (static_cast<PoolingMode>(pooling_mode) == PoolingMode::NONE) {
     std::vector<int64_t> max_D_list{
         max_int2_D,
         max_int4_D,
@@ -348,8 +348,8 @@ if (static_cast<PoolingMode>(pooling_mode) == PoolingMode::NONE) {
         fp8_exponent_bits ? *fp8_exponent_bits : -1,
         fp8_exponent_bias ? *fp8_exponent_bias : -1
         );
-}
-if (!indice_weights || indice_weights->numel() == 0) {
+  }
+  if (!indice_weights || indice_weights->numel() == 0) {
     return int_nbit_split_embedding_codegen_forward_unweighted_cuda(
         dev_weights,
         uvm_weights,
@@ -380,41 +380,41 @@ if (!indice_weights || indice_weights->numel() == 0) {
         fp8_exponent_bits ? *fp8_exponent_bits : -1,
         fp8_exponent_bias ? *fp8_exponent_bias : -1
         );
-}
-// Force casting indice_weights to float (doing this in the backend to avoid
-// JIT issue)
-const auto indice_weights_ = indice_weights->to(at::kFloat);
-return int_nbit_split_embedding_codegen_forward_weighted_cuda(
-    dev_weights,
-    uvm_weights,
-    weights_placements,
-    weights_offsets,
-    weights_tys,
-    D_offsets,
-    total_D,
-    max_int2_D,
-    max_int4_D,
-    max_int8_D,
-    max_float16_D,
-    max_float32_D,
-    INT2_max_ls,
-    INT4_max_ls,
-    INT8_max_ls,
-    FP8_max_ls,
-    FP16_max_ls,
-    FP32_max_ls,
-    indices,
-    offsets,
-    pooling_mode,
-    row_alignment ? *row_alignment : 16,
-    indice_weights_,
-    output_dtype,
-    lxu_cache_weights.value_or(at::empty({0, 0}, at::kByte)),
-    lxu_cache_locations.value_or(at::empty({0}, at::kInt)),
-    max_float8_D ? *max_float8_D : 0,
-    fp8_exponent_bits ? *fp8_exponent_bits : -1,
-    fp8_exponent_bias ? *fp8_exponent_bias : -1
-    );
+  }
+  // Force casting indice_weights to float (doing this in the backend to avoid
+  // JIT issue)
+  const auto indice_weights_ = indice_weights->to(at::kFloat);
+  return int_nbit_split_embedding_codegen_forward_weighted_cuda(
+      dev_weights,
+      uvm_weights,
+      weights_placements,
+      weights_offsets,
+      weights_tys,
+      D_offsets,
+      total_D,
+      max_int2_D,
+      max_int4_D,
+      max_int8_D,
+      max_float16_D,
+      max_float32_D,
+      INT2_max_ls,
+      INT4_max_ls,
+      INT8_max_ls,
+      FP8_max_ls,
+      FP16_max_ls,
+      FP32_max_ls,
+      indices,
+      offsets,
+      pooling_mode,
+      row_alignment ? *row_alignment : 16,
+      indice_weights_,
+      output_dtype,
+      lxu_cache_weights.value_or(at::empty({0, 0}, at::kByte)),
+      lxu_cache_locations.value_or(at::empty({0}, at::kInt)),
+      max_float8_D ? *max_float8_D : 0,
+      fp8_exponent_bits ? *fp8_exponent_bits : -1,
+      fp8_exponent_bias ? *fp8_exponent_bias : -1
+      );
 }
 
 ///@ingroup embedding-cuda
@@ -466,19 +466,19 @@ Tensor int_nbit_split_embedding_uvm_caching_codegen_lookup_function(
     // lxu_state: meta info for replacement (time stamp for LRU).
     // 2D tensor: # sets x assoc. dtype=int64.
     std::optional<Tensor> lxu_state) {
-// This function does prefetch() and foward() methods in
-// IntNBitTableBatchedEmbeddingBagsCodegen, but run them in sequence.
-// Prefetching of multiple batches of requests is not yet supported.
+  // This function does prefetch() and foward() methods in
+  // IntNBitTableBatchedEmbeddingBagsCodegen, but run them in sequence.
+  // Prefetching of multiple batches of requests is not yet supported.
 
 #ifdef FBCODE_CAFFE2
-static std::mutex uvm_cache_stats_mutex;
-static std::unordered_map<size_t, int64_t> tbe_call_count;
+  static std::mutex uvm_cache_stats_mutex;
+  static std::unordered_map<size_t, int64_t> tbe_call_count;
 #endif
-static std::atomic<int64_t> time_stamp = 0; // for LRU replacement.
-int64_t curr_time_stamp = -1;
+  static std::atomic<int64_t> time_stamp = 0; // for LRU replacement.
+  int64_t curr_time_stamp = -1;
 
-// UVM_CACHING if lxu_cache_weights are valid.
-if (lxu_cache_weights.has_value() && lxu_cache_weights.value().numel() > 0) {
+  // UVM_CACHING if lxu_cache_weights are valid.
+  if (lxu_cache_weights.has_value() && lxu_cache_weights.value().numel() > 0) {
     curr_time_stamp = ++time_stamp; // increment everytime it's called.
     // Use the copied curr_time_stamp so that we use a consistent value even
     // if it's changed in other threads.
@@ -506,31 +506,31 @@ if (lxu_cache_weights.has_value() && lxu_cache_weights.value().numel() > 0) {
     size_t signature = reinterpret_cast<size_t>(uvm_weights.data_ptr());
     int64_t call_count = 0;
     {
-    std::lock_guard<std::mutex> guard(uvm_cache_stats_mutex);
-    if (tbe_call_count.count(signature) == 0) {
+      std::lock_guard<std::mutex> guard(uvm_cache_stats_mutex);
+      if (tbe_call_count.count(signature) == 0) {
         tbe_call_count[signature] = 0;
-    }
-    tbe_call_count[signature]++;
-    call_count = tbe_call_count[signature];
+      }
+      tbe_call_count[signature]++;
+      call_count = tbe_call_count[signature];
 
-    // populate_uvm_stats is used as an indicator whether to push the cache
-    // related ratios caclulated from cumulative counters into the cache stats
-    // pools. We want to wait until all the knwon TBE ops' data been included
-    // to get the weighted ratios.
-    for (const auto& [sig, count] : tbe_call_count) {
+      // populate_uvm_stats is used as an indicator whether to push the cache
+      // related ratios caclulated from cumulative counters into the cache stats
+      // pools. We want to wait until all the knwon TBE ops' data been included
+      // to get the weighted ratios.
+      for (const auto& [sig, count] : tbe_call_count) {
         if (count < call_count) {
-        populate_uvm_stats = false;
-        break;
+          populate_uvm_stats = false;
+          break;
         }
-    }
+      }
     }
 
     if (FLAGS_tbe_uvm_cache_stat_report > 0 &&
         call_count % FLAGS_tbe_uvm_cache_stat_report == 0) {
-    gather_uvm_stats = true;
-    uvm_cache_stats = at::zeros(
-        {kUvmCacheStatsSize},
-        lxu_cache_weights.value().options().dtype(at::kInt));
+      gather_uvm_stats = true;
+      uvm_cache_stats = at::zeros(
+          {kUvmCacheStatsSize},
+          lxu_cache_weights.value().options().dtype(at::kInt));
     }
 #endif
 
@@ -565,13 +565,13 @@ if (lxu_cache_weights.has_value() && lxu_cache_weights.value().numel() > 0) {
 
 #ifdef FBCODE_CAFFE2
     if (FLAGS_tbe_uvm_cache_enforced_misses > 0) {
-    // Override some lxu_cache_locations (N for every 256 indices) with cache
-    // miss to enforce access to UVM.
-    lxu_cache_locations = emulate_cache_miss(
-        lxu_cache_locations.value(),
-        FLAGS_tbe_uvm_cache_enforced_misses,
-        gather_uvm_stats,
-        uvm_cache_stats);
+      // Override some lxu_cache_locations (N for every 256 indices) with cache
+      // miss to enforce access to UVM.
+      lxu_cache_locations = emulate_cache_miss(
+          lxu_cache_locations.value(),
+          FLAGS_tbe_uvm_cache_enforced_misses,
+          gather_uvm_stats,
+          uvm_cache_stats);
     }
 
     process_uvm_cache_stats(
@@ -582,39 +582,39 @@ if (lxu_cache_weights.has_value() && lxu_cache_weights.value().numel() > 0) {
         uvm_cache_stats,
         populate_uvm_stats);
 #endif
-}
+  }
 
-return int_nbit_split_embedding_codegen_lookup_function(
-    dev_weights,
-    uvm_weights,
-    weights_placements,
-    weights_offsets,
-    weights_tys,
-    D_offsets,
-    total_D,
-    max_int2_D,
-    max_int4_D,
-    max_int8_D,
-    max_float16_D,
-    max_float32_D,
-    INT2_max_ls,
-    INT4_max_ls,
-    INT8_max_ls,
-    FP8_max_ls,
-    FP16_max_ls,
-    FP32_max_ls,
-    indices,
-    offsets,
-    pooling_mode,
-    indice_weights,
-    output_dtype,
-    lxu_cache_weights,
-    lxu_cache_locations,
-    row_alignment,
-    max_float8_D,
-    fp8_exponent_bits,
-    fp8_exponent_bias
-    );
+  return int_nbit_split_embedding_codegen_lookup_function(
+      dev_weights,
+      uvm_weights,
+      weights_placements,
+      weights_offsets,
+      weights_tys,
+      D_offsets,
+      total_D,
+      max_int2_D,
+      max_int4_D,
+      max_int8_D,
+      max_float16_D,
+      max_float32_D,
+      INT2_max_ls,
+      INT4_max_ls,
+      INT8_max_ls,
+      FP8_max_ls,
+      FP16_max_ls,
+      FP32_max_ls,
+      indices,
+      offsets,
+      pooling_mode,
+      indice_weights,
+      output_dtype,
+      lxu_cache_weights,
+      lxu_cache_locations,
+      row_alignment,
+      max_float8_D,
+      fp8_exponent_bits,
+      fp8_exponent_bias
+      );
 }
 
 ///@ingroup embedding-cuda
@@ -632,12 +632,12 @@ Tensor pruned_array_lookup_cuda(
     Tensor index_remappings_offsets);
 
 TORCH_LIBRARY_FRAGMENT(fbgemm, m) {
-DISPATCH_TO_CUDA(
-    "int_nbit_split_embedding_codegen_lookup_function",
-    int_nbit_split_embedding_codegen_lookup_function);
-DISPATCH_TO_CUDA(
-    "int_nbit_split_embedding_uvm_caching_codegen_lookup_function",
-    int_nbit_split_embedding_uvm_caching_codegen_lookup_function);
-DISPATCH_TO_CUDA("pruned_hashmap_lookup", pruned_hashmap_lookup_cuda);
-DISPATCH_TO_CUDA("pruned_array_lookup", pruned_array_lookup_cuda);
+  DISPATCH_TO_CUDA(
+      "int_nbit_split_embedding_codegen_lookup_function",
+      int_nbit_split_embedding_codegen_lookup_function);
+  DISPATCH_TO_CUDA(
+      "int_nbit_split_embedding_uvm_caching_codegen_lookup_function",
+      int_nbit_split_embedding_uvm_caching_codegen_lookup_function);
+  DISPATCH_TO_CUDA("pruned_hashmap_lookup", pruned_hashmap_lookup_cuda);
+  DISPATCH_TO_CUDA("pruned_array_lookup", pruned_array_lookup_cuda);
 }
