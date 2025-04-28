@@ -59,7 +59,7 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
   {% else %}
   const int32_t B = (offsets.size(0) - 1) / T;
   {% endif %}
-  const int32_t bb_t = blockIdx.x * blockDim.y + threadIdx.y;
+  const auto bb_t = blockIdx.x * blockDim.y + threadIdx.y;
   if (bb_t >= fd_B.D() * T) {
     return;
   }
@@ -249,7 +249,6 @@ __global__ void {{ emb_weight_type.enum_name }}_split_embedding{{ "_nobag" if no
                 continue;
               }
               const uint32_t* row = reinterpret_cast<const uint32_t*>(&buffers[warp_idx][i][input_row_idx + bag_size_offset *k][0]);
-              // const int32_t packed_bag_idx_D = (threadIdx.x / uints_per_row) % num_packed_bags_D;
               // scale and bias are at the beginning of each row.
               // rationale: have scale/shift at start since these get loaded first
               // and then broadcasted around so it might speed up the first cache miss.
