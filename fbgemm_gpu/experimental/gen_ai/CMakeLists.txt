@@ -35,6 +35,19 @@ if(FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_CUDA)
   list(APPEND experimental_gen_ai_cpp_source_files_gpu ${tmp_list_gpu})
 endif()
 
+if(FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_ROCM)
+  file(GLOB tmp_list_cpu
+    src/comm/*.cpp
+    src/gather_scatter/*.cpp)
+
+  file(GLOB tmp_list_gpu
+    src/comm/*.cu
+    src/gather_scatter/*.cu)
+
+  list(APPEND experimental_gen_ai_cpp_source_files_cpu ${tmp_list_cpu})
+  list(APPEND experimental_gen_ai_cpp_source_files_gpu ${tmp_list_gpu})
+endif()
+
 # Set the source file for FB only CPP
 if(USE_FB_ONLY AND (FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_CUDA))
   file(GLOB fb_only_sources_cpu
@@ -55,13 +68,13 @@ file(GLOB_RECURSE experimental_gen_ai_cpp_source_files_cuda
   src/quantize/fast_gemv/**/*.cu
   src/quantize/fast_gemv/**/*.cuh)
 
-# HIP-specific sources
-file(GLOB_RECURSE experimental_gen_ai_cpp_source_files_hip
-  src/gemm/gemm.cpp
-  src/gemm/ck_extensions.hip
-  src/quantize/ck_extensions/*.hip
-  src/quantize/ck_extensions/**/*.hip)
-
+## HIP-specific sources
+#file(GLOB_RECURSE experimental_gen_ai_cpp_source_files_hip
+#  src/gemm/gemm.cpp
+#  src/gemm/ck_extensions.hip
+#  src/quantize/ck_extensions/*.hip
+#  src/quantize/ck_extensions/**/*.hip)
+#
 
 ################################################################################
 # Build Shared Library

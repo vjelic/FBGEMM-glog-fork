@@ -272,7 +272,7 @@ if(FBGEMM_BUILD_TARGET STREQUAL BUILD_TARGET_GENAI)
   add_subdirectory(experimental/gen_ai)
 
   # Add experimental packaging example
-  add_subdirectory(experimental/example)
+  #add_subdirectory(experimental/example)
 
   # Add Triton GEMM (GenAI) kernels if non-CPU build
   add_subdirectory(experimental/gemm)
