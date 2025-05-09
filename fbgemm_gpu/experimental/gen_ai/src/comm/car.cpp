@@ -224,7 +224,7 @@ void nccl_allreduce(
     default:
       TORCH_CHECK(false, "unsupported type: ", src.scalar_type());
   }
-#if defined(USE_ROCM)
+#if 0 //defined(USE_ROCM)
   if (bias) {
     C10D_NCCL_CHECK(
         ncclAllReduceWithBias(

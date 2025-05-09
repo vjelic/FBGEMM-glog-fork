@@ -43,6 +43,19 @@ if(FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_CUDA)
   list(APPEND experimental_gen_ai_cpp_source_files_gpu ${tmp_list_gpu} ${tmp_list_gpu2})
 endif()
 
+if(FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_ROCM)
+  file(GLOB tmp_list_cpu
+    src/comm/*.cpp
+    src/gather_scatter/*.cpp)
+
+  file(GLOB tmp_list_gpu
+    src/comm/*.cu
+    src/gather_scatter/*.cu)
+
+  list(APPEND experimental_gen_ai_cpp_source_files_cpu ${tmp_list_cpu})
+  list(APPEND experimental_gen_ai_cpp_source_files_gpu ${tmp_list_gpu})
+endif()
+
 # Include FB-internal code into the build
 if(USE_FB_ONLY
   AND (FBGEMM_BUILD_VARIANT STREQUAL BUILD_VARIANT_CUDA)
