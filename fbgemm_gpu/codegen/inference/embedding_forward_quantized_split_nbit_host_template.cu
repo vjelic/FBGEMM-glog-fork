@@ -52,7 +52,6 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
   const int fp8_exponent_bias,
   {%- endif %}
   const int32_t num_packed_bags,
-  const int32_t num_packed_bags_D,
   const int32_t num_packed_bags_L,
   pta::PackedTensorAccessor32<output_t, 2, at::RestrictPtrTraits> output, // [B][total_D],
   const pta::PackedTensorAccessor64<uint8_t, 2, at::RestrictPtrTraits> lxu_cache_weights,
@@ -105,7 +104,6 @@ __global__ void {{ type_map[emb_weight_type].enum_name }}_split_embedding{{ "_no
         fp8_exponent_bias, \
         {%- endif %}
         num_packed_bags, \
-        num_packed_bags_D, \
         num_packed_bags_L, \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, output, output_t, 2, 32), \
         MAKE_PTA_WITH_NAME(func_name_{{ emb_weight_type }}, lxu_cache_weights, uint8_t, 2, 64), \
