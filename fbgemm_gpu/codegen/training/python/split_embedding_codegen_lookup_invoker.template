@@ -374,6 +374,7 @@ def invoke(
         indice_weights=common_args.indice_weights,
         feature_requires_grad=common_args.feature_requires_grad,
         output_dtype=common_args.output_dtype,
+        mixed_D=common_args.mixed_D,
         {%- if ssd %}
         ssd_tensors=ssd_tensors,
         {%- endif %}

@@ -1692,6 +1692,7 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
             learning_rate_tensor=self.learning_rate_tensor,
             info_B_num_bits=self.info_B_num_bits,
             info_B_mask=self.info_B_mask,
+            mixed_D=True,
         )
 
         self.timesteps_prefetched.pop(0)
