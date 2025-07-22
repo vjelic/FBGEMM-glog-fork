@@ -655,6 +655,16 @@ Tensor {{ embedding_cuda_op }}(
 
     CUDA_DEVICE_GUARD(dev_weights);
 
+    #ifdef USE_ROCM
+        if (!rocm::is_supported_cdna()) {
+            TORCH_WARN_ONCE("Running on non-CDNA architecture. Performance may be suboptimal.");
+        }
+        else {
+            // Ensure we're running on a supported CDNA architecture (including MI350)
+            TORCH_WARN_ONCE("Running on CDNA architecture");
+            }
+    #endif
+
     {%- if nobag and not is_index_select %}
     auto max_D = D;
     {%- endif %}
@@ -1196,8 +1206,9 @@ Tensor {{ embedding_cuda_op }}(
 
                     const auto supported_weights_type = dev_weights.scalar_type() == at::ScalarType::Half
                                                       || dev_weights.scalar_type() == at::ScalarType::Float;
+                    std::cout<<use_hip_kernel <<" "<< supported_weights_type << " " << mixed_D << " " << rocm::is_supported_cdna() << std::endl;
 
-                    if (use_hip_kernel && supported_weights_type && !mixed_D && rocm::is_supported_cdna())
+                    if (use_hip_kernel && supported_weights_type && rocm::is_supported_cdna())
                     {
                         constexpr int segments_per_workgroup = 4;
                         {%- for kDimSize in [64, 128, 160, 192, 256] %}
