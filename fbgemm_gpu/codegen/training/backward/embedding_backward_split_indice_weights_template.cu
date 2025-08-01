@@ -23,6 +23,11 @@
 #include "fbgemm_gpu/utils/assert_macros.h"
 #include "fbgemm_gpu/utils/kernel_launcher.cuh"
 
+
+{%- if is_rocm %}
+#include "fbgemm_gpu/rocm/cdna_guard.h"
+{%- endif %}
+
 using Tensor = at::Tensor;
 using namespace fbgemm_gpu;
 
@@ -183,13 +188,13 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
         // Load gradients
         // TODO: Maybe using a combination of shared memory and registers is
         // better for performance
-        #pragma unroll kFixedMaxVecsPerThread
+        #pragma unroll 
         for (int32_t vec = 0; vec < kFixedMaxVecsPerThread && {{ d }} < D; ++vec) {
             const int32_t d = {{ d }};
             Vec4TAcc<grad_t> go(grad_output_ + d);
             grad_out[vec] = go;
         }
-
+        
         for (int32_t l_start = 0; l_start < L; l_start += kWarpSize) {
             auto l = l_start + threadIdx.x;
             const auto offset_idx = l < L
@@ -220,7 +225,7 @@ __global__ __launch_bounds__(kForwardMaxThreads) void
                 [[maybe_unused]] const auto weight_row =
                     WeightRowAccessor<emb_t, at::acc_type<cache_t, true>>(&weights[offset_idx_j], D);
 
-                #pragma unroll kFixedMaxVecsPerThread
+                
                 for (int32_t vec = 0;
                     vec < kFixedMaxVecsPerThread && {{ d }} < D;
                     ++vec) {
@@ -360,6 +365,17 @@ Tensor {{ mdesc }}_embedding_codegen_grad_indice_weights{{ vdesc }}_cuda(
 
     CUDA_DEVICE_GUARD(dev_weights);
 
+
+
+    #ifdef USE_ROCM
+        if (!rocm::is_supported_cdna()) {
+            TORCH_WARN_ONCE("Running on non-CDNA architecture. Performance may be suboptimal.");
+        }
+        else {
+            // Ensure we're running on a supported CDNA architecture (including MI350)
+            TORCH_WARN_ONCE("Running on CDNA architecture");
+        }
+    #endif
     const auto T = D_offsets.size(0) - 1;
     TORCH_CHECK_GT(T, 0);
     // offsets = [B x T  + 1]
@@ -414,8 +430,8 @@ Tensor {{ mdesc }}_embedding_codegen_grad_indice_weights{{ vdesc }}_cuda(
                         cache_t,
                         index_t,
                         kFixedMaxVecsPerThread>),
-                    div_round_up(total_B, kForwardMaxThreads / kWarpSize),
-                    dim3(kWarpSize, kForwardMaxThreads / kWarpSize),
+                    div_round_up(total_B, kForwardMaxThreads / (kWarpSize/2)),
+                    dim3(kWarpSize, kForwardMaxThreads / (kWarpSize)),
                     0,
                     at::cuda::getCurrentCUDAStream(),
                     PTA_B(grad_output_reshaped, grad_t, 2, 64),
