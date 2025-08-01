@@ -165,13 +165,27 @@ batch_index_select_dim0_codegen_backward_kernel_cta_per_row(
     {{ args.split_kernel_args | replace_pta_namespace() | join(",\n    ") }}
     {%- endif %}
 ) {
-#ifdef FBGEMM_USE_SUBWARP_SHUFFLE
-  const unsigned int shfl_sync_mask =
+
+
+
+#if defined(USE_ROCM)
+    #ifdef FBGEMM_USE_SUBWARP_SHUFFLE
+    const unsigned long long shfl_sync_mask =
+        ((1ULL << kThreadGroupSize) - 1) <<
+        (threadIdx.y % (kWarpSize / kThreadGroupSize) * kThreadGroupSize);
+    #else
+        const unsigned int shfl_sync_mask = 0xffffffffffffffffu;
+    #endif 
+#else
+    #ifdef FBGEMM_USE_SUBWARP_SHUFFLE
+    const unsigned int shfl_sync_mask =
         ((1L << kThreadGroupSize) - 1) <<
         (threadIdx.y % (kWarpSize / kThreadGroupSize) * kThreadGroupSize);
-#else
-  const unsigned int shfl_sync_mask = 0xffffffffu;
+    #else
+        const unsigned int shfl_sync_mask = 0xffffffffu;
+    #endif   
 #endif
+
   constexpr int VEC_WIDTH = 4;
   constexpr auto kIsInt8 = std::is_same<emb_t, uint8_t>::value;
   int32_t T = weights_offsets.size(0);
